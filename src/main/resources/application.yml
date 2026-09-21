@@ -1,0 +1,158 @@
+spring:
+  application:
+    name: hagent
+
+  profiles:
+    # local 是私有配置（含密钥/密码），在 application-local.yml 中覆盖；
+    # 该文件已被 .gitignore 排除，不进仓库。
+    active: local
+
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+server:
+  port: 8123
+  servlet:
+    # 统一 URL 前缀，便于将来做网关转发与前端联调区分
+    context-path: /api
+  tomcat:
+    connection-timeout: 60s
+
+# 异步请求超时。多步 Agent / RAG 检索 / PPT 生成动辄超过 Tomcat 默认的 30s，
+# 此值过小会导致流式接口被静默掐断（前端表现为"连接中断"或收到 500）。
+# 注意：SseEmitter 自身也带超时，两者取较小值生效，必须协调，不能只调一个。
+spring.mvc.async.request-timeout: 600s
+
+# ============================== AI 配置 ==============================
+spring.ai:
+  # ★★★ 能力归属声明（本项目最关键的一处配置）★★★
+  # 同时引入 deepseek 与 ollama 两个 starter 时，两边的自动装配**都会**创建
+  # ChatModel Bean，导致启动失败。实测证据：
+  #   expected single matching bean but found 2: deepSeekChatModel, ollamaChatModel
+  # 注意：ollama.init.chat.pull-model-strategy=never 只阻止"自动拉取模型"，
+  #       不阻止创建 ChatModel Bean —— 两者不是一回事。
+  # 正解是显式声明能力分工，而不是用 @Primary 打补丁。
+  model:
+    chat: deepseek
+    embedding: ollama
+
+  # ---------- chat：DeepSeek 云端 ----------
+  # ★ 模型名必须与账号实际可用的一致。实测该账号 /models 只返回：
+  #     deepseek-flash · deepseek-v4-pro
+  # 而 "deepseek-chat" / "deepseek-reasoner" 这类名字【不存在】——
+  # 更危险的是：请求不存在的模型名时，API 会**静默降级**到 deepseek-flash
+  # 并且不报错（实测请求 deepseek-reasoner，返回的 model 字段是 deepseek-flash）。
+  # 这是"约定写错却静默失效"的典型，必须靠探针核对"实际返回的模型名"兜住。
+  #
+  # 本账号选定 deepseek-flash：它本身就是推理模型（返回 reasoning_content 字段），
+  # 性价比高于 v4-pro。多步 Agent 的每一步都要重新决策，token 消耗会被放大，
+  # 所以"单步便宜"比"单步最强"更重要。
+  deepseek:
+    api-key: ${DEEPSEEK_API_KEY:}
+    chat:
+      options:
+        model: deepseek-flash
+        # ★ 这里刻意【不设 temperature】，原因是一条实测出来的静默行为：
+        #   deepseek-flash 是推理模型，开启推理（thinking）时服务端会忽略采样参数。
+        #   启动日志给出的原文：
+        #     Thinking mode does not support the temperature parameter(s).
+        #     ... setting these parameters will not trigger an error but will also have no effect.
+        #   —— 即"配了不报错，但完全不生效"。这类"配了没用"的参数最有欺骗性：
+        #      你会以为自己在控制随机性，其实什么都没控制。
+        #   所以选择：要么不配（承认它不生效），要么显式关掉 thinking 才配。
+        #   本项目选前者 —— Agent 的稳定性靠"推理 + 结构化输出约束"来保证，
+        #   而不是靠一个其实被忽略的 temperature。
+        # 推理投入档位。枚举只有 HIGH 与 MAX（不用 MAX：更慢更贵，收益不匹配）。
+        #
+        # ★ 一个真实的"约定不一致"陷阱，已实测：
+        #   直接调 HTTP API 时，reasoning_effort 只接受**小写** "high"；
+        #   传大写 "HIGH" 会返回 HTTP 422 Unprocessable Entity。
+        #   而 Spring AI 的枚举字面量是大写的 HIGH —— 那它序列化出去是哪个？
+        #   用 javap -v 读常量池可确认它带了 @JsonProperty：
+        #     ReasoningEffort.HIGH -> @JsonProperty("high")
+        #     ReasoningEffort.MAX  -> @JsonProperty("max")
+        #   所以最终发出去的是小写，与 API 期望一致。
+        #   （这条不是猜的：注解值 "high"/"max" 就在字节码常量池里。）
+        reasoning-effort: HIGH
+
+  # ---------- embedding：Ollama 本地（1024 维）----------
+  # 为什么 embedding 放本地：RAG 入库要对成百上千个切片做向量化，调用量远大于对话；
+  # 本地 mxbai-embed-large 已够用且零边际成本。
+  # 补充事实：DeepSeek 官方不提供 embedding API，所以这一层必须换实现。
+  ollama:
+    base-url: http://localhost:11434
+    embedding:
+      options:
+        model: mxbai-embed-large:latest
+
+  # ---------- 向量库：pgvector ----------
+  # 实测事实：spring-ai-autoconfigure-vector-store-pgvector 的配置元数据里
+  # 没有任何数据源参数，它复用 Spring 全局 DataSource（本项目中是 MySQL）。
+  # 因此本项目显式装配自己的 pgVectorDataSource + PgVectorStore，
+  # 表名也用项目专属名，避免与其它项目同名表混淆。
+  vectorstore:
+    pgvector:
+      table-name: hagent_knowledge
+      schema-name: public
+      index-type: HNSW
+      distance-type: COSINE_DISTANCE
+      dimensions: 1024
+      initialize-schema: false
+
+# ============================== Hagent 自有配置 ==============================
+hagent:
+  # 启动探针。live-call=true 时会真调一次 chat 与 embedding，
+  # 拿到"模型真能用"的实测证据（成本极小）。
+  probe:
+    live-call: true
+
+  agent:
+    # Agent 循环最大步数，防止模型陷入死循环烧 token
+    max-steps: 20
+    executor:
+      core-pool-size: 4
+      max-pool-size: 16
+      queue-capacity: 100
+      thread-name-prefix: "hagent-agent-"
+      await-termination-seconds: 30
+
+  stream:
+    sse-timeout-ms: 600000
+    # 心跳间隔：长时间无业务事件时保活，防网关按 60s 空闲判定断连
+    heartbeat-interval-ms: 15000
+
+  web:
+    # CORS 白名单。刻意不用 allowedOriginPatterns("*") + allowCredentials 的组合，
+    # 那是反模式（等于对全网放开）。
+    allowed-origins:
+      - "http://localhost:5500"
+      - "http://127.0.0.1:5500"
+      - "http://localhost:8080"
+
+  memory:
+    chat:
+      # file | redis | mysql —— 条件装配切换，换实现只改这一行
+      type: file
+      file-dir: "${user.dir}/tmp/chat-memory"
+    long-term:
+      dir: "${user.dir}/tmp/agent-memory"
+
+  # pgvector 专用数据源。独立前缀，不与 spring.datasource（业务主库 MySQL）混用，
+  # 这是"spring.datasource 永远留给业务主库，其它库各用自有前缀"的落地。
+  vectorstore:
+    datasource:
+      url: jdbc:postgresql://localhost:5432/hagent
+      username: postgres
+      password: postgres
+      driver-class-name: org.postgresql.Driver
+      pool-name: HagentPgVectorPool
+      maximum-pool-size: 5
+
+# ============================== 日志 ==============================
+logging:
+  file:
+    name: "${user.dir}/logs/hagent.log"
+  level:
+    root: INFO
+    com.hagent: DEBUG

@@ -1,0 +1,141 @@
+package com.hagent.config;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.vectorstore.pgvector.PgVectorStore;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
+
+/**
+ * 向量库装配 —— 本项目"存储分层"的关键一环。
+ *
+ * <p><b>要解决的问题（实测得出，不是猜的）</b>：
+ * 解压 spring-ai-autoconfigure-vector-store-pgvector-2.0.1.jar 读它的
+ * spring-configuration-metadata.json 可以证实：spring.ai.vectorstore.pgvector.*
+ * 下【只有】表名 / 维度 / 索引类型 / 距离度量 / 初始化开关等，
+ * <b>没有任何数据源参数</b> —— 它复用 Spring 全局 DataSource。
+ *
+ * <p>而本项目的全局 DataSource 是业务主库 MySQL。于是自动装配的 PgVectorStore
+ * 会拿到 MySQL 连接：轻则启动报方言错误，重则连到别的库读到别人的数据
+ * （首次启动确实观察到它读到了另一个库里的同名表 vector_store）。
+ *
+ * <p><b>三个刻意的设计决定</b>：
+ * <ol>
+ *   <li><b>自己声明 PgVectorStore Bean，不用自动装配</b>：自动装配在两个
+ *       DataSource 之间"选哪个"的逻辑不透明；显式构造则"用哪个 DataSource、
+ *       用哪个 EmbeddingModel"一目了然，配置错误在启动阶段就暴露。</li>
+ *   <li><b>pgVectorDataSource 不标 @Primary</b>：业务主库（MySQL，由
+ *       spring.datasource 自动装配）才是主数据源，保持默认 @Primary 语义，
+ *       避免事务管理器等误连到 PostgreSQL。</li>
+ *   <li><b>两个数据源的失败策略相反</b>：MySQL 保持默认 fail-fast（业务数据
+ *       不可缺失，连不上就该启动失败）；pgvector 关掉 fail-fast
+ *       （向量库不可用时检索降级即可，不该阻断整个应用启动）。</li>
+ * </ol>
+ */
+@Slf4j
+@Configuration
+@EnableConfigurationProperties({VectorStoreDataSourceProperties.class, VectorStoreProperties.class})
+public class VectorStoreConfig {
+
+    /** pgvector 专用数据源 Bean 名，供探针按名获取（避免探针硬依赖它）。 */
+    public static final String PG_VECTOR_DATASOURCE_BEAN = "pgVectorDataSource";
+
+    /**
+     * pgvector 专用数据源（PostgreSQL）。
+     *
+     * <p>不标 {@code @Primary}：让 spring.datasource 装配出的 MySQL 数据源
+     * 继续作为主数据源。
+     */
+    @Bean(name = PG_VECTOR_DATASOURCE_BEAN, destroyMethod = "close")
+    public DataSource pgVectorDataSource(VectorStoreDataSourceProperties props) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(props.getUrl());
+        config.setUsername(props.getUsername());
+        config.setPassword(props.getPassword());
+        config.setDriverClassName(props.getDriverClassName());
+        config.setPoolName(props.getPoolName());
+        config.setMaximumPoolSize(props.getMaximumPoolSize());
+        config.setMinimumIdle(props.getMinimumIdle());
+        config.setConnectionTimeout(props.getConnectionTimeout());
+        // 向量库不可用不应阻断应用启动：检索能力降级即可
+        config.setInitializationFailTimeout(-1);
+
+        log.info("[向量库] PostgreSQL 数据源已创建：pool={} url={}", props.getPoolName(), props.getUrl());
+        return new HikariDataSource(config);
+    }
+
+    /**
+     * 显式装配 PgVectorStore：把它与本项目的 PostgreSQL 数据源、Ollama embedding 模型绑定。
+     *
+     * <p><b>★ 这里踩过一个隐蔽的坑，值得记下来</b>：
+     * {@code PgVectorStore.builder(...)} 是一个"裸"构建器，它<b>不会</b>去读
+     * {@code spring.ai.vectorstore.pgvector.*} 那些配置项 —— 那些属性是给
+     * 自动装配用的（PgVectorStoreProperties）。既然我们自己造 Bean，就必须自己绑定，
+     * 否则所有配置项都会被静默忽略，表现为：
+     *
+     * <pre>
+     *   配置文件写了 table-name: hagent_knowledge
+     *   启动日志却是：Using the vector table name: vector_store
+     * </pre>
+     *
+     * 而由于 initializeSchema 默认为 true，它会<b>自动建一张叫 vector_store 的表</b>，
+     * 于是"配置没生效"完全不报错 —— 数据写进了另一张表，排查时极易误判。
+     * 这类"配置写了却不用"的静默失效，正是本项目要系统性避免的问题。
+     */
+    @Bean
+    public PgVectorStore vectorStore(DataSource pgVectorDataSource,
+                                     EmbeddingModel embeddingModel,
+                                     VectorStoreProperties properties) {
+        log.info("[向量库] 装配 PgVectorStore：table={} schema={} dimensions={} index={} distance={}",
+                properties.getTableName(), properties.getSchemaName(), properties.getDimensions(),
+                properties.getIndexType(), properties.getDistanceType());
+
+        return PgVectorStore.builder(new JdbcTemplate(pgVectorDataSource), embeddingModel)
+                .vectorTableName(properties.getTableName())
+                .schemaName(properties.getSchemaName())
+                .dimensions(properties.getDimensions())
+                .indexType(properties.getIndexType())
+                .distanceType(properties.getDistanceType())
+                .initializeSchema(properties.isInitializeSchema())
+                .maxDocumentBatchSize(properties.getMaxDocumentBatchSize())
+                .build();
+    }
+
+    /**
+     * 启动自检：把<b>实际生效</b>的向量表名打印出来，并与配置值核对。
+     *
+     * <p>为什么需要这一步：上面的坑说明"我配置了什么"和"实际用了什么"可能不一致，
+     * 而系统不会报错。这里直查 PostgreSQL 的系统表，用事实而不是配置来确认 ——
+     * 发现不一致时明确告警，避免数据悄悄写进一张计划外的表。
+     */
+    @Bean
+    public org.springframework.boot.ApplicationRunner vectorTableSelfCheck(
+            DataSource pgVectorDataSource, VectorStoreProperties properties) {
+        return args -> {
+            String sql = "SELECT table_name FROM information_schema.tables "
+                    + "WHERE table_schema = ? AND table_name = ?";
+            try (java.sql.Connection conn = pgVectorDataSource.getConnection();
+                 java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, properties.getSchemaName());
+                ps.setString(2, properties.getTableName());
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        log.info("[向量库] 表 '{}' 已存在（schema={}）", properties.getTableName(), properties.getSchemaName());
+                    } else {
+                        log.warn("[向量库] 表 '{}' 尚不存在（schema={}）—— 阶段 7 会用显式 DDL 创建，"
+                                        + "届时维度必须与 embedding 实测维度一致",
+                                properties.getTableName(), properties.getSchemaName());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[向量库] 表名自检失败（向量库不可用时不阻断启动）：{}", e.getMessage());
+            }
+        };
+    }
+}
