@@ -28,12 +28,14 @@ spring:
       connection-timeout: 5000
       pool-name: HagentMysqlPool
 
-  # 建表交给显式 DDL（阶段 6 起），不让框架自动改表结构
-  jpa:
-    hibernate:
-      ddl-auto: none
-    open-in-view: false
-    show-sql: false
+  # 说明：这里刻意【没有】任何 JPA / Hibernate 配置。
+  # 本项目持久层用 MyBatis-Plus，pom 里既无 spring-boot-starter-data-jpa，
+  # 依赖树里也没有 hibernate-orm / jakarta.persistence。
+  # （注意：依赖树里的 hibernate-validator 是【参数校验】的实现，与 ORM 的
+  #   hibernate-orm 是两个完全不同的东西，只是名字前缀相似。）
+  #
+  # ★ 因此建表方式很明确：框架不会自动建表，建表由显式 DDL 完成（阶段 6 起）。
+  #   这比 Hibernate 的 ddl-auto 更可控：表结构可评审、可版本化，不会被框架悄悄改掉。
 
   # ---------------- Redis：缓存 + 会话记忆 ----------------
   # 本地容器 hagent-redis（valkey/valkey:8，协议与 Redis 完全兼容）

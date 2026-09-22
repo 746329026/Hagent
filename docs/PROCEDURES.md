@@ -418,3 +418,141 @@ Started HagentApplication in 2.012 seconds
 | **PowerShell 5.1** | `Set-Content -Encoding UTF8` **会加 BOM**。写无 BOM 文件必须用 `[System.IO.File]::WriteAllText($p,$s,[System.Text.UTF8Encoding]::new($false))` |
 | **Python 3.8.10** | f-string 不能含反斜杠；`Path.write_text()` 不支持 `newline` 参数 |
 | **控制台代码页 936** | 中文日志/输出在终端会显示为乱码，但**文件与 HTTP 返回都是正常 UTF-8**，不要误判为编码损坏 |
+
+
+---
+
+# 阶段 0 补丁 · 代码审查发现的 2 处瑕疵（由本人审查发现）
+
+> 这一批是**自己读代码时发现的问题**，不是跑出来的报错 —— 属于"死配置审查"，
+> 比报错更难发现，因为**系统不会提示它**。
+
+## 0.9.1 瑕疵 1 · 死配置残留：MyBatis-Plus 项目里留着 JPA 配置
+
+### 现象
+
+`application-local.yml` 与 `application-local.yml.example` 里有这一段：
+
+```yaml
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    show-sql: false
+```
+
+而本项目**根本没用 JPA**。取证结果：
+
+| 检查 | 结果 |
+|---|---|
+| pom 里有 `spring-boot-starter-data-jpa` 吗 | 没有 |
+| 依赖树里有 hibernate-orm / jakarta.persistence / spring-data-jpa 吗 | 没有 |
+| 有任何 Java 代码 import JPA 相关包吗 | 没有 |
+| 启动日志里有 Hibernate 痕迹吗 | 没有 |
+
+### 根因
+
+这是**历史残留**：早期版本假设用 JPA 写了这份配置，后来持久层改为 MyBatis-Plus 时
+**只改了 pom，没回来清配置**。正是参考实现的那个坑（"死代码/死配置仍在消耗资源与注意力"）。
+
+### 危害（为什么它值得单独记一条）
+
+1. **误导性最强**：后人读到会以为项目用了 JPA，去查 Hibernate 行为，白费时间；
+2. **破坏配置可信度**：一份配置里有不生效的项，读者就无法判断"哪些项真的在起作用"；
+3. **完全静默**：Spring 不会报"未知属性"，它只是忽略。
+
+### 修复与验证
+
+删除两处配置段，并补上说明性注释（说明为什么没有 JPA 配置、建表方式如何）。
+
+验证方式：`grep` 全项目搜 `jpa:|ddl-auto|open-in-view|show-sql`，
+结果只剩注释里的说明文字，无任何实际配置项。
+
+### ⚠️ 修复后必须澄清的一条认知（比清配置更重要）
+
+> **建表方式变了。** `ddl-auto: none` 原本表达的是"不让框架自动改表结构"。
+> 换成 MyBatis-Plus 后，**框架根本不会建表** —— 所以建表必须由我们写显式 DDL。
+>
+> 这不是坏事，而是我们想要的：表结构可评审、可版本化，
+> 不会被框架在迁移时悄悄改掉。这条要落到阶段 6 的设计里。
+
+### 附带澄清：`hibernate-validator` ≠ `hibernate-orm`
+
+依赖树里会出现 `org.hibernate.validator:hibernate-validator`，它是
+**Jakarta Bean Validation 的实现**（即 `@Valid` / `@NotNull` 的引擎），
+与 ORM 的 `hibernate-orm` 是**两个完全不同的项目**，只是名字前缀相同。
+`spring-boot-starter-validation` 引入的是前者。
+
+---
+
+## 0.9.2 瑕疵 2 · 可调参数外置不彻底
+
+### 现象
+
+pgvector 数据源有三个池参数，处置不一致：
+
+| 参数 | 原位置 | 问题 |
+|---|---|---|
+| `maximumPoolSize` | `application.yml` | 已外置，但**没有写取值理由** |
+| `minimumIdle` | **只在 Java 源码的字段默认值里** | 真实取值**读配置的人看不到** |
+| `connectionTimeout` | **只在 Java 源码的字段默认值里** | 同上 |
+
+### 根因
+
+`VectorStoreDataSourceProperties` 是 `@ConfigurationProperties`，
+字段上的默认值让代码"能跑"，但也**掩盖了"真实取值究竟是多少、为什么是这个数"**。
+读配置的人看不到这两个参数，想调整得去翻 Java 文件甚至猜属性名。
+
+这与本项目自己立的规矩冲突：`application.yml` 里 agent 线程池的
+core/max/queue 全都外置了，唯独这里漏了。
+
+### 修复
+
+1. 把 `minimum-idle` 与 `connection-timeout` 补进 `application.yml`
+   的 `hagent.vectorstore.datasource.*`；
+2. **把"为什么是这个数"写在配置里**（理由与数值同等重要）：
+
+| 参数 | 值 | 依据 |
+|---|---|---|
+| `minimum-idle` | 1 | **成本导向**：向量库用量远低于 MySQL，保 1 条常驻连接即可避免每次检索重新建连（建连 = TCP 握手 + PG 认证，是慢操作） |
+| `maximum-pool-size` | 5 | **数量级导向**：消费者只有 PgVectorStore 且批量入库本身串行；给 5 够用且不会吃光 PG 的连接数（PG 默认 max_connections=100，要留给其它客户端） |
+| `connection-timeout` | 5000ms | **可用性导向，刻意与 MySQL 反着设**：MySQL 主库失败要快速暴露；向量库失败要快速走**降级路径** —— 配合 `initializationFailTimeout(-1)`，PG 断连时用户等 5 秒就收到"知识检索暂不可用"，而不是挂 30 秒 |
+
+3. 在属性类里写清**默认值与真实配置的边界**：
+
+> 字段默认值只是"属性缺省时仍可启动"的兜底，**不是**"把参数藏在这里"。
+> 判据：**能被环境改变的 = 配置项**（池大小、超时）；
+> **这个数据源固有的 = 代码常量**（驱动类名、池名前缀）。
+
+### 附带澄清：什么叫"外置"，放在哪个文件
+
+这次暴露了一个**沟通失误**：教练说"`maximumPoolSize` 已外置"，本人只在
+`application-local.yml` 里找，没找到 —— 因为它写在 `application.yml` 里。
+
+| 文件 | 定位 | 内容 |
+|---|---|---|
+| `application.yml` | 主配置，**进仓库** | 所有非敏感的公共配置（含上述池参数） |
+| `application-local.yml` | 私有配置，**已 gitignore** | 只放含密码/密钥的部分（MySQL 密码、Redis 地址、API Key） |
+
+> **"外置"的准确含义**：把值从 **Java 源码**挪到 **YAML 配置**里 ——
+> 从而可以**不改代码、不重新编译**就调整它。
+> 至于放哪个 YAML，取决于该值是否敏感。
+
+### 验证
+
+清理后重新编译并启动，**启动探针 8 项仍全部通过**（`allPassed = true`），
+证明清理死配置与外置参数未破坏任何行为：
+
+```
+ChatModel 实现      : [OK] org.springframework.ai.deepseek.DeepSeekChatModel
+EmbeddingModel 实现 : [OK] org.springframework.ai.ollama.OllamaEmbeddingModel
+配置的 chat 模型     : [OK] deepseek-flash
+DeepSeek API Key    : [OK] 已配置(长度=35)
+ChatModel 实调      : [OK] OK(1991ms) 返回模型=deepseek-flash [与配置一致]
+Embedding 实测维度   : [OK] 1024 维
+Redis 连通性        : [OK] PONG=PONG
+pgvector 连通/扩展   : [OK] vector 0.8.6 @ jdbc:postgresql://localhost:5432/hagent
+```
+
+另验证：日志中已**不再出现** `Hibernate ORM core version` 等 JPA 痕迹 ——
+这在之前的版本里是会打印的，可作为"死依赖确实不在 classpath 上"的佐证。

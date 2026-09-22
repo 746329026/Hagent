@@ -140,6 +140,18 @@ hagent:
 
   # pgvector 专用数据源。独立前缀，不与 spring.datasource（业务主库 MySQL）混用，
   # 这是"spring.datasource 永远留给业务主库，其它库各用自有前缀"的落地。
+  #
+  # ★ 池参数的取值理由（写在这里，因为"为什么是这个数"和"这个数是多少"同样重要）：
+  #   minimum-idle=1  成本导向：向量库用量远低于 MySQL，保 1 条常驻连接即可避免
+  #                   每次检索都重新建连（建连 = TCP 握手 + PostgreSQL 认证，是慢操作）。
+  #   maximum-pool-size=5  数量级导向：消费者只有 PgVectorStore，且批量入库本身串行；
+  #                   给 5 是"够用且不会把 PostgreSQL 的连接数吃光"（PG 默认 max_connections=100，
+  #                   要留给其它客户端）。
+  #   connection-timeout=5000  可用性导向，★ 刻意与 MySQL 反着设：
+  #                   MySQL 主库失败要快速暴露（业务数据不可缺）；
+  #                   向量库失败要快速走【降级路径】—— 配合下面 pgVectorDataSource 的
+  #                   initializationFailTimeout(-1)，运行期 PG 断连时用户等 5 秒就收到
+  #                   "知识检索暂不可用"，而不是挂在那里等 30 秒。
   vectorstore:
     datasource:
       url: jdbc:postgresql://localhost:5432/hagent
@@ -148,6 +160,8 @@ hagent:
       driver-class-name: org.postgresql.Driver
       pool-name: HagentPgVectorPool
       maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 5000
 
 # ============================== 日志 ==============================
 logging:
