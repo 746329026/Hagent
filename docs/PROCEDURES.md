@@ -556,3 +556,77 @@ pgvector 连通/扩展   : [OK] vector 0.8.6 @ jdbc:postgresql://localhost:5432/
 
 另验证：日志中已**不再出现** `Hibernate ORM core version` 等 JPA 痕迹 ——
 这在之前的版本里是会打印的，可作为"死依赖确实不在 classpath 上"的佐证。
+
+
+---
+
+# 阶段 1 · 模型接入与最小对话
+
+## 1.1 WebConfig · CORS 白名单
+
+**目标**：让极简前端（HTML + EventSource 直连 8123）能跨域访问本服务。
+
+**设计决定**：
+1. **单独建 `WebConfig`，而不是像参考实现那样叫 `GlobalCorsConfig`**：
+   Web 层要配的不止 CORS（后续还有异步超时、拦截器、静态资源）。
+   按"类名反映职责边界"的原则，用 WebConfig 收口，避免将来再散出一堆小配置类。
+2. **不用 `allowedOriginPatterns("*") + allowCredentials(true)`**：
+   参考实现里是这么写的，属于反模式 —— 对全网放开且允许携带凭证。
+   本项目改用配置项白名单 `hagent.web.allowed-origins`。
+3. **默认值不给"放开一切"**：配置缺失时宁可启动失败，也不要静默地对全网开放。
+
+**验证方式（三向验证，全部实测通过）**：
+
+| 测试 | 结果 |
+|---|---|
+| 白名单内源 `http://localhost:5500` 的预检请求 | 返回 `Access-Control-Allow-Origin: http://localhost:5500`、`Allow-Credentials: true`、`Expose-Headers: Content-Type, X-Request-Id`、`Max-Age: 3600`、`Vary: Origin` |
+| **白名单外源 `http://evil.example.com`** | **HTTP 403 被拒绝**，不返回 `Allow-Origin` |
+| 普通请求（无 Origin） | HTTP 200，统一契约正常 |
+
+---
+
+### 坑 14 · `@Value` 无法注入 YAML 列表，导致启动失败
+
+**现象**：`WebConfig` 写完第一次启动直接失败：
+
+```
+PlaceholderResolutionException:
+Could not resolve placeholder 'hagent.web.allowed-origins'
+        in value "${hagent.web.allowed-origins}"
+```
+
+**而 `application.yml` 里明明有这段配置。**
+
+**排查过程（顺序很重要：先排除外部因素，再定位到用法本身）**：
+
+| 步骤 | 检查内容 | 结果 |
+|---|---|---|
+| 1 | YAML 缩进是否正确 | 正确（`web:` 2 空格，`allowed-origins:` 4 空格） |
+| 2 | 是否有隐藏字符 | **逐个字符打印码点**，全部正常（无 BOM、无全角空格） |
+| 3 | `target/classes/application.yml` 副本 | 配置确实被复制过去了 |
+| 4 | 于是定位到 `@Value` 用法本身 | ★ 找到根因 |
+
+**根因**：YAML 里的**列表**在 Spring 的 Environment 中会被展开成**带下标的多条属性**：
+
+```
+hagent.web.allowed-origins[0]=http://localhost:5500
+hagent.web.allowed-origins[1]=http://127.0.0.1:5500
+hagent.web.allowed-origins[2]=http://localhost:8080
+```
+
+**不存在名为 `hagent.web.allowed-origins` 的单个属性值。**
+而 `@Value` 的占位符解析只做"**按键取值**"，不做"**按结构绑定**"，所以取不到。
+
+**正解**：改用 `@ConfigurationProperties`（它做的是"按结构绑定"，能理解下标），
+新建 `WebProperties` 绑定 `hagent.web.*`。
+这也与本项目其它配置类（`VectorStoreProperties`、`VectorStoreDataSourceProperties`）保持一致。
+
+> **可迁移认知（很实用的一条）**：
+> **`@Value` 适合取标量**（单个字符串 / 数字 / 布尔）；
+> **一旦配置是结构化的**（列表、嵌套对象、Map），就应该用 `@ConfigurationProperties`。
+>
+> 这个坑的特征是"配置明明在文件里，却报取不到" —— 排查时容易被"是不是我 YAML 写错了"
+> 带偏方向，浪费大量时间在检查缩进和隐藏字符上。
+> **先排除外部（缩进/字符/资源复制），再怀疑用法本身**，是更高效的顺序。
+
+---
