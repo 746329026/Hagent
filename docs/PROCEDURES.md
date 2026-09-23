@@ -708,3 +708,60 @@ HTTP 400
 > 只写校验不写处理，就会出现"拦对了，但返回格式是另一套"的契约断裂。
 
 ---
+
+
+---
+
+## 1.3 流式对话（SSE）+ 放行判定
+
+**目标**：跑通流式对话，且事件名集中管理、放行判定集中一处。
+
+**涉及文件**：
+
+```
+stream/StreamEventType.java   事件名唯一出处（MESSAGE / DONE / ERROR + 扩展位注释）
+stream/SseSupport.java        放行判定（SseEmitter / Publisher / text-event-stream 三种形态）
+app/ChatAppService.java       stream() 方法：SseEmitter 逐片推送
+controller/ChatController.java /chat/stream 端点（produces text/event-stream）
+```
+
+**结构决策**：
+
+| 决策 | 理由 |
+|---|---|
+| 用 SseEmitter 而非返回 Flux | SseEmitter"手动"（每个事件明确知道自己在推什么），先理解机制；Flux 留给阶段 3 对比 |
+| 事件名用常量类 StreamEventType | 事件名是前后端契约，散落字符串会"靠人工对齐、拼错静默失效" |
+| 只定义 3 个事件 + 注释留扩展位 | 提前定义没人发的事件是"备而不用"；加事件成本≈0，不预支 |
+| SseSupport 集中放行判定 | 判断漏一条就有一条流式接口静默损坏，必须集中 |
+| 放行三种形态而非一种 | Spring MVC 流式有三条路径（SseEmitter / Publisher / text-event-stream），漏一处漏一条 |
+
+**工具调用不会成为事件名**：它是模型内部决策，用户关心的是"做到第几步"（阶段 9 的 step 事件承载）。
+
+**验证（curl 实测，逐片输出）**：
+
+```
+event:message
+data:我是
+
+event:message
+data:Deep
+
+...
+
+event:done
+data:[DONE]
+```
+
+**过程中踩的坑**：
+
+| 现象 | 根因 | 教训 |
+|---|---|---|
+| 流式接口 500 | 端口被**上一次的旧进程**占着，curl 打到了旧实例 | 改代码后重启前，先确认端口释放；curl 打到旧实例时先想"我在测的是哪个进程" |
+| 中文 body 报"不是合法 JSON" | curl 在 Windows 把命令行里的中文 body 编错了码 | 用 --data-binary @file 传 body，file 用 UTF-8 无 BOM 写 |
+| 流式报 401 | API key 已吊销 | key 明文出现在对话 = 已泄露，必须换新 |
+
+**关键认知回顾（贯穿本阶段）**：
+统一响应包装 vs 流式返回的冲突 —— 流被包装则格式破坏、前端认不出、服务端可能不报错。
+所以必须放行。这个认知在 SseSupport 里落地成集中判定，供统一响应包装器调用。
+
+---
