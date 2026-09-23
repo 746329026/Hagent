@@ -33,6 +33,7 @@ import java.util.List;
 public class WebConfig implements WebMvcConfigurer {
 
     private final List<String> allowedOrigins;
+    private final int corsMaxAgeSeconds;
 
     /**
      * ★ 用 {@link WebProperties}（{@code @ConfigurationProperties}）而不是
@@ -43,7 +44,8 @@ public class WebConfig implements WebMvcConfigurer {
      */
     public WebConfig(WebProperties webProperties) {
         this.allowedOrigins = webProperties.getAllowedOrigins();
-        log.info("[Web] CORS 白名单已装载：{}", allowedOrigins);
+        this.corsMaxAgeSeconds = webProperties.getMaxAgeSeconds();
+        log.info("[Web] CORS 白名单={}  预检缓存={}s", allowedOrigins, corsMaxAgeSeconds);
     }
 
     @Override
@@ -51,16 +53,27 @@ public class WebConfig implements WebMvcConfigurer {
         registry.addMapping("/**")
                 // 白名单：只有列出来的源才允许跨域访问
                 .allowedOrigins(allowedOrigins.toArray(new String[0]))
+                // OPTIONS 必须写：预检请求本身就是 OPTIONS。
+                // 漏掉它，所有"非简单请求"（如带 JSON 体的 POST）会直接失败。
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS")
+                // 允许前端携带任意自定义请求头。
+                // 这里能用 "*" 而 origins 不能，原因在 CORS 规范：起源是安全边界，不允许通配；
+                // 请求头只是"携带什么内容"，用通配表示"请求什么就允许什么"。
                 .allowedHeaders("*")
-                // 暴露给前端的响应头。SSE 场景下前端常需要读到这些；
-                // 默认情况下浏览器只允许 JS 读取少数几个"安全"响应头，其余必须显式暴露。
+                // 暴露给前端的响应头。浏览器默认只允许 JS 读取少数几个"安全"响应头，
+                // 其余必须显式暴露，否则前端能拿到响应、却读不到这些头。
+                // ⚠️ 注意：X-Request-Id 只有在【服务端真正生成并写入该响应头】后才有意义。
+                // 当前服务端尚未实现 RequestId 过滤器，因此前端现在读它只会得到 null，
+                // 且不会报错。一旦实现过滤器（见本类下方待办 2），此处配置才会真正生效。
+                // 保留原因：删掉容易在实现过滤器时忘了加回来，导致前端读不到又一轮排查。
                 .exposedHeaders("Content-Type", "X-Request-Id")
-                // 允许携带凭证（Cookie / Authorization 头）。
-                // 注意：allowCredentials(true) 与 allowedOrigins("*") 不能共存（规范禁止），
-                // 这也是必须用白名单而不是通配符的另一个原因。
+                // 允许携带凭证（Cookie / Authorization 头 / TLS 客户端证书）。
+                // 规范禁止 allowCredentials(true) 与 allowedOrigins("*") 共存，
+                // 这是"必须用白名单"的第二个理由（第一个理由是安全上不该对全网开放）。
                 .allowCredentials(true)
-                .maxAge(3600);
+                // 预检结果的浏览器缓存时长。外置成配置项，因为开发与生产的合理取值相反：
+                // 开发要小（改配置立即生效），生产要大（省预检往返）。详见 WebProperties 注释。
+                .maxAge(corsMaxAgeSeconds);
     }
 
     // ==========================================================================

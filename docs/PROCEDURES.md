@@ -630,3 +630,81 @@ hagent.web.allowed-origins[2]=http://localhost:8080
 > **先排除外部（缩进/字符/资源复制），再怀疑用法本身**，是更高效的顺序。
 
 ---
+
+
+---
+
+## 1.2 同步对话链路（阶段 1 核心验收）
+
+**目标**：跑通 controller -> app -> ChatClient -> 模型 一条线，且日志能看到完整链路。
+
+**涉及文件**：
+
+```
+dto/ChatRequest.java        请求体 record，仅 message 字段（刻意克制，会话字段留到阶段6）
+dto/ChatResponse.java       响应体 record，用对象而非 String（避免 StringHttpMessageConverter 绕过 JSON）
+app/ChatAppService.java     app 层，隔离 Controller 与 ChatClient（阶段9换多步循环时 Controller 零改动）
+controller/ChatController.java  薄控制器：收参数/调 app/包装返回
+advisor/PromptTraceAdvisor.java 调用链日志切面（双接口：CallAdvisor + StreamAdvisor）
+config/AdvisorProperties.java   切面参数外置（enabled / max-log-length / log-full-content）
+config/AiConfig.java            ChatClient 装配 + 挂载切面
+```
+
+**结构决策**：
+
+| 决策 | 理由 |
+|---|---|
+| DTO 用 record，响应体是对象不是 String | String 会走 StringHttpMessageConverter 绕过 JSON 序列化 |
+| app 层隔离 ChatClient | 阶段 9 换多步 Agent 循环时 Controller 零改动 |
+| 请求体只放 message | DTO 字段是契约，加了不好删；会话字段属阶段 6，现在加是备而不用 |
+| ChatClient 而非 ChatModel | 切面/工具/记忆/结构化输出全挂在 ChatClient 层 |
+
+**切面决策（PromptTraceAdvisor）**：
+
+| 决策 | 理由 |
+|---|---|
+| 实现 CallAdvisor + StreamAdvisor 两个接口 | 流式要"等流读完再记"，与非流式时序不同，需分开控制 |
+| getOrder()=0（最外层） | 当前只有一切面，取值不影响；将来多切面时决定"记到注入前还是注入后" |
+| 不依赖 context 传原始输入 | 参考实现用 context("userText") 形成隐式跨切面耦合，拼错/漏注册都静默失效 |
+| 日志截断 500 字符 | 参考实现把完整 prompt 打进 INFO，日志暴涨 + 隐私泄露 |
+
+**验收（全部实测通过）**：
+
+| 测试 | 结果 |
+|---|---|
+| 正常对话 | HTTP 200，`{"code":0,"data":{"reply":"我是深度求索开发的AI助手..."}}` |
+| 日志完整链路 | `[PromptTraceAdvisor][call] → 请求 | 消息数=1 | 内容=...` 与 `← 响应 | 耗时=1884ms` |
+| 中文往返 | reply 正确显示"收到"（控制台乱码是编码显示问题，HTTP 返回正常） |
+| 空消息 | HTTP 400，`{"code":40001,"message":"请求参数不合法: message 消息不能为空"}` |
+
+---
+
+### 坑 15 · 校验异常落回 Spring 默认结构，契约断裂
+
+**现象**：空消息被 @NotBlank 正确拦截（好事），但返回：
+
+```
+{"timestamp":"...","status":400,"error":"Bad Request","path":"/api/chat"}
+```
+
+这是 Spring 的**默认错误结构**，不是我们的 {code,message,data} 契约。
+
+**根因**：MethodArgumentNotValidException 没有被全局异常处理器显式捕获，
+走了 Spring 的默认 HandlerExceptionResolver。
+
+**修复**：GlobalExceptionHandler 增加 @ExceptionHandler(MethodArgumentNotValidException.class)，
+把字段错误收集成 detail，返回 BaseResponse.failure(INVALID_PARAM, detail)。
+
+**修复后**：
+
+```
+HTTP 400
+{"code":40001,"message":"请求参数不合法: message 消息不能为空"}
+```
+
+> **可迁移认知**：
+> **"参数被拦住了"和"异常被正确格式化"是两件事。**
+> 校验注解只负责"拒绝"，不负责"怎么回应"；后者是全局异常处理器的职责。
+> 只写校验不写处理，就会出现"拦对了，但返回格式是另一套"的契约断裂。
+
+---

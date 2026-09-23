@@ -117,18 +117,35 @@ hagent:
       thread-name-prefix: "hagent-agent-"
       await-termination-seconds: 30
 
+  advisor:
+    trace:
+      # 调用链日志切面。关掉可让日志安静（排查特定问题时有用）
+      enabled: true
+      # 单条日志的文本上限。为什么必须截断：一次 RAG 调用可能带几千字检索结果，
+      # 全量打进 INFO 会让日志暴涨，并把用户输入与内部文档内容写进日志（隐私风险）。
+      # 500 够看清 prompt 拼得对不对，又不至于让单条日志过长。
+      max-log-length: 500
+      # 需要看全文时临时改 true（属排查手段，不是常态）
+      log-full-content: false
+
   stream:
     sse-timeout-ms: 600000
     # 心跳间隔：长时间无业务事件时保活，防网关按 60s 空闲判定断连
     heartbeat-interval-ms: 15000
 
   web:
-    # CORS 白名单。刻意不用 allowedOriginPatterns("*") + allowCredentials 的组合，
-    # 那是反模式（等于对全网放开）。
+    # CORS 白名单。刻意不用 allowedOriginPatterns("*") + allowCredentials(true) 的组合，
+    # 那既是对全网放开的安全反模式，也违反 CORS 规范（凭证模式下不允许源通配）。
     allowed-origins:
       - "http://localhost:5500"
       - "http://127.0.0.1:5500"
       - "http://localhost:8080"
+
+    # 预检请求结果的浏览器缓存时长（秒）。
+    # 取值取舍：值大 → 省预检往返但"改了 CORS 配置要等缓存过期才生效"；
+    #          值小 → 每次预检但改配置立即生效。
+    # 开发期建议 0~300（便于改配置立刻验证）；生产可调到 3600~86400。
+    max-age-seconds: 300
 
   memory:
     chat:
