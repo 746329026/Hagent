@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Hagent · 流式对话对比</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; padding: 20px; background: #f5f6f8; color: #222; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 16px; }
+  .bar { display: flex; gap: 8px; margin-bottom: 16px; }
+  input { flex: 1; padding: 9px 12px; font-size: 14px; border: 1px solid #ccd; border-radius: 6px; }
+  button { padding: 9px 18px; font-size: 14px; border: 0; border-radius: 6px; background: #2d6cdf; color: #fff; cursor: pointer; }
+  button:hover { background: #245bbd; }
+  button.stop { background: #d9534f; }
+  button.stop:hover { background: #b93f3b; }
+  .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card { background: #fff; border: 1px solid #e2e5ea; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  .card h2 { font-size: 14px; margin: 0; padding: 10px 12px; background: #eef2f8; border-bottom: 1px solid #e2e5ea; }
+  .card h2 small { display: block; font-weight: normal; color: #667; margin-top: 3px; font-size: 11.5px; }
+  .out { padding: 10px 12px; min-height: 220px; max-height: 420px; overflow-y: auto; font-family: Consolas, "Courier New", monospace; font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+  .meta { padding: 6px 12px; border-top: 1px solid #eef1f5; font-size: 11.5px; color: #778; background: #fafbfc; }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-right: 4px; }
+  .t-start { background: #e8f0fe; color: #1a56b8; }
+  .t-done  { background: #e6f6ec; color: #1c7a3e; }
+  .t-error { background: #fdeaea; color: #b3261e; }
+  .t-id    { background: #f0eefb; color: #5b3fbf; }
+  #log { margin-top: 16px; background: #1e2430; color: #c8d2e0; padding: 12px; border-radius: 8px; font-family: Consolas, monospace; font-size: 12px; max-height: 190px; overflow-y: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Hagent · 流式对话三种实现对比</h1>
+  <div class="sub">
+    三种方式的输入输出完全一致，差别只在"谁在驱动数据推送"与"事件能携带哪些字段"。
+    正文区每条前面会显示 <code>[id=N]</code>，便于肉眼核对后端下发的 id。<br>验证 retry：F12 → Network → 点 stream-sse → EventStream 面板右侧切到原始视图，或直接看 Response，第一个事件里应有 <code>retry:5000</code>。
+  </div>
+
+  <div class="bar">
+    <input id="msg" value="用三句话介绍你自己" placeholder="输入要问模型的话" />
+    <button id="go">同时发起三种</button>
+    <button id="stop" class="stop">全部断开</button>
+  </div>
+
+  <div class="cols">
+    <div class="card">
+      <h2>① SseEmitter（手动 send）
+        <small>我们订阅、我们 send、我们 complete；事件是裸字符串</small>
+      </h2>
+      <div class="out" id="out1"></div>
+      <div class="meta" id="meta1">未开始</div>
+    </div>
+    <div class="card">
+      <h2>② Flux&lt;ServerSentEvent&gt;（框架驱动）
+        <small>代码里没有 send/complete；Spring 自动写响应、自动关闭</small>
+      </h2>
+      <div class="out" id="out2"></div>
+      <div class="meta" id="meta2">未开始</div>
+    </div>
+    <div class="card">
+      <h2>③ SseEmitter + ServerSentEvent
+        <small>手动驱动，但事件带 id / retry（断线可续传）</small>
+      </h2>
+      <div class="out" id="out3"></div>
+      <div class="meta" id="meta3">未开始</div>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+const sources = {};
+let eventCounts = {};
+
+function log(line) {
+  const el = document.getElementById('log');
+  el.textContent += line + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+function reset(idx) {
+  document.getElementById('out' + idx).textContent = '';
+  eventCounts[idx] = 0;
+}
+
+/**
+ * 统一的事件绑定 —— 三种方式推来的事件名完全一样（message / done / error），
+ * 所以前端可以用同一套逻辑消费。这正说明"事件名是契约"的价值：
+ * 换后端实现方式，前端不用改。
+ */
+/** 把一条事件渲染成一行：显示 id 标记 + 内容，并做简单转义 */
+function chunkLine(tag, data) {
+  // 先把内容里的换行压掉，保证一个 chunk 一行，便于肉眼对齐
+  const text = String(data).replace(/\n/g, "\\n");
+  return tag + " " + text + "\n";
+}
+function bind(idx, es) {
+  const out = document.getElementById('out' + idx);
+  const meta = document.getElementById('meta' + idx);
+  const t0 = Date.now();
+  let lastId = null;
+
+  // EventSource 的 addEventListener 是"按事件名监听"。
+  // 注意：没有 declare event: 的帧会走 'message' 这个默认名。
+  es.addEventListener('message', e => {
+    eventCounts[idx]++;
+    // 把事件名与 id 显式画出来，便于肉眼验证后端确实下发了这两个字段。
+    // e.lastEventId 就是 SSE 帧里的 "id:" 字段（浏览器解析后交给 JS）。
+    if (e.lastEventId) { lastId = e.lastEventId; }
+    const tag = e.lastEventId
+      ? `[id=${e.lastEventId}]`
+      : `[id=—]`;
+    out.textContent += chunkLine(tag, e.data);
+    meta.textContent = `${eventCounts[idx]} × message · ${Date.now() - t0}ms`
+      + (lastId ? ` · 最后 id=${lastId}` : ' · 无 id');
+  });
+
+  es.addEventListener('done', e => {
+    meta.innerHTML = `<span class="tag t-done">done</span>${eventCounts[idx]} × message · 总用时 ${Date.now() - t0}ms`
+    log(`[${idx}] done，共 ${eventCounts[idx]} 个 message 事件`);
+    es.close();
+  });
+
+  es.addEventListener('error', e => {
+    // 注意：EventSource 的 error 事件既用于"服务端推的 error"，也用于"连接本身出错"。
+    // 这里用 readyState 区分：CLOSED 表示连接已断且不会重连。
+    if (e.data !== undefined) {
+      meta.innerHTML = `<span class="tag t-error">error</span>${e.data}`;
+      log(`[${idx}] 服务端 error: ${e.data}`);
+    } else {
+      meta.innerHTML = `<span class="tag t-error">连接中断</span>readyState=${es.readyState}`;
+      log(`[${idx}] 连接错误/中断 readyState=${es.readyState}`);
+    }
+    es.close();
+  });
+
+  es.onopen = () => {
+    meta.innerHTML = `<span class="tag t-start">已连接</span>${new Date().toLocaleTimeString()}`;
+    log(`[${idx}] 连接已建立`);
+  };
+}
+
+document.getElementById('go').addEventListener('click', () => {
+  const message = document.getElementById('msg').value;
+  if (!message.trim()) { alert('请先输入内容'); return; }
+
+  Object.values(sources).forEach(s => s && s.close());
+  [1, 2, 3].forEach(reset);
+  document.getElementById('log').textContent = '';
+  log('发起请求：' + message);
+
+  // EventSource 只能发 GET、不能带请求体，所以用 query 参数传消息。
+  // 这也是为什么三个流式端点都提供了 GET 入口。
+  const q = encodeURIComponent(message);
+
+  bind(1, sources[1] = new EventSource('/api/chat/stream?message=' + q));
+  bind(2, sources[2] = new EventSource('/api/chat/stream-flux?message=' + q));
+  bind(3, sources[3] = new EventSource('/api/chat/stream-sse?message=' + q));
+});
+
+document.getElementById('stop').addEventListener('click', () => {
+  Object.entries(sources).forEach(([i, s]) => { if (s) s.close(); });
+  [1, 2, 3].forEach(i => document.getElementById('meta' + i).innerHTML =
+    '<span class="tag t-error">已手动断开</span>');
+  log('已断开全部连接');
+});
+</script>
+</body>
+</html>

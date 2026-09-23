@@ -1,14 +1,19 @@
 package com.hagent.app;
 
+import com.hagent.config.StreamProperties;
 import com.hagent.dto.ChatResponse;
 import com.hagent.stream.StreamEventType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -30,6 +35,12 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ChatAppService {
 
     private final ChatClient chatClient;
+
+    /**
+     * 流式相关参数（超时 / 重连间隔 / 心跳）。
+     * 通过构造器注入（`@RequiredArgsConstructor` 只收 final 字段）。
+     */
+    private final StreamProperties streamProperties;
 
     /**
      * 流式失败计数器。
@@ -94,6 +105,143 @@ public class ChatAppService {
                 .subscribe();
         // 注意：subscribe() 是非阻塞的，它会立刻返回。
         // Flux 的请求在 Reactor 的线程上异步推进，逐片触发 doOnNext。
+    }
+
+    /**
+     * 【方式二】把模型流直接映射成 {@code Flux<ServerSentEvent<String>>} 返回 —— 框架驱动。
+     *
+     * <p><b>与 {@link #stream} 的关键差别（这是对比的核心）</b>：
+     * <pre>
+     *   方式一（stream）        : 我们订阅，我们 send，我们 complete   —— 全程手动
+     *   方式二（本方法）        : 我们只负责"把流映射成事件"，其余交给 Spring
+     * </pre>
+     * 本方法里<b>没有一处 subscribe / send / complete</b>，Spring MVC 拿到返回值后
+     * 会自己订阅、自己写响应、结束时自己关闭连接。
+     *
+     * <p><b>断连处理也不一样</b>：客户端断开时，Spring 会取消这个订阅，
+     * 上游 Flux 随之被取消 —— 模型请求自然停止，不会白烧 token。
+     * 方式一则需要我们自己在 send 失败时留意（见 {@link #sendEvent}）。
+     *
+     * <p>事件里带上 {@code id}：前端断线重连时，可以凭最后收到的 id 判断续传位置
+     * （浏览器会自动在重连请求头 {@code Last-Event-ID} 里带上它）。
+     */
+    public Flux<ServerSentEvent<String>> streamAsFlux(String message) {
+        // 用一个从 1 开始的自增序号作为事件 id
+        AtomicLong seq = new AtomicLong();
+        return chatClient.prompt()
+                .user(message)
+                .stream()
+                .content()
+                .map(chunk -> ServerSentEvent.<String>builder()
+                        .id(String.valueOf(seq.incrementAndGet()))
+                        .event(StreamEventType.MESSAGE)
+                        .data(chunk)
+                        .build())
+                // concatWith：在正文流之后接上 done 事件。
+                // 注意这里用 concatWith 而不是 concat，因为前者是"顺序拼接"的语义。
+                .concatWith(Mono.fromSupplier(() -> ServerSentEvent.<String>builder()
+                        .event(StreamEventType.DONE)
+                        .data("[DONE]")
+                        .build()))
+                // 出错时同样把错误变成流内的一个事件（而不是抛给框架）——
+                // 理由与方式一相同：流式接口的错误应该是"流的一部分"。
+                .onErrorResume(error -> {
+                    long count = streamFailureCount.incrementAndGet();
+                    log.error("[流式对话-flux] 失败（累计 {} 次）：{}", count, error.getMessage(), error);
+                    return Flux.just(ServerSentEvent.<String>builder()
+                            .event(StreamEventType.ERROR)
+                            .data(error.getMessage())
+                            .build());
+                });
+    }
+
+    /**
+     * 【方式三】SseEmitter + 带 {@code id} / {@code retry} 的完整事件 —— 手动驱动，字段最全。
+     *
+     * <p><b>与 {@link #stream} 的差别</b>：事件除了 {@code event} 与 {@code data}，
+     * 还带上 {@code id} 与 {@code retry}：
+     * <ul>
+     *   <li>{@code id}：给每个事件编号。浏览器断线重连时会自动带上
+     *       {@code Last-Event-ID} 请求头，服务端可据此判断从哪继续；</li>
+     *   <li>{@code retry}：告诉浏览器"断了之后隔多久重连"（只在下发一次即可，浏览器会记住）。</li>
+     * </ul>
+     *
+     * <p>这是后续多步 Agent 的<b>主力形态</b>：既要手动插入不同类型的事件
+     * （message / step / question / done），又要事件带 id 便于前端去重与续传。
+     *
+     * <h3>★ 这里踩过一个真实的坑（值得记牢）</h3>
+     *
+     * <p>我最初把事件构造成 {@code ServerSentEvent<String>} 对象再交给
+     * {@code emitter.send(...)}，结果<b>一个事件都发不出去</b>，客户端只看到"连上就断"，
+     * 而服务端日志干干净净。
+     *
+     * <p><b>根因</b>：{@code SseEmitter} <b>不认识</b> {@code ServerSentEvent} 这个类型
+     * （用 javap 读它的字节码常量池可以证实：里面根本没有 ServerSentEvent 的引用）。
+     * {@code ServerSentEvent} 是给 <b>WebFlux / 返回 Publisher</b> 那条路用的，
+     * 由 {@code ServerSentEventHttpMessageWriter} 负责写帧。
+     * 而 {@code SseEmitter.send(Object)} 走的是 {@code ResponseBodyEmitter} 的普通序列化路径 ——
+     * 它会把这个对象当"要转成 JSON 的普通数据"，于是构造/序列化直接失败。
+     *
+     * <p><b>为什么这次失败特别隐蔽</b>：异常被 {@code sendEvent} 的 catch 吞成了 debug 日志，
+     * 客户端只看到连接断开。这也是为什么现在 {@code sendEvent} 会区分
+     * "客户端断开（debug）"与"其它异常（warn）"。
+     *
+     * <p><b>正解</b>：手写 {@code SseEmitter.event()} 构建器 —— 它才是 SseEmitter 认的"事件表达"。
+     * 两种写法的分野正对应三条流式路径：
+     * <pre>
+     *   SseEmitter 手动推送   -> 用 SseEmitter.event() 构建器
+     *   返回 Publisher/Flux   -> 用 ServerSentEvent（由框架的 writer 写帧）
+     * </pre>
+     */
+    public void streamWithServerSentEvent(String message, SseEmitter emitter) {
+        AtomicLong seq = new AtomicLong();
+        long retryMs = streamProperties.getReconnectDelayMs();
+        boolean[] retrySent = {false};
+
+        chatClient.prompt()
+                .user(message)
+                .stream()
+                .content()
+                .doOnNext(chunk -> {
+                    long id = seq.incrementAndGet();
+                    SseEmitter.SseEventBuilder builder = SseEmitter.event()
+                            .id(String.valueOf(id))
+                            .name(StreamEventType.MESSAGE)
+                            .data(chunk);
+                    // retry 只在第一个事件上下发一次（浏览器会记住该值）
+                    if (!retrySent[0]) {
+                        builder.reconnectTime(retryMs);
+                        retrySent[0] = true;
+                    }
+                    sendEvent(emitter, builder);
+                })
+                .doOnComplete(() -> {
+                    sendEvent(emitter, SseEmitter.event()
+                            .id(String.valueOf(seq.incrementAndGet()))
+                            .name(StreamEventType.DONE)
+                            .data("[DONE]"));
+                    completeQuietly(emitter);
+                })
+                .doOnError(error -> handleStreamError(emitter, error))
+                .subscribe();
+    }
+
+    /**
+     * 发送一个由 {@code SseEmitter.event()} 构建器组装好的事件。
+     *
+     * <p>这是 SseEmitter 手动推送路径上唯一正确的发送方式（见
+     * {@link #streamWithServerSentEvent} 里记录的踩坑）。
+     */
+    private void sendEvent(SseEmitter emitter, SseEmitter.SseEventBuilder builder) {
+        try {
+            emitter.send(builder);
+        } catch (IOException e) {
+            // 客户端断开（关页面/关标签）：用户正常操作，不是故障
+            log.debug("[流式对话] 发送 SSE 事件时客户端已断开：{}", e.getMessage());
+        } catch (Exception e) {
+            // 非 IO 异常：多半是事件构造/序列化的问题，必须可见
+            log.warn("[流式对话] 发送 SSE 事件失败（事件构造或序列化问题）：{}", e.toString());
+        }
     }
 
     /**
@@ -163,6 +311,28 @@ public class ChatAppService {
             // 客户端断开（关页面/关标签）时 send 会抛 IOException。
             // 这是用户正常操作导致的，不是故障；记录后不再尝试发送。
             log.debug("[流式对话] 发送事件 {} 时客户端已断开：{}", eventName, e.getMessage());
+        }
+    }
+
+    /**
+     * 发送一个已经组装好的 {@link ServerSentEvent}。
+     *
+     * <p><b>★ 这个方法只用于 {@link #streamAsFlux} 那条路（返回 Publisher）。</b>
+     * 在 {@code SseEmitter} 手动推送的场景里<b>不能用它</b> ——
+     * {@code SseEmitter} 不认识 {@code ServerSentEvent}，会把它当成"要 JSON 序列化的普通对象"，
+     * 导致事件发不出去（详见 {@link #streamWithServerSentEvent} 里记录的踩坑）。
+     * 手动推送请用 {@code SseEmitter.event()} 构建器那个重载。
+     */
+    private void sendEvent(SseEmitter emitter, ServerSentEvent<String> event) {
+        try {
+            emitter.send(event);
+        } catch (IOException e) {
+            // 客户端断开（关页面/关标签）：用户正常操作，不是故障
+            log.debug("[流式对话] 发送 SSE 事件 {} 时客户端已断开：{}", event.event(), e.getMessage());
+        } catch (Exception e) {
+            // 非 IO 异常：多半是事件构造/序列化的问题，必须可见
+            log.warn("[流式对话] 发送 SSE 事件 {} 失败（事件构造或序列化问题）：{}",
+                    event.event(), e.toString());
         }
     }
 }

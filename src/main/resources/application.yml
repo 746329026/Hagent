@@ -129,9 +129,16 @@ hagent:
       log-full-content: false
 
   stream:
+    # SSE 连接的服务端超时。SseEmitter 默认 30 秒，而多步 Agent / RAG 检索会远超它，
+    # 超时会被"静默掐断"（前端表现为连接中断）。注意与 spring.mvc.async.request-timeout
+    # 的关系：两者取较小值生效，必须协调，不能只调一个。
     sse-timeout-ms: 600000
-    # 心跳间隔：长时间无业务事件时保活，防网关按 60s 空闲判定断连
+    # 心跳间隔：长时间无业务事件时保活，防网关按 60s 空闲判定断连。
+    # 取值要小于链路上最短的空闲超时（常见 60s），15s 留足余量。
     heartbeat-interval-ms: 15000
+    # 告诉浏览器的重连间隔（SSE 的 retry 字段）。断开后浏览器默认约 3 秒重连；
+    # 若服务端刚崩或正忙，立刻重连会加剧压力，调大相当于让客户端退避。
+    reconnect-delay-ms: 5000
 
   web:
     # CORS 白名单。刻意不用 allowedOriginPatterns("*") + allowCredentials(true) 的组合，

@@ -29,7 +29,7 @@ import java.util.List;
  */
 @Slf4j
 @Configuration
-@EnableConfigurationProperties(WebProperties.class)
+@EnableConfigurationProperties({WebProperties.class, StreamProperties.class})
 public class WebConfig implements WebMvcConfigurer {
 
     private final List<String> allowedOrigins;
