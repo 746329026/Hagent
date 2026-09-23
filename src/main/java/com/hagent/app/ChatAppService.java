@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 对话应用服务 —— app 层。
@@ -29,6 +30,18 @@ import java.io.IOException;
 public class ChatAppService {
 
     private final ChatClient chatClient;
+
+    /**
+     * 流式失败计数器。
+     *
+     * <p>为什么需要它：因为流式出错时我们用 {@code complete()} 正常收尾（而不是
+     * {@code completeWithError}），<b>框架会把这次失败当成"正常结束"</b>，
+     * 于是它自带的成功率统计不可信。所以失败次数必须自己显式记录。
+     *
+     * <p>后续接入可观测性（Micrometer）时，把这个 AtomicLong 换成 Counter 即可。
+     * 这是"用显式替代隐式"：既然框架不认，就自己记。
+     */
+    private final AtomicLong streamFailureCount = new AtomicLong();
 
     /**
      * 同步对话：把用户消息发给模型，返回回复文本。
@@ -71,18 +84,72 @@ public class ChatAppService {
                 .stream()
                 .content()
                 .doOnNext(chunk -> sendEvent(emitter, StreamEventType.MESSAGE, chunk))
+                // 正常结束：先推 done 事件，再正常关闭流
                 .doOnComplete(() -> {
                     sendEvent(emitter, StreamEventType.DONE, "[DONE]");
-                    emitter.complete();
+                    completeQuietly(emitter);
                 })
-                .doOnError(error -> {
-                    log.warn("[流式对话] 出错：{}", error.getMessage());
-                    sendEvent(emitter, StreamEventType.ERROR, error.getMessage());
-                    emitter.completeWithError(error);
-                })
+                // 出错：三路并行处理（详见 handleStreamError 的注释）
+                .doOnError(error -> handleStreamError(emitter, error))
                 .subscribe();
         // 注意：subscribe() 是非阻塞的，它会立刻返回。
         // Flux 的请求在 Reactor 的线程上异步推进，逐片触发 doOnNext。
+    }
+
+    /**
+     * 流式出错的统一处理 —— <b>三路并行，缺一不可</b>。
+     *
+     * <p><b>为什么不用 {@code emitter.completeWithError(error)}</b>（实测踩过的坑）：
+     * 它会把异常<b>抛给 Spring 的异步处理链路</b>，最终落到全局异常处理器，
+     * 而全局异常处理器想返回 JSON —— 可这个响应的 Content-Type 早就被锁成
+     * {@code text/event-stream} 了。HTTP 不允许中途换格式，于是报：
+     * <pre>
+     *   HttpMessageNotWritableException:
+     *   No converter for [class com.hagent.common.BaseResponse]
+     *   with preset Content-Type 'text/event-stream'
+     * </pre>
+     * 即：<b>流式接口的错误，不能走"返回 JSON"那条路</b>。
+     *
+     * <p><b>但简单地换成 {@code complete()} 也有代价</b>，所以这里用三路把它补回来：
+     * <ol>
+     *   <li><b>前端</b>：推 {@code error} 事件 —— 用户能看到失败；</li>
+     *   <li><b>服务端</b>：{@code log.error} 记录完整堆栈 —— 弥补被丢弃的根因
+     *       （若只推事件而不记日志，而事件推送恰好也失败——比如客户端断开——
+     *        错误就彻底消失，谁都不知道）；</li>
+     *   <li><b>框架</b>：{@code complete()} 正常收尾 —— 避免异常逃逸触发上面那个错误。</li>
+     * </ol>
+     *
+     * <p><b>诚实的遗留</b>：第 3 步让框架无法自动感知失败，因此<b>失败统计不能依赖框架</b>。
+     * 这里先用 {@link #streamFailureCount} 显式计数兜住，等做可观测性时换成正式指标。
+     */
+    private void handleStreamError(SseEmitter emitter, Throwable error) {
+        // 第 1 路：前端 —— 推 error 事件（放在最前，保证用户先收到反馈）
+        sendEvent(emitter, StreamEventType.ERROR, error.getMessage());
+
+        // 第 2 路：服务端 —— 记录完整根因（含堆栈），这是 complete() 方案必须补上的一环
+        long count = streamFailureCount.incrementAndGet();
+        log.error("[流式对话] 失败（累计 {} 次）：{}", count, error.getMessage(), error);
+
+        // 第 3 路：框架 —— 正常关闭，不抛异常
+        completeQuietly(emitter);
+    }
+
+    /**
+     * 安静地关闭流。
+     *
+     * <p><b>为什么必须包 try-catch</b>：{@code complete()} 在"响应已提交"或
+     * "连接已断开"时会抛 {@link IllegalStateException}。若让它逃逸，异常又会被
+     * Spring 交给全局异常处理器，于是<b>再次触发上面那个 "No converter" 问题</b>——
+     * 我们刚绕开的坑会绕回来。
+     *
+     * <p>关闭失败本身通常不是故障（连接可能已由客户端断开），所以只记 debug。
+     */
+    private void completeQuietly(SseEmitter emitter) {
+        try {
+            emitter.complete();
+        } catch (Exception e) {
+            log.debug("[流式对话] 关闭流时异常（通常是客户端已断开）：{}", e.getMessage());
+        }
     }
 
     /**

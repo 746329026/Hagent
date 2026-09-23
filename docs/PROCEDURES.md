@@ -765,3 +765,137 @@ data:[DONE]
 所以必须放行。这个认知在 SseSupport 里落地成集中判定，供统一响应包装器调用。
 
 ---
+
+
+---
+
+# 阶段 2 · 统一契约（响应 / 异常 / 错误码）
+
+## 2.1 统一响应包装器 GlobalResponseBodyAdvice
+
+**目标**：让所有 Controller 返回值自动包成 {code,message,data}，业务代码不再手写包装。
+
+**beforeBodyWrite 的四条分支（顺序不能换）**：
+
+| 顺序 | 分支 | 动作 |
+|---|---|---|
+| 1 | 放行流式（SseEmitter / Publisher / text-event-stream） | 原样返回，绝不包装 |
+| 2 | 已经是 BaseResponse | 原样返回，避免二次包装 |
+| 3 | 走 StringHttpMessageConverter | 手动 JSON 序列化 + 改写 Content-Type |
+| 4 | 其余 | 包成 BaseResponse.success |
+
+**只包 Controller**：`@RestControllerAdvice(basePackages="com.hagent.controller")`
+把作用范围限制住。若不限制，会连 Spring 内部（错误页、静态资源）一起包，破坏它们的输出。
+
+## 2.2 SseSupport 回归测试
+
+为放行判定写了 5 个测试，覆盖三种形态 + 两个边界：
+
+| 测试 | 覆盖 |
+|---|---|
+| sseEmitterMustBypass | SseEmitter 必须放行 |
+| publisherMustBypass | Flux（Publisher）必须放行 |
+| eventStreamMediaTypeMustBypass | text/event-stream 必须放行 |
+| ordinaryValueMustNotBypass | 普通值不能放行 |
+| nullBodyWithNullMediaTypeMustNotBypass | 边界：都为 null 不能放行 |
+
+**为什么给它写测试**：放行判定是"统一响应 vs SSE"冲突的唯一防线，
+漏一个分支就有一条流式接口静默损坏。属于"错了不容易发现但很致命"的逻辑。
+
+---
+
+### 坑 16 · Jackson 版本冲突：Spring Boot 4 用的是 Jackson 3
+
+**现象**：编译报错，找不到 `com.fasterxml.jackson.core.JsonProcessingException`
+与 `com.fasterxml.jackson.databind.ObjectMapper`。
+
+**排查**：看依赖树发现两种 Jackson 并存：
+```
+tools.jackson.core:jackson-databind:3.1.5        <- Jackson 3（Spring Boot 4 用的）
+tools.jackson.core:jackson-core:3.1.5
+com.fasterxml.jackson.core:jackson-annotations:2.21  <- 只有注解还是 Jackson 2 的包名
+```
+
+**根因**：**Spring Boot 4.1.1 已迁移到 Jackson 3**，其类在 `tools.jackson.*` 包下
+（不再是 `com.fasterxml.jackson.databind`）。而 `com.fasterxml.jackson.annotation`
+（注解包）保持不变，所以两种包名会同时出现，容易误判。
+
+**修复**：
+```java
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;   // Jackson 3：完整异常层次
+```
+（`writeValueAsString` 声明抛 `tools.jackson.core.JacksonException`，
+它继承 RuntimeException，而 Jackson 2 的 `JsonProcessingException` 是受检异常。）
+
+> **可迁移认知**：**大版本升级会改包名**。
+> 编译报"找不到包"时，先确认"这个库在当前版本里是不是换了包名"，
+> 而不是怀疑依赖没引进来 —— 后者会让人去加依赖，方向就错了。
+
+---
+
+### 坑 17 · 流式接口的错误不能走"返回 JSON"
+
+**现象**：流式接口出错时，日志出现
+```
+HttpMessageNotWritableException:
+No converter for [class com.hagent.common.BaseResponse]
+with preset Content-Type 'text/event-stream'
+```
+
+**根因链条**：
+1. 流式端点声明 `produces = text/event-stream`，响应格式一开始就被**锁死**；
+2. 出错时代码调用 `emitter.completeWithError(error)`，它把异常**抛给 Spring 的异步链路**；
+3. 异常落到全局异常处理器，它返回 `BaseResponse`（JSON）；
+4. Spring 想把 JSON 写进响应，但 Content-Type 已是 `text/event-stream`，
+   **HTTP 不允许中途换格式** → 找不到转换器 → 报错。
+
+**为什么"现在才出现"**：阶段 1 没有全局 `@ExceptionHandler(Exception.class)` 兜底，
+流式错误靠 `error` 事件自然处理；阶段 2 引入全局兜底后，
+它开始**拦截流式里逃逸出来的异常**，于是把"流式错误"和"普通错误"混为一谈。
+
+**修复**（三路并行，缺一不可）：
+| 路 | 动作 | 解决什么 |
+|---|---|---|
+| 前端 | 推 error 事件 | 用户能看到失败 |
+| 服务端 | `log.error` 记录完整堆栈 | 弥补被丢弃的根因 |
+| 框架 | `emitter.complete()` 正常收尾 | 避免异常逃逸触发上述错误 |
+
+**为什么不能简单地只把 completeWithError 换成 complete**（这是本人提出的质疑）：
+| 潜在问题 | 说明 |
+|---|---|
+| 框架感知不到失败 | 它当成"正常结束"，将来接入指标时"流式成功率"会虚高 |
+| 错误可能半路丢失 | 若 error 事件推送也失败（客户端断开），错误彻底消失 |
+| 服务端丢根因 | 异常对象被丢弃，日志里没有"为什么失败"的堆栈 |
+| 资源清理路径不同 | 异常清理分支在边界情况下往往更彻底 |
+
+所以补上 `log.error` 与显式计数器：
+`streamFailureCount`（AtomicLong）—— 因为框架不感知失败，**失败统计必须自己显式记录**。
+这是"用显式替代隐式"：既然框架不认，就自己记。
+
+**验证**（用无效 key 专门触发错误路径）：
+```
+流式: event:error / data:401 Unauthorized ...     <- SSE 格式正确，无 converter 错误
+同步: {"code":50000,"message":"服务内部错误"}        <- 统一契约正确
+日志: [流式对话] 失败（累计 1 次）：401 Unauthorized... <- 含完整堆栈
+```
+并用时间戳确认：`No converter for` 只出现在修复前（16:10 / 16:50），
+修复后的验证运行（17:24）**0 次**。
+
+> **可迁移认知**：**流式接口的错误，应该是"流的一部分"**（一个 error 事件），
+> 而不是"跳出去"变成 JSON。HTTP 响应一旦提交成某种格式，就改不回来了。
+
+---
+
+### 已知遗留 · 日志噪声（暂不修）
+
+流式失败时日志里会出现大量重复：
+```
+ERROR o.s.ai.chat.model.MessageAggregator : Aggregation Error
+ERROR reactor.core.publisher.Operators : Operator called default onErrorDropped
+```
+Spring AI 内部的聚合器也在处理同一错误，一次失败会刷出几十行堆栈。
+**不是功能问题，是可读性问题**；违背"日志分级、别刷屏"的原则。
+计划：等做可观测性阶段统一降噪处理。
+
+---
