@@ -7,6 +7,8 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
 
 /**
  * AI 能力装配 —— 把底层模型（{@link ChatModel}）装配成业务可用的 {@link ChatClient}。
@@ -80,5 +82,26 @@ public class AiConfig {
     @Bean
     public Advisor traceAdvisor(AdvisorProperties advisorProperties) {
         return new PromptTraceAdvisor(advisorProperties);
+    }
+
+    /**
+     * 任务意图理解的提示词（来自 classpath 资源文件）。
+     *
+     * <p><b>为什么把提示词做成资源文件而不是 Java 里的字符串常量</b>：
+     * <ul>
+     *   <li>提示词是<b>业务语义</b>的载体（字段含义、取值字典、判断规则），
+     *       调整频繁，而调整<b>不该需要改 Java 代码、重新编译</b>；</li>
+     *   <li>Markdown 能表达标题与列表结构，可读性远好于字符串拼接；</li>
+     *   <li>git 能直接 diff 出"提示词改了什么"——这是提示词迭代时最有用的信息。</li>
+     * </ul>
+     *
+     * <p><b>为什么用 Bean 而不是在 Service 里用 {@code @Value} 注入</b>：
+     * 做成 Bean 之后，将来如需按场景挂不同提示词（例如"会话模式"与"工作流模式"
+     * 用不同的意图理解提示词），只需在这里多加一个 Bean 并在调用处按名选取，
+     * 不必改动 Service 的注入方式。
+     */
+    @Bean("taskIntentPrompt")
+    public Resource taskIntentPrompt() {
+        return new ClassPathResource("prompts/task-intent-prompt.md");
     }
 }

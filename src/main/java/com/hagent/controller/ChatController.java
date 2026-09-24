@@ -1,9 +1,11 @@
 package com.hagent.controller;
 
 import com.hagent.app.ChatAppService;
+import com.hagent.app.TaskIntentAppService;
 import com.hagent.common.BaseResponse;
 import com.hagent.dto.ChatRequest;
 import com.hagent.dto.ChatResponse;
+import com.hagent.dto.TaskIntent;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
@@ -35,6 +37,7 @@ import reactor.core.publisher.Flux;
 public class ChatController {
 
     private final ChatAppService chatAppService;
+    private final TaskIntentAppService taskIntentAppService;
 
     /**
      * 同步对话。
@@ -42,6 +45,20 @@ public class ChatController {
     @PostMapping
     public BaseResponse<ChatResponse> chat(@Valid @RequestBody ChatRequest request) {
         return BaseResponse.success(chatAppService.chat(request.message()));
+    }
+
+    /**
+     * 任务意图理解 —— 结构化输出的落点。
+     *
+     * <p><b>返回的是强类型对象</b>（{@link TaskIntent}），不是一段文本。
+     * 这样下游就能做<b>确定性判断</b>：该产出什么文件、要不要先问用户确认 ——
+     * 而不必去解析模型返回的自然语言。
+     *
+     * <p>它也被统一响应包装成 {@code {"code":0,"data":{...intent...}}}。
+     */
+    @PostMapping("/intent")
+    public BaseResponse<TaskIntent> intent(@Valid @RequestBody ChatRequest request) {
+        return BaseResponse.success(taskIntentAppService.analyze(request.message()));
     }
 
     // ========================================================================

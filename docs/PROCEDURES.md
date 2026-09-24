@@ -25,21 +25,24 @@
 ```text
 Hagent/
 ├── docs/
-│   └── PROCEDURES.md                    本文件
+│   ├── PROCEDURES.md                    本文件（按阶段记录目标/文件/踩坑/结果）
+│   └── WORKING-AGREEMENT.md             协作协议（推进流程、汇报格式、验证原则）
 ├── src/main/java/com/hagent/
 │   ├── HagentApplication.java           启动类
 │   ├── advisor/
 │   │   └── PromptTraceAdvisor.java      调用链日志切面
 │   ├── app/
 │   │   ├── ChatAppService.java          对话业务编排（同步 + 流式）
+│   │   ├── TaskIntentAppService.java    任务意图理解（结构化输出）
 │   │   └── HealthAppService.java        健康检查业务
 │   ├── common/
 │   │   ├── BaseResponse.java            统一响应体
 │   │   ├── ErrorCode.java               错误码枚举（分段 + 预留）
 │   │   └── GlobalResponseBodyAdvice.java 统一响应包装器（含 SSE 放行）
 │   ├── config/
-│   │   ├── AdvisorProperties.java       切面参数
-│   │   ├── AiConfig.java                ChatClient 装配
+│   │   ├── AdvisorProperties.java       切面参数（日志截断等）
+│   │   ├── AiConfig.java                ChatClient 装配 + 提示词资源 Bean
+│   │   ├── StreamProperties.java        SSE 参数（超时/心跳/重连间隔）
 │   │   ├── VectorStoreConfig.java       向量库装配（含表名自检）
 │   │   ├── VectorStoreDataSourceProperties.java
 │   │   ├── VectorStoreProperties.java
@@ -50,7 +53,8 @@ Hagent/
 │   │   └── HealthController.java        健康检查接口
 │   ├── dto/
 │   │   ├── ChatRequest.java
-│   │   └── ChatResponse.java
+│   │   ├── ChatResponse.java
+│   │   └── TaskIntent.java              任务意图（含 Deliverable 枚举）
 │   ├── exception/
 │   │   ├── AgentException.java          业务异常基类
 │   │   └── GlobalExceptionHandler.java  全局异常处理器
@@ -61,7 +65,11 @@ Hagent/
 │       └── SseSupport.java              流式放行判定
 ├── src/main/resources/
 │   ├── application.yml                  主配置（进仓库）
-│   └── application-local.yml.example    私有配置模板
+│   ├── application-local.yml.example    私有配置模板
+│   ├── prompts/
+│   │   └── task-intent-prompt.md        任务意图的业务语义提示词
+│   └── static/
+│       └── stream-demo.html             流式三种实现的对比页
 └── src/test/java/com/hagent/
     └── stream/SseSupportTest.java       放行判定回归测试
 ```
@@ -70,7 +78,10 @@ Hagent/
 
 ## 进度记录
 
-## 1. 初始化项目
+> 章节号与项目阶段号对齐（阶段 0 起）。编号中跳过"阶段 4"是因为
+> 手册里的阶段 4（手写 Advisor）已在阶段 1 用 `PromptTraceAdvisor` 完成。
+
+## 0. 初始化项目
 
 ### 本阶段目标
 
@@ -216,7 +227,7 @@ pgvector 连通/扩展   : [OK] vector 0.8.6 @ jdbc:postgresql://localhost:5432/
 
 ---
 
-## 2. 接入模型 + 最小对话（同步链路）
+## 1. 接入模型 + 最小对话（同步链路）
 
 ### 本阶段目标
 
@@ -307,7 +318,7 @@ pgvector 连通/扩展   : [OK] vector 0.8.6 @ jdbc:postgresql://localhost:5432/
 
 ---
 
-## 3. 流式对话（SSE）+ 放行判定
+## 2. 流式对话（SSE）+ 放行判定
 
 ### 本阶段目标
 
@@ -412,6 +423,311 @@ data:[DONE]
 - 放行生效：流式接口保持 SSE 格式，未被包装
 - 流式错误路径：`event:error` + 服务端堆栈日志 + 显式失败计数，无转换器错误
 - 回归测试：`Tests run: 5, Failures: 0, Errors: 0`
+
+---
+
+---
+
+## 3. 结构化输出（任务意图理解）
+
+### 本阶段数据流向
+
+```mermaid
+flowchart TD
+    A["HTTP 请求<br/>POST /api/chat/intent<br/>{message: '...'}"] --> B
+
+    subgraph web["Web 层"]
+        B["ChatController.intent()<br/>@Valid 校验请求体"]
+    end
+
+    B --> C
+
+    subgraph app["应用层"]
+        C["TaskIntentAppService.analyze()"]
+        C --> C1["挂 system 提示词<br/>（业务语义）"]
+        C1 --> C2["chatClient.prompt()<br/>.system(resource).user(msg)<br/>.call().entity(TaskIntent.class)"]
+        C2 --> C3["validate()<br/>解析后校验（非空/取值合法/长度）"]
+    end
+
+    C2 -.->|"schema 由框架生成"| M
+    M["DeepSeek API<br/>deepseek-flash"] -.->|"JSON 响应"| C2
+
+    C3 --> D
+
+    subgraph out["出口"]
+        D["BaseResponse&lt;TaskIntent&gt;<br/>{code:0, data:{...}}"]
+    end
+
+    style M fill:#e8f0fe
+    style C3 fill:#e6f6ec
+```
+
+**两条并行路径（本阶段关键）**：
+
+```mermaid
+flowchart LR
+    subgraph ch1["① 提示词通道"]
+        P1["业务语义写进 prompt<br/>（字段含义/取值字典/判断规则）"] --> M1["模型看着要求<br/>自己写 JSON"]
+    end
+
+    subgraph ch2["② 原生通道"]
+        P2["JSON Schema 通过 API 参数<br/>response_format 传给模型"] --> M2["服务端保证<br/>输出格式"]
+    end
+
+    M1 --> R["结构化结果"]
+    M2 --> R
+
+    style ch2 fill:#e6f6ec
+```
+
+**实测结论：本项目走的是通道 ②（原生）** —— 日志里模型收到的 prompt 中
+**只有业务语义，没有任何 schema 描述**（完整 1013 字符，已逐段确认）。
+
+### 本阶段核心对象结构
+
+```mermaid
+mindmap
+  root(("TaskIntent<br/>任务意图"))
+    intent
+      一句话概括
+      只描述"做什么"
+    deliverables
+      PPT
+      EXCEL
+      DOCUMENT
+      REPORT
+      EMAIL
+        代表"对外发送"链路
+        让 needConfirmation 有触发场景
+      ANSWER
+        纯问答
+      UNKNOWN
+        显式未知
+        区别于空数组
+    constraints
+      模板 / 收件人 / 范围 / 篇幅
+      保留原文关键实体
+    needConfirmation
+      true: 对外发送/导出/改删/金额/不可撤销
+      false: 只读查询/仅生成草稿
+      把握不准时填 true
+```
+
+### 本阶段目标
+
+- 让模型输出**强类型对象**而不是一段文本
+- 搞清结构化输出的**两条通道**，并实测本项目走哪条
+- 区分"**schema 管格式**"与"**提示词管语义**"两件事
+
+### 本阶段价值（为什么做）
+
+- 办公 Agent 的第一步是"**结构化地理解用户要做什么**"。拿到结构化结果，下游才能做
+  确定性判断（该调什么工具、要不要先问用户、要产出什么文件），而不必解析自然语言。
+- 阶段 9 的多步 Agent 直接把 `TaskIntent` 当作规划输入；
+  `needConfirmation` 是阶段 10 中断确认的触发条件。
+- 提示词外置成资源文件的模式，会被阶段 7（RAG 注入）、阶段 12（记忆注入）复用。
+
+### 主要新增/涉及文件
+
+- `src/main/java/com/hagent/dto/TaskIntent.java`
+  - 类：`TaskIntent`（record）+ 内部枚举 `Deliverable`
+  - 字段：`intent` / `deliverables` / `constraints` / `needConfirmation`
+  - 作用：定义"任务理解"的契约；record 的字段结构会被框架生成为 JSON Schema
+  - ★ 枚举 `Deliverable` 与提示词里的字典构成"**双字典**"，两者无编译期联系，
+    失步会导致静默失效或解析报错（详见踩坑记录）
+
+- `src/main/resources/prompts/task-intent-prompt.md`
+  - 本阶段新增（2344 字节）
+  - 内容：四个字段的**业务语义** —— 含义、合法取值、判断规则、边界与兜底
+  - 作用：schema 管格式，**这份文件管语义**
+  - 为什么放资源文件：提示词调整频繁，**不该需要改 Java 代码、重新编译**；
+    且 Markdown 有结构、git 能 diff 出"改了什么"
+
+- `src/main/java/com/hagent/app/TaskIntentAppService.java`
+  - 类：`TaskIntentAppService`
+  - 方法：
+    - `analyze(String)`：`.system(resource).user(msg).call().entity(TaskIntent.class)`
+    - `validate(String, TaskIntent)`：**解析后校验** —— 结构非空、交付物列表非空、
+      `UNKNOWN` 不与具体值混用、约束条目长度符合约定
+  - 构造器：手写（而非 `@RequiredArgsConstructor`），因为 `Resource` 参数需要
+    `@Qualifier("taskIntentPrompt")` 按名限定
+    - 理由：容器里可能存在多个 `Resource` 类型 Bean（Spring Boot 自身也会注册），
+      不加限定有"注入到意料之外的资源"的风险，且**这类错误只在运行时暴露**
+
+- `src/main/java/com/hagent/config/AiConfig.java`
+  - 本阶段修改
+  - 方法：`taskIntentPrompt()` 返回 `ClassPathResource("prompts/task-intent-prompt.md")`
+  - 作用：把提示词做成 Bean，将来"不同场景用不同提示词"时加 Bean 即可，不改调用方
+
+- `src/main/java/com/hagent/controller/ChatController.java`
+  - 本阶段修改
+  - 方法：`intent(ChatRequest)` → `POST /api/chat/intent`
+  - 返回 `BaseResponse<TaskIntent>`，被统一响应包装
+
+### 踩坑记录
+
+- 问题 1：字段选型跑偏 —— 一开始选了"用户情绪倾向"
+  - 现象：教练提议 `ChatReport(topic, keyPoints, sentiment)`，本人追问
+    "我们的 agent 和用户情绪有什么关系"
+  - 原因：**按"哪个字段好演示技术"选字段，而不是按"这个项目真的要用什么"选**
+  - 处理方式：换成办公场景真正会被消费的"需求提取"结构
+  - 收获：**字段的业务含义决定了这个功能有没有价值**。
+    "能演示"和"会被消费"是两回事——后者才是不被清理掉的理由
+    （本项目已清理过多次"备而不用"：JPA 死配置、jsoup 依赖、未使用的事件常量）
+
+- 问题 2：`SseEmitter` 不认识 `ServerSentEvent`（阶段 3 遗留记录）
+  - 现象：用 `emitter.send(ServerSentEvent)` 推送时，**一个事件都发不出去**，
+    客户端只看到"连上就断"，而服务端日志干干净净
+  - 原因：`ServerSentEvent` 是给 **WebFlux / 返回 Publisher** 那条路用的
+    （由 `ServerSentEventHttpMessageWriter` 写帧）；
+    而 `SseEmitter.send(Object)` 走 `ResponseBodyEmitter` 的普通序列化路径，
+    把它当成"要转成 JSON 的普通对象"，于是构造失败。
+    用 `javap` 读 `SseEmitter` 的字节码常量池可证实：**其中完全没有 `ServerSentEvent` 的引用**
+  - 处理方式：改用 `SseEmitter.event()` 构建器（`name()` / `id()` / `reconnectTime()`）
+  - 加固：`sendEvent` 区分"客户端断开（`IOException` → debug）"与
+    "其它异常（→ warn）"——**之前的静默吞异常让这个 bug 完全没有痕迹**
+  - 收获：**同一个框架里"流式"可能有两条路径，各自认不同的事件表达，不能混用**
+
+- 问题 3：验证方法不完整（方法论层面的坑）
+  - 现象：教练说"你应该能看到 `retry` 字段"，但浏览器 `EventStream` 面板不展示帧级字段，
+    导致误判为功能没生效
+  - 原因：把"**数据发出去了**"当成"**观察者能看到它**"
+  - 处理方式：用原始 TCP 抓字节，证明 `retry:5000` 确实在帧里（首个事件带、后续不带）
+  - 收获：加验证项时必须**分别确认**这两件事：
+    ① 数据确实发出来了；② 观察者能看到它。二者缺一，验证就是无效的
+
+### 阶段结果
+
+- 接口跑通，实测返回结构化的任务意图：
+
+```text
+[任务意图] 输入=帮我把上季度华东区的费用数据整理成三页PPT发给张总
+  → intent=整理华东区上季度费用数据做成PPT
+    deliverables=[PPT, EMAIL]
+    needConfirmation=true
+    constraints=[上季度, 华东区, 三页, 发给张总]
+```
+
+- **验证了结构化输出的通道**：日志中模型收到的 prompt（完整 1013 字符）
+  **只含业务语义，不含任何 schema 描述** → 本项目走**原生通道**
+  （schema 由框架生成，经 API 参数传递，不拼进 prompt）
+  - 这正是参考实现手册里记录过的历史教训所指向的结论；
+    本阶段用自己项目的日志**独立复现**了它，而不是照抄结论
+- 交付物识别正确：说了"做成 PPT + 发给张总" → `[PPT, EMAIL]`（含对外发送 → 需确认）
+- 约束提取保留了原文关键实体（"张总"未被概括成"指定收件人"）
+
+---
+
+---
+
+## 4. 结构化输出的通道实验（补充记录）
+
+### 实验目的
+
+阶段 3 里我们发现"模型收到的 prompt 中没有 schema"，据此判断走的是原生通道。
+但当时**只验证了"我们这条路上没有 schema"，没验证"另一条路上有 schema"** ——
+证据是单向的。本实验把两条通道**都显式跑一遍**，把差异变成可量化数据。
+
+### 实验方式
+
+写一个临时实验包 `com.hagent.experiment`（两个文件，验证完即删）：
+
+- `ConverterChannelComparison`（record）：承载对比结果
+- `ConverterChannelExperimentController`：两个端点
+  - `GET /experiment/converter-channel/dry-run` —— **不调模型**，只打印两条通道的产物（零 token）
+  - `GET /experiment/converter-channel` —— 真实调用模型两次，两条通道各一次
+
+关键 API（用 `javap` 读字节码确认，非猜测）：
+
+```java
+StructuredOutputConverter<T> extends Converter<String,T>, FormatProvider
+  String getFormat()               // 提示词通道：这段文本会被拼进 prompt
+  String getJsonSchema()           // 原生通道：这段经 API 参数传递
+  String NO_JSON_SCHEMA            // 缺省值：表示"没有 schema 可用"
+
+BeanOutputConverter<T> implements StructuredOutputConverter<T>
+  // 同时提供 getFormat() 与 getJsonSchema()
+  // -> 一个转换器对象同时具备两条通道的表达能力，框架据内部实现选择走哪条
+```
+
+### 实验结果
+
+| 对比项 | ① 提示词通道（`.entity(converter)`） | ② 原生通道（`.entity(Class)`，当前用法） |
+|---|---|---|
+| prompt 里有无 schema | 有（983 字符全进 prompt） | 无 |
+| 通道产物长度 | `getFormat()` = 983 字符 | `getJsonSchema()` = 655 字符 |
+| 耗时 | 2177 ms | **1572 ms（快约 28%）** |
+| `intent` | 整理华东区上季度费用做成PPT | 整理上季度华东区费用数据并做PPT |
+| `deliverables` | [PPT, EMAIL] | [PPT, EMAIL] |
+| `constraints` | [上季度, 华东区, 三页, 发给张总] | 同左 |
+| `needConfirmation` | true | true |
+
+`getFormat()` 的组成（实测原文）：
+
+```text
+Your response should be in JSON format.
+Do not include any explanations, only provide a RFC8259 compliant JSON response...
+Do not include markdown code blocks in your response.
+Remove the ```json markdown from the output.
+Here is the JSON Schema instance your output must adhere to:
+```{ ...655 字符的 schema... }```
+```
+
+即：`getFormat()` = **一段英文指令（328 字符）+ 完整 schema（655 字符）**。
+
+### 实验结论
+
+1. **两条通道功能等价** —— 四个字段结果一致（措辞微差），说明走哪条不影响业务正确性。
+2. **原生通道更快、更省 token** —— 提示词通道把 983 字符全部塞进 prompt，
+   而原生通道的 schema 走 API 参数，**不占 prompt token**。
+3. **★ 通道不是我们选的** —— 我们只写了 `.entity(TaskIntent.class)`，
+   框架据内部实现决定走哪条。**这是观察到的行为，不是我们的决策。**
+   风险：升级框架或更换模型时通道可能变化，而业务代码毫无感知 ——
+   **因此必须保留验证手段**（本次实验的代码思路应留档，将来换模型时复测）。
+4. **schema 从 Java 类型自动生成**（意外发现）：`Deliverable` 枚举自动变成了
+   `"enum" : [ "PPT", ..., "UNKNOWN" ]`，我们没写一行 schema 定义。
+
+### ★ 由此修正的一个认知："双字典"其实只有两处
+
+根据实验 4 的发现，需要同步的地方不是三处而是两处：
+
+| 字典 | 出处 | 是否自动同步 |
+|---|---|---|
+| 代码侧（Jackson 反序列化） | `Deliverable` 枚举 | —— |
+| **schema 侧（模型输出约束）** | **框架从枚举自动生成** | ✅ **自动** |
+| **提示词侧（模型看到的取值范围）** | `task-intent-prompt.md` 手写 | ❌ **需手工对齐** |
+
+所以 `TaskIntentAppService.validate()` 里的校验，防的是"**枚举与提示词失步**"这一处，
+而不是"三处失步"。负担比原先估计的小，但**这一处仍然必须防**。
+
+### 坑：把"我描述了它"当成"我做了它"
+
+- 现象：教练在对话里贴出了实验代码，之后断言"编译通过"，但实际用工具检查发现
+  **源码目录与编译产物里都没有这两个文件**，因此端点未注册，
+  请求落到静态资源处理器，返回 `No static resource experiment/...`。
+- 原因：**把"写进对话"当成"写进文件"**；而编译输出恰好显示 `BUILD SUCCESS`（因为真的没有源文件要编），
+  造成"编译过了"的错觉。
+- 修正：涉及"文件是否存在、代码是否生效"时，**必须用工具确认**（列出目录 / 检查 class 文件 /
+  真实请求端点），不能凭印象断言。
+- 这与之前"数据发出去了 ≠ 观察者能看到"是**同一类错误**：
+  把一件事和它的表征当成同一件事。
+
+### 坑：同一错误重复 5 次 —— API Key 未生效
+
+- 现象：`DeepSeek API key must be set` 在协作过程中重复出现 **5 次**
+- 根因：**配置来源不唯一**
+  - `application-local.yml` 里是空占位符 `${DEEPSEEK_API_KEY:}`（读环境变量，没有则为空）
+  - IDEA 有**两种运行方式**，环境变量来源不同：
+    | 运行方式 | 环境变量 |
+    |---|---|
+    | 运行"当前文件"（编辑器绿色箭头） | ❌ 不带 |
+    | 运行指定配置（右上角下拉框选 `HagentApplication`） | ✅ 带（已配） |
+  - 命令行启动则要手动 `$env:DEEPSEEK_API_KEY=...`
+- 修正方向：把 key 落进 `application-local.yml`（该文件已 gitignore、不进仓库），
+  使三种启动方式都能工作；或把启动命令固化成脚本。
+- 收获：**当一个操作性错误重复出现 ≥2 次时，必须机制化解决，而不是继续提醒**
+  （已写入 `WORKING-AGREEMENT.md` 第 6 条）。
+  重复提醒等于把"人会忘"这个事实当不存在。
 
 ---
 
