@@ -1,14 +1,17 @@
 package com.hagent.config;
 
+import com.hagent.advisor.ConversationMemoryAdvisor;
 import com.hagent.advisor.PromptTraceAdvisor;
+import com.hagent.memory.ChatMemoryAdapter;
+import com.hagent.memory.ConversationMemory;
+import com.hagent.memory.MemoryProperties;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.Resource;
 
 /**
  * AI 能力装配 —— 把底层模型（{@link ChatModel}）装配成业务可用的 {@link ChatClient}。
@@ -65,9 +68,19 @@ public class AiConfig {
      * 业务代码不需要在每个调用点重复声明。
      */
     @Bean
-    public ChatClient chatClient(ChatModel chatModel, AdvisorProperties advisorProperties) {
+    public ChatClient chatClient(ChatModel chatModel,
+                                 AdvisorProperties advisorProperties,
+                                 ConversationMemory memory,
+                                 MemoryProperties memoryProperties) {
         return ChatClient.builder(chatModel)
-                .defaultAdvisors(traceAdvisor(advisorProperties))
+                // ★ 两个切面的顺序由数据依赖决定，不能随意：
+                //   order 越小越靠外层（先执行、后收尾）
+                //   traceAdvisor        order=0 -> 最外层：记录【注入后】的完整 prompt
+                //   memoryAdvisor       order=1 -> 内层  ：负责把历史注入 prompt
+                // 若顺序反了，日志将看不到历史注入的效果，排查记忆问题时会误判为"没生效"。
+                .defaultAdvisors(
+                        traceAdvisor(advisorProperties),
+                        conversationMemoryAdvisor(memory, memoryProperties))
                 // 默认 system prompt 留到阶段 1 下一步再定：
                 // 它必须与"实际挂载的工具清单"保持一致（否则会出现
                 // "提示词里写了某个工具、但工具没注册"这类静默失效），
@@ -85,23 +98,40 @@ public class AiConfig {
     }
 
     /**
-     * 任务意图理解的提示词（来自 classpath 资源文件）。
+     * 会话记忆切面（order=1，在日志切面内层）。
      *
-     * <p><b>为什么把提示词做成资源文件而不是 Java 里的字符串常量</b>：
-     * <ul>
-     *   <li>提示词是<b>业务语义</b>的载体（字段含义、取值字典、判断规则），
-     *       调整频繁，而调整<b>不该需要改 Java 代码、重新编译</b>；</li>
-     *   <li>Markdown 能表达标题与列表结构，可读性远好于字符串拼接；</li>
-     *   <li>git 能直接 diff 出"提示词改了什么"——这是提示词迭代时最有用的信息。</li>
-     * </ul>
-     *
-     * <p><b>为什么用 Bean 而不是在 Service 里用 {@code @Value} 注入</b>：
-     * 做成 Bean 之后，将来如需按场景挂不同提示词（例如"会话模式"与"工作流模式"
-     * 用不同的意图理解提示词），只需在这里多加一个 Bean 并在调用处按名选取，
-     * 不必改动 Service 的注入方式。
+     * <p>它依赖的是本项目的 {@code ConversationMemory} 接口 ——
+     * <b>具体用 file / redis / mysql 由配置决定，本类完全无感</b>。
+     * 这就是"换实现只改配置，不改代码"在装配层的体现。
      */
-    @Bean("taskIntentPrompt")
-    public Resource taskIntentPrompt() {
-        return new ClassPathResource("prompts/task-intent-prompt.md");
+    @Bean
+    public Advisor conversationMemoryAdvisor(ConversationMemory memory,
+                                             MemoryProperties memoryProperties) {
+        return new ConversationMemoryAdvisor(memory, memoryProperties);
     }
+
+    /**
+     * 把本项目的 {@link ConversationMemory} 适配成框架的 {@link ChatMemory}。
+     *
+     * <p>需要框架能力的地方（例如将来挂框架自带的 Advisor）用这个适配后的类型；
+     * 需要预算控制的地方用原生接口。两个接口的关注点不同，不能互相替代 ——
+     * 详见 {@link ChatMemoryAdapter} 的类注释。
+     */
+    @Bean
+    public ChatMemory chatMemory(ConversationMemory memory, MemoryProperties memoryProperties) {
+        return new ChatMemoryAdapter(memory, memoryProperties);
+    }
+
+    // ========================================================================
+    // ⚠️ 已删除：taskIntentPrompt Bean
+    //
+    // 它曾把 "任务意图理解" 的提示词以 Resource Bean 的形式暴露给
+    // TaskIntentAppService。整个意图理解链路（DTO / Service / 提示词 / /chat/intent 端点）
+    // 已随"前置意图提取层"这一设计一并撤回，理由见 docs/PROCEDURES.md。
+    //
+    // ★ 但这一节留下的【提示词外置】做法被后续阶段沿用：
+    //   提示词是业务语义的载体、调整频繁，而调整不该要求改 Java、重新编译。
+    //   放在 prompts/*.md 还能用 git 直接 diff 出"提示词改了什么"。
+    //   阶段 7（RAG 的评判提示词）与阶段 9（Agent 的系统提示词）会继续用这个模式。
+    // ========================================================================
 }

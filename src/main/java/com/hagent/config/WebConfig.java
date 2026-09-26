@@ -1,5 +1,6 @@
 package com.hagent.config;
 
+import com.hagent.controller.ChatController;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
@@ -62,11 +63,16 @@ public class WebConfig implements WebMvcConfigurer {
                 .allowedHeaders("*")
                 // 暴露给前端的响应头。浏览器默认只允许 JS 读取少数几个"安全"响应头，
                 // 其余必须显式暴露，否则前端能拿到响应、却读不到这些头。
-                // ⚠️ 注意：X-Request-Id 只有在【服务端真正生成并写入该响应头】后才有意义。
-                // 当前服务端尚未实现 RequestId 过滤器，因此前端现在读它只会得到 null，
-                // 且不会报错。一旦实现过滤器（见本类下方待办 2），此处配置才会真正生效。
-                // 保留原因：删掉容易在实现过滤器时忘了加回来，导致前端读不到又一轮排查。
-                .exposedHeaders("Content-Type", "X-Request-Id")
+                //
+                // X-Conversation-Id：阶段 6 引入。会话 ID 通过响应头返回给前端，
+                // 前端下次请求带上它才能续用同一个会话（看到历史）。
+                // ★ 必须在这里暴露，否则前端读不到 —— 而且不会报错，只是永远拿到 null。
+                //
+                // ⚠️ X-Request-Id 目前只是"预留"：服务端尚未实现 RequestId 过滤器，
+                //    因此前端现在读它只会得到 null，且不会报错。
+                //    保留原因：删掉容易在实现过滤器时忘了加回来，导致前端读不到又一轮排查。
+                .exposedHeaders("Content-Type", "X-Request-Id",
+                        ChatController.CONVERSATION_ID_HEADER)
                 // 允许携带凭证（Cookie / Authorization 头 / TLS 客户端证书）。
                 // 规范禁止 allowCredentials(true) 与 allowedOrigins("*") 共存，
                 // 这是"必须用白名单"的第二个理由（第一个理由是安全上不该对全网开放）。

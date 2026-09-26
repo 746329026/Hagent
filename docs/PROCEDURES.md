@@ -80,6 +80,10 @@ Hagent/
 
 > 章节号与项目阶段号对齐（阶段 0 起）。编号中跳过"阶段 4"是因为
 > 手册里的阶段 4（手写 Advisor）已在阶段 1 用 `PromptTraceAdvisor` 完成。
+>
+> **⚠️ 注意阶段 3 的状态**：第 3 节记录的"任务意图理解"**已被整体撤回并删除**，
+> 保留其内容仅作为框架机制（两条结构化输出通道、双字典纪律）的历史记录。
+> 撤回原因见 [5.3 一个被撤回的坑](#53-一个被撤回的坑前置意图提取层)。
 
 ## 0. 初始化项目
 
@@ -430,6 +434,24 @@ data:[DONE]
 
 ## 3. 结构化输出（任务意图理解）
 
+> ### ⚠️ 前置声明：本节记录的"任务意图理解"已被整体撤回
+>
+> **本节保留的是历史记录，不是当前架构。** 请先读这段话，否则会把已删除的东西当成现役设计。
+>
+> | | 内容 |
+> |---|---|
+> | **已删除的代码** | `TaskIntent.java`（DTO）、`TaskIntentAppService.java`、`prompts/task-intent-prompt.md`、`POST /api/chat/intent` 端点、`taskIntentPrompt` Bean |
+> | **撤回原因** | 详见 [5.4 一个被撤回的坑：前置意图提取层](#54-一个被撤回的坑前置意图提取层)。核心是：**它的产出没有任何消费者**，且与模型自身的工具调用**重复同一个判断** |
+> | **本节仍然有效的部分** | ① 框架的**两条结构化输出通道**（提示词通道 / 原生通道）及实测结论；② **"双字典"只有两处需要手工同步**这条认知；③ "我描述了它 ≠ 我做了它"这个踩坑 |
+>
+> **为什么保留而不删除**：这些结论是**关于框架的事实**（读了框架字节码与实测 prompt 得到），
+> 不随"要不要做 intent"而改变。阶段 7 的 RAG 相关性评判、阶段 9 的任务状态
+> 都会用到"让模型返回结构化对象"这项能力 —— 届时会重新建自己的 DTO 与提示词，
+> 但**通道机制与双字典纪律直接复用**。
+>
+> **下面的流程图与思维导图请按"历史"阅读**，其中出现的
+> `POST /api/chat/intent`、`TaskIntentAppService` 等**在仓库里已不存在**。
+
 ### 本阶段数据流向
 
 ```mermaid
@@ -700,6 +722,18 @@ Here is the JSON Schema instance your output must adhere to:
 所以 `TaskIntentAppService.validate()` 里的校验，防的是"**枚举与提示词失步**"这一处，
 而不是"三处失步"。负担比原先估计的小，但**这一处仍然必须防**。
 
+> **⚠️ 前瞻声明（阶段 5 补记）**：上表提到的 `Deliverable` 枚举、`task-intent-prompt.md`、
+> `TaskIntentAppService.validate()` **都已被删除**（连同整个意图理解层，见 [5.3](#53-一个被撤回的坑前置意图提取层)）。
+>
+> **但"双字典只有两处需要手工同步"这条认知依然有效**，它是关于**框架行为**的事实：
+> schema 由枚举自动生成、提示词侧必须手工对齐。
+> 阶段 7（RAG 相关性评判）与阶段 9（任务状态）若再让模型返回结构化对象，
+> **这条纪律直接复用**：建新枚举时，同时确认自动生成的 schema 与手写提示词两处对齐。
+>
+> **而且这次撤回暴露了它的另一面**：双字典的真正危险不只是"失步"，
+> 更是"**你为什么要建这本字典**"。当一本字典的存在理由本身站不住时，
+> 把它维护得再同步也没有价值 —— 同步是手段，不是目的。
+
 ### 坑：把"我描述了它"当成"我做了它"
 
 - 现象：教练在对话里贴出了实验代码，之后断言"编译通过"，但实际用工具检查发现
@@ -731,10 +765,400 @@ Here is the JSON Schema instance your output must adhere to:
 
 ---
 
-## 待推进
+## 5. 会话记忆的挂载（memory 抽象 + 切面）
+
+### 本阶段数据流向
+
+```mermaid
+flowchart TD
+    subgraph entry["入口层 · Controller"]
+        A1["POST /chat<br/>{message, conversationId?}"]
+        A2["POST/GET /stream-sse<br/>（三条流式路径里唯一带记忆的）"]
+        A3["POST /stream<br/>GET /stream-flux<br/>❌ 不带记忆（对照实验）"]
+        A1 --> R["resolveConversationId()<br/>缺省则 UUID.randomUUID()"]
+        A2 --> R
+        R --> H["响应头 X-Conversation-Id 回写<br/>（须在 WebConfig.exposedHeaders 暴露，否则前端读不到且不报错）"]
+    end
+
+    subgraph app["中间层 · app 层"]
+        R --> S1["ChatAppService.chat(msg, cid)"]
+        R --> S2["streamWithServerSentEvent(msg, cid, emitter)"]
+        S1 --> P[".advisors(a -> a.param(ChatMemory.CONVERSATION_ID, cid))<br/>.advisors(a -> a.param(MemoryMode.CONTEXT_KEY, CONVERSATION))<br/>★ 两次调用是 putAll 累加，不是覆盖"]
+        S2 --> P
+    end
+
+    subgraph chain["切面链 · 顺序由框架与数据依赖共同决定"]
+        P --> TC["ToolCallingAdvisor<br/>order = Integer.MIN_VALUE + 200<br/>★ 框架自带、最外层<br/>负责真正调模型 + 工具调用循环"]
+        TC --> T["PromptTraceAdvisor<br/>order = 0（我们写的）<br/>记录【注入后】的完整 prompt"]
+        T --> MM["ConversationMemoryAdvisor<br/>order = 1（我们写的）"]
+        MM --> MODE["modeOf(request)<br/>从 context 读 MemoryMode<br/>读不到 → DEFAULT + WARN（不猜）"]
+        MODE --> BUD["budgets.get(mode)<br/>CONVERSATION → 5000 token / 30 条<br/>WORKFLOW → 50000 token / 200 条"]
+    end
+
+    subgraph core["核心逻辑 · 一次调用读一次写一次"]
+        BUD --> LOAD["memory.load(cid, budget)"]
+        LOAD --> TRIM["MemoryTrimmer 裁剪<br/>从最旧端丢、token+条数双限制<br/>★ 预算只覆盖历史，不含 system 与本次问题"]
+        TRIM --> AUG["augment()<br/>重建消息列表 = system + 历史 + 本次问题<br/>new Prompt(messages, original.getOptions())<br/>★ 必须带回 options，否则模型参数静默丢失"]
+        AUG --> CALL["chain.nextCall() → 模型调用真正发生在这里"]
+        CALL --> REC["recordTurn()<br/>只写【本次问 + 模型答】<br/>★ 先调模型、后写入"]
+        REC --> APPEND["memory.append(cid, turn)"]
+        APPEND -.->|"写入失败"| ERRLOG["log.error 但照常返回回复<br/>历史持久化不在关键路径上"]
+    end
+
+    subgraph store["出口层 · 存储（换实现只改一行配置）"]
+        LOAD --> TYPE{"hagent.memory.chat.type"}
+        APPEND --> TYPE
+        TYPE -->|file| F["FileConversationMemory<br/>一会话一 JSON，临时文件 + ATOMIC_MOVE"]
+        TYPE -->|redis| RD["RedisConversationMemory<br/>TTL 86400s，定位是【缓存】不是权威存储"]
+        TYPE -->|mysql| STOP["启动期直接失败<br/>（阶段 7 提供实现）"]
+    end
+
+    subgraph guard["启动期守卫 · EnvironmentPostProcessor"]
+        G1["MemoryConfigValidator<br/>在任何 Bean 创建之前校验 type 合法性<br/>★ 配置了未实现的实现 → 明确失败，不静默降级"]
+    end
+
+    ADAPTER["ChatMemoryAdapter<br/>★ 不在主链路上！<br/>仅作为 Bean 预留（将来挂框架自带切面时才用）"]
+    ADAPTER -.-> LOAD
+
+    style A3 fill:#ffe0e0
+    style ADAPTER fill:#f0f0f0,stroke-dasharray: 5 5
+    style STOP fill:#ffe0e0
+    style P fill:#fff4d6
+    style AUG fill:#fff4d6
+    style TC fill:#e0f0ff
+```
+
+**三个必须看清的边界（这是本阶段设计的核心）**：
+
+```mermaid
+flowchart LR
+    subgraph b1["边界一：预算只覆盖历史"]
+        X1["system 提示词<br/>固定开销，与历史无关"] --> X4["不计入预算"]
+        X2["历史消息<br/>会无限增长"] --> X5["★ 唯一被裁剪的部分"]
+        X3["本次问题<br/>独立追加"] --> X6["不计入预算<br/>→ 结构上不可能被截断"]
+    end
+
+    subgraph b2["边界二：先调模型、后写入"]
+        Y1["load(cid, budget)"] --> Y2["拼 prompt"] --> Y3["调模型"] --> Y4["写入本轮问答"]
+        Y3 -.->|"调用失败"| Y5["不写入<br/>→ 不留『有问无答』的半截记录"]
+    end
+
+    subgraph b3["边界三：会话 ID 走 context，不走 prompt"]
+        Z1["conversationId"] --> Z2["request.context()"]
+        Z1 -.->|"❌ 不进"| Z3["prompt 文本"]
+        Z2 --> Z4["不发给模型提供方"]
+        Z3 -.-> Z5["会发给模型提供方<br/>且白花 token、模型可能复述"]
+    end
+
+    style X5 fill:#e6f6ec
+    style X6 fill:#e6f6ec
+    style Y5 fill:#e6f6ec
+    style Z4 fill:#e6f6ec
+```
+
+### 本阶段核心对象结构
+
+```mermaid
+mindmap
+  root(("阶段5<br/>会话记忆"))
+    抽象层
+      ConversationMemory 接口
+        append / load(id, budget) / clear / delete
+        ★ 换实现只改配置的落点
+        ★ 边界声明：不是长期记忆、不做摘要
+      TokenBudget record
+        maxTokens + maxMessages，构造校验 > 0
+        ★ 预算口径：只管历史
+      MemoryMode 枚举
+        CONVERSATION / WORKFLOW
+        CONTEXT_KEY = hagent_memory_mode
+        ★ 模式由调用方显式声明，切面不猜
+    实现层 三个
+      InMemoryConversationMemory
+        兜底 + 测试用，重启即丢
+      file/FileConversationMemory
+        一会话一 JSON，原子写
+        零基础设施、人可读、可审计
+      redis/RedisConversationMemory
+        ★ 定位是缓存，带 TTL
+        不是权威存储（权威是阶段7的 MySQL）
+    装配层
+      MemoryConfig @ConditionalOnProperty
+        刻意不用 ConditionalOnMissingBean
+      MemoryConfigValidator EnvironmentPostProcessor
+        LOWEST_PRECEDENCE（必须在配置加载之后）
+        mysql 未实现 → 启动失败，不静默降级
+      MemoryProperties InitializingBean
+        参数全部外置，含 mysqlTableName 预留
+    切面层
+      ConversationMemoryAdvisor order=1
+        augment 读一次 / recordTurn 写一次
+      共用工具
+        MemoryTrimmer 裁剪规则唯一出处
+        MessageCodec 序列化唯一出处
+    两个必须避开的坑
+      EnvironmentPostProcessor 顺序
+        HIGHEST 读不到配置
+      Bean 自检不可行
+        缺依赖时 Spring 先失败
+```
+
+### 本阶段目标
+
+- 把"多轮对话能记住前文"变成链路上的一个**可替换组件**，而不是写死在业务代码里
+- 建立会话记忆的**抽象与实现分离**：接口在本项目手里，实现由配置切换（file / redis / 阶段 7 的 mysql）
+- 让"预算"成为**调用方显式声明**的参数，而不是藏在实现内部的魔数
+- 让"配置了不存在的实现"变成**启动期明确失败**，而不是运行期静默降级
+
+### 本阶段价值（为什么做）
+
+- **会话记忆是 Agent 的地基之一**：没有它，多轮对话里"改成10页"这种追问无法解析（"它"指什么）
+- **抽象与实现分离是本项目"高扩展性"主张的第一个真实落点**：阶段 7 加 MySQL 实现时，
+  `ChatAppService` / 切面 / 三个已有实现**一行都不用改** —— 这是可验证的，不是口号
+- **预算显式化直接对应成本控制**：会话模式 5000 token 与工作流模式 50000 token 差 10 倍，
+  这个差异必须在调用点可见，否则"这次带了多少历史"无从得知
+- **启动期守卫防的是本项目全篇在防的那类问题**：配置没生效却看起来正常
+
+### 主要新增/涉及文件
+
+**新增（15 个）**
+
+| 分类 | 文件 | 作用 |
+|---|---|---|
+| 抽象 | `memory/ConversationMemory.java` | 核心接口；类注释里写明"不是长期记忆、不做摘要"的边界 |
+| 抽象 | `memory/TokenBudget.java` | record；表达"预算只管历史"这条口径 |
+| 抽象 | `memory/MemoryMode.java` | 模式枚举 + context key；**模式由调用方声明，切面不猜** |
+| 抽象 | `memory/MessageCodec.java` | `Message ↔ StoredMessage` 转换的唯一出处（三实现共用） |
+| 实现 | `memory/InMemoryConversationMemory.java` | 兜底 + 单测用 |
+| 实现 | `memory/file/FileConversationMemory.java` | 默认实现；原子写（临时文件 + `ATOMIC_MOVE`） |
+| 实现 | `memory/redis/RedisConversationMemory.java` | 缓存定位；TTL 86400s |
+| 裁剪 | `memory/MemoryTrimmer.java` | 裁剪规则唯一出处；token + 条数双限制 |
+| 配置 | `memory/MemoryProperties.java` | 绑定 `hagent.memory.chat.*` |
+| 装配 | `memory/MemoryConfig.java` | 两个 `@ConditionalOnProperty` Bean |
+| 守卫 | `memory/MemoryConfigValidator.java` | `EnvironmentPostProcessor`，启动期校验 `type` |
+| 桥接 | `memory/ChatMemoryAdapter.java` | 适配成框架 `ChatMemory`；**当前不在主链路** |
+| 切面 | `advisor/ConversationMemoryAdvisor.java` | 读历史注入 prompt + 调完写回 |
+| 注册 | `META-INF/spring.factories` | 注册 `MemoryConfigValidator` |
+| 测试 | `memory/MemoryTrimmerTest.java`、`memory/file/FileConversationMemoryTest.java` | 17 个用例 |
+
+**修改**
+
+| 文件 | 改动 |
+|---|---|
+| `dto/ChatRequest.java` | 加可选 `conversationId`；服务端生成随机 UUID（防 IDOR 越权） |
+| `controller/ChatController.java` | 加常量 `CONVERSATION_ID_HEADER`、`resolveConversationId()`；`/chat` 与 `/stream-sse` 回写响应头 |
+| `app/ChatAppService.java` | `chat(msg)` → `chat(msg, cid)`；加两行 `.advisors(...)`；`streamWithServerSentEvent` 同步接入 |
+| `config/AiConfig.java` | `chatClient` 加两个默认切面（顺序由数据依赖决定）；新增 `conversationMemoryAdvisor`、`chatMemory` Bean |
+| `config/WebConfig.java` | `exposedHeaders` 加入会话 ID 头（不暴露则前端读到 null 且不报错） |
+| `resources/application.yml` | `hagent.memory.chat.*` 从 2 行扩为 13 行有效配置，每项写明取值依据 |
+
+### 踩坑记录
+
+> #### ★ 先说一个贯穿全阶段的系统性发现：协议级异常被报成了"服务内部错误"
+>
+> 本阶段在验证过程中**两次**撞上同一类问题，第二次才看出它不是偶然：
+>
+> | 触发场景 | 修正前返回 | 应该返回 | 怎么发现的 |
+> |---|---|---|---|
+> | 访问不存在的路径 | `500` + `50000 服务内部错误` | `404` + `40004 接口不存在` | 删掉旧端点后测"它该返回什么" |
+> | **用 GET 访问 POST 接口** | `500` + `50000 服务内部错误` | `405` + `40005` + **`Allow: POST`** | 在浏览器地址栏直接访问接口 |
+> | Content-Type 用错 | `500` + `50000 服务内部错误` | `415` + `40006` | 同一类，一并补上 |
+>
+> **共同特征**：**问题在调用方，却被报成了服务端故障。**
+> 后果是排查方向完全错位 —— 看到 500 会去查日志、查数据库、查依赖，
+> 而真相可能只是"URL 拼错了"或"方法用错了"。
+>
+> **根因**：Spring MVC 的这些**协议级异常**（`NoResourceFoundException`、
+> `HttpRequestMethodNotSupportedException`、`HttpMediaTypeException`）
+> 在全局异常处理器里**没有显式分支**，于是落进了 `Exception.class` 兜底。
+>
+> **① 这个缺口是被"兜底处理器自己"报出来的**：它每次都打印
+> `[未预期异常] 类型=xxx —— 需要补一条显式异常处理分支`。
+> 这正是当初把兜底写成"显式报告缺口"而不是"静默返回 500"的价值 ——
+> **它把一次未知的故障，变成了一条可执行的待办**。
+>
+> **② 405 必须回 `Allow` 头**：这是 HTTP 规范要求，也是 405 相对 500 的**核心价值** ——
+> 它不只说"你错了"，还说"该用什么方法"。没有它，调用方只能去翻文档或源码。
+> 同理 415 要回 `Accept` 头。
+>
+> **收获（可迁移）**：
+> - **补异常分支时，要按"一类"补，而不是按"一个"补。** 第二次撞上同类问题时，
+>   正确反应不是再补一条，而是问"这一类还有哪些"。
+> - **区分"调用方错误"与"服务端故障"是异常策略的第一性问题。** 前者记 WARN 且不回 5xx，
+>   后者记 ERROR 且必须查日志 —— 混在一起会让两边都失效。
+> - **兜底处理器的正确写法是"报出缺口"，不是"体面地兜住"。**
+>   静默兜住会让缺口永远不被发现，而本项目全篇在防的正是这个。
+>
+
+#### 坑 1：`EnvironmentPostProcessor` 用 `HIGHEST_PRECEDENCE` 读不到配置
+
+- **现象**：校验器误报"`hagent.memory.chat.type` 不能为空"，而 `application.yml` 里明明写了。
+- **原因**：**加载 `application.yml` 这件事本身也是由一个 `EnvironmentPostProcessor` 完成的**
+  （`ConfigDataEnvironmentPostProcessor`）。抢在它之前运行，Environment 里自然还没有 YAML 属性。
+- **处理**：`getOrder()` 改为 `Ordered.LOWEST_PRECEDENCE` —— "等配置加载完、但仍在 Bean 创建之前"。
+- **收获**：**扩展点的执行时机不是可以随便调的**，它由"谁先产出我依赖的数据"决定。
+
+#### 坑 2：把校验做成 Bean，永远轮不到它执行
+
+- **现象**：想让校验先跑，于是做成 Bean 并让 `chatClient` 依赖它 —— 结果**仍然没执行**。
+- **原因**：`chatClient` 的构造器参数里**同时**需要 `ConversationMemory`。
+  Spring 解析参数时第一个就发现"这个 Bean 不存在"，**直接抛错返回，不会再去创建其它参数**。
+  校验器排在参数列表后面，永远轮不到。
+- **处理**：改用 `EnvironmentPostProcessor`（在任何 Bean 创建之前运行）。
+- **收获**：**用"依赖关系"来保证执行顺序，前提是那个依赖真的能被解析到** ——
+  否则报错发生得更早，你想保的那步根本没机会跑。
+
+#### 坑 3：`SseEmitter` 不认识 `ServerSentEvent`（阶段 2 遗留，此处被流式记忆再次触发）
+
+- **现象**：把 `ServerSentEvent` 对象交给 `SseEmitter.send(...)`，**一个事件都发不出去**，
+  客户端只看到"连上就断"，而服务端日志干干净净。
+- **原因**：`SseEmitter.send(Object)` 走的是 `ResponseBodyEmitter` 的普通序列化路径，
+  会把对象当"要转 JSON 的普通数据"。`ServerSentEvent` 是给 **WebFlux / 返回 Publisher** 那条路用的。
+  用 `javap` 读 `SseEmitter` 的字节码常量池可以证实：里面根本没有 `ServerSentEvent` 的引用。
+- **处理**：手动推送改用 `SseEmitter.event()` 构建器。
+- **收获**：**同一个类型名，在不同的执行路径上含义不同。** 判断"能不能这样用"要看真实签名，
+  不能靠名字相似。
+
+#### 坑 4：`ChatMemoryAdapter` 的模式用"取最大预算"来回避歧义
+
+- **现象**：适配器只持有一个预算，取的是 `workflowMaxTokens`，注释写着"用工作流预算作为适配器层的上限"。
+- **原因**：那是**用数量级掩盖歧义** —— "反正它是最大的，读不丢"。
+  但它没有回答"这次调用属于哪种模式"，只是让后果看起来不明显。
+- **处理**：改成 `Map<MemoryMode, TokenBudget>`，每个模式各绑它自己的两项配置；
+  新增显式带模式的 API（`loadFor` / `appendFor` / `remember`）。
+  框架接口 `get(id)` 无处传模式，只能用旁路表补，且**查不到时 WARN 而不是猜**。
+- **收获**：**"取一个足够大的值"不是消除歧义，是隐藏歧义。**
+  真正的解法是让调用方把缺失的信息显式传进来。
+
+#### 坑 5（跨阶段的模式）：配了却没人读 —— 一个"死字段"
+
+- **现象**：`ConversationMemoryAdvisor` 里同时存在 `conversationBudget` 与 `workflowBudget` 两个字段，
+  但预算选择方法 `budgetFor(Prompt)` **永远返回会话预算**。`workflow-max-tokens: 50000` 配了等于没配。
+- **更糟的是它的注释**：写着"阶段 9 会在 context 里放 MODE 标记，届时把判断改为读 context"——
+  而那个方法**签名里是 `Prompt`，根本拿不到 context**；那个机制**当时也不存在**。
+  注释在为一个不存在的实现作保。
+- **处理**：引入 `MemoryMode` 枚举，模式经 context 显式传递，预算表按模式索引。
+- **收获**：**"写了"不等于"生效"。** 一个字段被赋值但无人读取，编译、测试、运行全都正常 ——
+  这类问题的唯一发现方式，是**逐个字段去问"谁读它"**。
+
+### 阶段结果
+
+- **测试**：53 个用例全绿（`FailureMapper` 26 + `FileConversationMemory` 9 + `MemoryTrimmer` 8 + `SseSupport` 5 + `GlobalExceptionHandler` 5）
+- **换实现只改配置**：实测 `type: file` ↔ `type: redis` 一行配置切换，**零 Java 改动**，
+  日志分别为 `[记忆] 使用文件实现` / `[记忆] 使用 Redis 实现`
+- **fail-fast 生效**：配 `type: mysql` 时启动即失败，报错写明"已实现 [redis, file]、
+  阶段 7 提供 MySQL、为什么直接失败而不降级"。堆栈落在
+  `SpringApplication.prepareEnvironment(...)` —— 证明校验确实在任何 Bean 创建之前执行
+- **未完成的验证（诚实记录）**：`tmp/chat-memory` 目录至今为空，因为所有验证请求都用了无效
+  API Key（模型调用失败 → 按"先调模型后写入"的设计不落盘）。
+  也就是说**"记忆真的被注入、模型真的用上了"尚未被实测证明** ——
+  验证清单见 `docs/STAGE5-VERIFICATION.md`，需用真实 Key 执行
+
+### 5.3 一个被撤回的坑：前置意图提取层
+
+> 这一节是本项目的**最大一次设计返工**，记录在此是因为它的教训可以迁移到任何项目。
+
+#### 当初怎么想的
+
+在模型调用**之前**，先让模型解析出结构化的"任务意图"（该产出什么文件、有什么硬性要求、
+要不要先问用户确认），然后由**代码**依据这份 intent 决定挂载哪些工具。
+听起来是"用确定性换可靠性"：不让模型自由发挥，而是先拿到结构化结果再做判断。
+
+#### 做到哪一步才发现不对
+
+这一层**代码写完了**：DTO（含交付物枚举）、Service（含解析后校验）、提示词文件、独立端点
+`POST /api/chat/intent`，还有配套的"双字典同步"纪律（枚举与提示词里的取值必须手工保持一致）。
+
+**转折点是追问一句："intent 的结果落到哪里、谁读它？"** —— 这个问题**答不出来**：
+
+- 全项目搜索，`intent` 的消费者**只有它自己的端点**；`ChatAppService` **完全不读它**
+- 也就是说，它算出来的东西**存在那儿，等人用**。而"等人用"的产出，就是死代码
+
+#### 三个致命问题（逐个都是独立的否决理由）
+
+**① 它和模型自己的工具调用在重复同一个判断**
+
+```
+intent 层：  给模型看【用户的话 + 交付物枚举字典】→ 问它"该产什么"
+工具调用：   给模型看【用户的话 + 工具 JSON Schema】→ 问它"该调哪个工具"
+                    ↑ 同一个判断、同一份信息源、同一个模型
+```
+
+多出来的这一层**不提供任何模型不知道的信息**，只是把同一个决策提前做了一遍，
+再用另一种格式喂回去。而且 DeepSeek **原生支持结构化输出**（阶段 3 已实测：
+JSON Schema 通过 API 参数下发，prompt 里没有 schema 文本）——
+也就是说"按 schema 输出该调哪个工具"这个能力**框架本来就有**。
+
+**② 两遍判断会产生两个答案，而它们可能不一致**
+
+```
+intent 分析说："交付物 = PPT"
+模型挂工具时说："我调 Excel 工具"    ← 谁说了算？
+```
+
+更糟的是，如果让 intent 去**约束**工具选择，就是在用一次"信息更少的判断"
+去限制"信息更多的判断"—— 模型看到的上下文比你多（完整 prompt、工具返回结果、多步中间状态）。
+
+**③ 它引入了第二对必须手工同步的字典**
+
+阶段 3 已经确认过一条纪律：**"双字典"是本项目的一个真实陷阱**（枚举与提示词里的取值列表
+没有任何编译期联系，失步时会静默失效）。intent 层等于**又加了一对**：
+工具改名、加工具时，意图里的枚举不会自动跟着变。
+
+#### 连带发现的第四个问题：它连"挂在哪"都是错的
+
+在论证过程中还发现，即使保留 intent 层，**它作为切面挂进切面链也是错的**：
+
+- 框架的 `ToolCallingAdvisor` order = `Integer.MIN_VALUE + 200`，在**最外层**，负责工具调用循环
+- 所以任何挂在链上的切面，**在逻辑上都处于工具循环内部**，会被**重复执行 N 次**
+- 每次重复都白烧一次模型调用，且它看到的每次都是"带工具结果的消息"
+
+正确做法是**独立执行单元**（app 层编排，不进切面链）—— 但那时已经确定这一层根本不需要，
+所以没有走到那一步。
+
+#### 处理
+
+**整体删除**：DTO、Service、提示词文件、端点、Bean，以及所有引用。
+删除后用 `clean test` + 真实启动 + HTTP 实测三重确认无残留
+（`target/` 下无 class、`prompts/` 目录消失、`/api/chat/intent` 返回 404）。
+
+#### 收获（已写入 `WORKING-AGREEMENT.md` 第 7 条）
+
+**① 动手前必须能回答三个问题，答不出来就不做：**
+
+| 问题 | 当初的答案 |
+|---|---|
+| 它解决什么具体问题？ | ~~"用确定性换可靠性"~~（模糊，说不出具体问题） |
+| **它的产出谁消费？** | ❌ **答不出来** —— 这正是致命的那一问 |
+| 不做它会怎样？ | ~~"不够工程化"~~（说不出具体功能缺失） |
+
+**② 更贵的错误不是"写错代码"，而是"写了一层根本不该存在的代码"。**
+后者能编译、测试能过、架构图很好看，但它是**纯粹的复杂度**。
+
+**③ 警戒信号**（出现即停下来重新论证）：产出的东西"以后会被用到"；
+让模型做两遍同一个判断；靠"两个组件约定不互相干涉"来维持隔离；
+需要在注释里反复解释"它其实不参与主流程"。
+
+**④ 一个反直觉的发现**：这一层的**技术实现全都正确** ——
+结构化输出跑通了、双字典同步做了、解析后校验写了。
+**没有一处代码是错的，错的是"要不要做它"这个判断。**
+这类错误靠 code review 抓不到，只能靠**动手前的那三问**。
+
+---
 
 - RAG 企业知识库：文档加载 / frontmatter 打标签 / 幂等入库 / 检索 / prompt 注入，并在其上抽象可替换的向量存储
+  - **同时要提供会话记忆的 MySQL 实现**（`hagent.memory.chat.type: mysql` 目前会启动失败，
+    因为 `MemoryConfigValidator` 的 `IMPLEMENTED` 集合里还没有它）；
+    届时语义要调整为"**MySQL = 权威存储，Redis = 缓存（Cache-Aside）**"
+  - 表名已预留：`hagent.memory.chat.mysql-table-name: chat_message`
 - 工具调用与多步 Agent：反射注册工具、工具分组（最小权限）、状态机 + 循环 + 中断续跑
-- 双层记忆：会话记忆多实现（file / redis / mysql，配置切换）+ `.md` 长期记忆（含路径沙箱与内容校验）
+  - ⚠️ **不要再做"前置意图提取层"** —— 该设计已撤回，理由见 [5.3](#53-一个被撤回的坑前置意图提取层)。
+    工具选择交给模型的原生工具调用能力（框架的 `ToolCallingAdvisor` 已自带循环）
+  - **"不可逆操作需要确认"要做在工具执行层**（代码级强制），而不是靠模型自述"我需不需要确认"
+- 双层记忆的长期记忆部分：`.md` 文件 + 索引（会话记忆部分已在阶段 5 完成）
 - 前端极简页面：用 `EventSource` 真实消费 SSE，验证过程可视化
 - 可观测性：关键路径耗时 / 成功率 / 工具调用计数；顺带处理流式失败时日志刷屏的问题
+- **流式端点的记忆覆盖**：目前只有方式三（`/stream-sse`）带记忆。
+  方式一/二刻意不带（它们是流式机制的对照实验），但如果后续把某一条提升为产品路径，需要重新评估
+- **一个待补的验证**（不是新功能，是欠的证据）：`docs/STAGE5-VERIFICATION.md` 里的"下一轮能否答出名字"
+  至今未跑 —— 目前只能证明记忆能装配、能落盘，**不能证明注入后模型真的用上了**

@@ -2,10 +2,12 @@ package com.hagent.app;
 
 import com.hagent.config.StreamProperties;
 import com.hagent.dto.ChatResponse;
+import com.hagent.memory.MemoryMode;
 import com.hagent.stream.StreamEventType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -57,12 +59,31 @@ public class ChatAppService {
     /**
      * 同步对话：把用户消息发给模型，返回回复文本。
      *
-     * @param message 已经过参数校验的用户消息（非空）
+     * <p><b>★ 阶段 6 起带会话记忆</b>：{@code conversationId} 通过
+     * {@code advisors(...)} 放进<b>请求 context</b>（不是 prompt）——
+     * 会话记忆切面会从 context 取出它，加载历史并注入 prompt。
+     *
+     * <p>为什么会话 ID 不进 prompt：它是<b>系统元数据</b>，模型不需要它；
+     * 而且 prompt 文本会发给模型提供方，context 不会离开我们的进程。
+     *
+     * <p><b>★ 为什么模式标记也在这里声明</b>：
+     * 只有 app 层知道"本次调用属于哪种场景"。切面（advisor）拿不到这个信息，
+     * 若让它去猜，猜错的后果是<b>静默地少给或多给 10 倍预算</b>。
+     * 所以模式与 {@code conversationId} 一样，走 context 显式传递，
+     * 由 {@link MemoryMode} 承载类型。
+     * 阶段 9 的工作流引擎在这里改传 {@link MemoryMode#WORKFLOW} 即可，切面无需改动。
+     *
+     * @param message        已经过参数校验的用户消息（非空）
+     * @param conversationId 会话标识（由 Controller 生成或透传）
      * @return 模型回复
      */
-    public ChatResponse chat(String message) {
+    public ChatResponse chat(String message, String conversationId) {
         String reply = chatClient.prompt()
                 .user(message)
+                // key 用框架常量 ChatMemory.CONVERSATION_ID，保持单一出处
+                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
+                // ★ 记忆模式也由 app 层显式声明，切面不去猜（见 MemoryMode 的类注释）
+                .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.CONVERSATION))
                 .call()
                 .content();
         return new ChatResponse(reply);
@@ -87,6 +108,10 @@ public class ChatAppService {
      * 阶段 1 还没有工具，所以无影响；<b>阶段 9 做多步 Agent 时，
      * 这里要换成 {@code Flux<ChatResponse>} 以保留工具调用片</b>。
      * 这是"什么时候该升级类型"的活例子：能力还没到，就不提前升级。
+     *
+     * <p><b>★ 本方法刻意不带会话记忆</b>（方式三是唯一带记忆的流式路径，理由见
+     * {@link #streamWithServerSentEvent}）。它不对应任何产品路径，
+     * 只用于展示"SseEmitter 手动驱动"这一种机制。
      */
     public void stream(String message, SseEmitter emitter) {
         // ChatClient.stream() 返回一个冷的 Flux：只有被订阅时才开始请求模型。
@@ -124,6 +149,9 @@ public class ChatAppService {
      *
      * <p>事件里带上 {@code id}：前端断线重连时，可以凭最后收到的 id 判断续传位置
      * （浏览器会自动在重连请求头 {@code Last-Event-ID} 里带上它）。
+     *
+     * <p><b>★ 本方法刻意不带会话记忆</b>（方式三是唯一带记忆的流式路径，理由见
+     * {@link #streamWithServerSentEvent}）。它只用于展示"框架驱动"这一种机制。
      */
     public Flux<ServerSentEvent<String>> streamAsFlux(String message) {
         // 用一个从 1 开始的自增序号作为事件 id
@@ -192,14 +220,35 @@ public class ChatAppService {
      *   SseEmitter 手动推送   -> 用 SseEmitter.event() 构建器
      *   返回 Publisher/Flux   -> 用 ServerSentEvent（由框架的 writer 写帧）
      * </pre>
+     *
+     * <h3>★ 阶段 6 起：本方法带会话记忆（只此一条流式路径）</h3>
+     *
+     * <p><b>只有方式三接入记忆，方式一（{@link #stream}）与方式二
+     * （{@link #streamAsFlux}）刻意不接</b> —— 这是主动决定，不是遗漏：
+     * <ul>
+     *   <li>方式一/二的定位是"<b>流式机制的对照实验</b>"：
+     *       它们的价值在于把"手动驱动 vs 框架驱动"的差异摆在一起对比。
+     *       给它们加记忆只会增加噪声，让对照变得不干净；</li>
+     *   <li>方式三是后续多步 Agent 的<b>主力形态</b>，真正的产品路径。
+     *       记忆属于产品路径，所以只加在这里。</li>
+     * </ul>
+     * 这也是"同一能力不要在多处重复实现"的应用：有记忆的流式只有一份实现。
+     *
+     * <p>记忆的接法与同步路径<b>完全一致</b>（同一套 context 机制）：
+     * 会话 ID 与模式都通过 {@code advisors(...)} 放进请求 context。
+     *
+     * @param conversationId 会话标识（由 Controller 生成或透传）
      */
-    public void streamWithServerSentEvent(String message, SseEmitter emitter) {
+    public void streamWithServerSentEvent(String message, String conversationId, SseEmitter emitter) {
         AtomicLong seq = new AtomicLong();
         long retryMs = streamProperties.getReconnectDelayMs();
         boolean[] retrySent = {false};
 
         chatClient.prompt()
                 .user(message)
+                // 与同步路径同一套机制：会话 ID + 模式走 context，不进 prompt
+                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
+                .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.CONVERSATION))
                 .stream()
                 .content()
                 .doOnNext(chunk -> {

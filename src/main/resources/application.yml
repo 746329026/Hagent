@@ -156,10 +156,39 @@ hagent:
 
   memory:
     chat:
-      # file | redis | mysql —— 条件装配切换，换实现只改这一行
+      # ★ 换实现只改这一行（条件装配按这个值选择实现）
+      #   file  —— 文件（零基础设施、人可读）
+      #   redis —— 缓存（带 TTL，承担"活跃会话加速"角色）
+      #   mysql —— 阶段 7 提供；配它现在会【启动失败并说明原因】，
+      #            而不是静默降级到别的实现（后者会让你以为配置生效了）
       type: file
+
+      # 会话模式预算：只约束【历史消息】，不含 system 提示词与本次问题。
+      # 本次问题不参与预算，就从结构上杜绝了"截断把当前问题丢掉"的可能。
+      conversation-max-tokens: 5000
+      conversation-max-messages: 30
+
+      # 工作流 / Agent 模式预算：比会话大一个数量级。
+      # 原因：多步循环里每一轮的工具返回结果（可能是一整篇文档）都会成为下一轮输入。
+      workflow-max-tokens: 50000
+      workflow-max-messages: 200
+
+      # 文件实现：每会话一个 JSON 文件，原子写入（临时文件 + ATOMIC_MOVE）
       file-dir: "${user.dir}/tmp/chat-memory"
+
+      # Redis 实现：TTL 24 小时。
+      # 取值依据：办公场景里"当天没聊完、第二天接着聊"很常见；
+      # 过长会让无用会话长期占内存，过短会让用户失去上下文。
+      redis-ttl-seconds: 86400
+      redis-key-prefix: "hagent:chat:memory:"
+
+      # MySQL 实现（阶段 7 使用）：现在列出是为了阶段 7 只加实现、不改配置结构
+      mysql-table-name: chat_message
+
     long-term:
+      # 长期记忆目录（阶段 12 使用）：.md 文件 + MEMORY.md 索引。
+      # 与会话记忆是【两种不同的数据】：会话记忆是"刚才聊了什么"，
+      # 长期记忆是"跨会话沉淀的事实与偏好"，由模型自主读写。
       dir: "${user.dir}/tmp/agent-memory"
 
   # pgvector 专用数据源。独立前缀，不与 spring.datasource（业务主库 MySQL）混用，
