@@ -60,14 +60,56 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li><b>查不到时不猜</b>，落到 {@link MemoryMode#DEFAULT} 并<b>记 WARN</b> ——
  *       因为"猜模式"正是本次修正要消灭的东西；</li>
  *   <li>本项目自己的主链路<b>不走这张表</b>：
- *       {@code ConversationMemoryAdvisor} 用 {@link #loadFor} 显式传模式，
- *       路径清晰且无状态。</li>
+ *       {@code MemoryReadAdvisor} 用 {@link MemoryBudgets} 取到预算后<b>直接调</b>
+ *       {@link ConversationMemory#load}，路径清晰且无状态。</li>
  * </ul>
  *
- * <p>⚠️ <b>当前状态</b>：本类在阶段 6 只作为 Bean 存在，
- * 主链路（{@code ConversationMemoryAdvisor}）<b>不经过它</b> ——
- * 切面直接调用 {@link ConversationMemory} 接口。
- * 本类是为"将来要挂框架自带切面"预留的桥，届时才真正投入使用。
+ * <h2>★★ 它现在"没有调用方"，但绝不能删 —— 它是框架边界的【闸门 + 占位】</h2>
+ *
+ * <p>本类当前不在主链路上、也没有任何外部调用方。这种"零调用方的 Bean"
+ * 很容易被当成"备而不用的预留"顺手删掉 —— <b>本项目的文档一度就是这么写的
+ * （"仅作为 Bean 预留"），并因此导致一次错误的删除建议。</b>
+ * 不能删的原因是一条实测出来的框架事实：
+ *
+ * <pre>
+ *   javap -v org.springframework.ai.model.chat.memory.autoconfigure.ChatMemoryAutoConfiguration
+ *     @AutoConfiguration
+ *     @ConditionalOnClass({ChatMemory.class, ChatMemoryRepository.class})
+ *     class ChatMemoryAutoConfiguration {
+ *         &#64;Bean &#64;ConditionalOnMissingBean          ← ★
+ *         ChatMemoryRepository chatMemoryRepository() { return new InMemoryChatMemoryRepository(); }
+ *         &#64;Bean &#64;ConditionalOnMissingBean          ← ★
+ *         ChatMemory chatMemory(ChatMemoryRepository repo) {
+ *             return MessageWindowChatMemory.builder().chatMemoryRepository(repo).build();
+ *         }
+ *     }
+ * </pre>
+ *
+ * <p>两个 {@code @ConditionalOnMissingBean} 的含义是：
+ * <b>我们的 Bean 在，框架的就不建；我们的 Bean 一删，框架立刻装一个自己的。</b>
+ * 而框架那个是：
+ *
+ * <table border="1">
+ *   <caption>删掉本类之后，容器里会剩下什么</caption>
+ *   <tr><th>维度</th><th>框架默认的 ChatMemory</th></tr>
+ *   <tr><td>存储</td><td>{@code InMemoryChatMemoryRepository} —— <b>堆内存，重启即丢</b></td></tr>
+ *   <tr><td>预算</td><td><b>没有任何 token 预算</b>（只有 {@code MessageWindow} 的条数窗口）</td></tr>
+ *   <tr><td>模式</td><td><b>没有模式概念</b></td></tr>
+ * </table>
+ *
+ * <p>★ 这刚好命中 {@link MemoryProperties#afterPropertiesSet()} 自己警告过的失败模式：
+ * <b>"你以为在用 MySQL 存，实际历史在堆里、重启就丢，且不报错"。</b>
+ * 所以本类的作用有两半，缺一不可：
+ * <ol>
+ *   <li><b>闸门</b>：把预算绑在框架边界上。框架的 {@code ChatMemory.get(String)}
+ *       <b>没有预算参数</b> —— 不在这里绑一个已配置的预算，
+ *       接框架组件时就会变成<b>无界读取历史</b>，成本失控且没有任何报错；</li>
+ *   <li><b>占位</b>：只要它在容器里，框架那个"无预算 + 纯内存"的实现就进不来。</li>
+ * </ol>
+ *
+ * <p><b>可迁移的判据</b>：判断一个零调用方的类能不能删，不能只看"谁调它"，
+ * 还要看<b>"没有它会发生什么"</b> —— 有些零调用方的 Bean 是在<b>占位</b>，
+ * 挡住的是框架的默认实现。
  */
 @Slf4j
 public class ChatMemoryAdapter implements ChatMemory {
@@ -75,12 +117,15 @@ public class ChatMemoryAdapter implements ChatMemory {
     private final ConversationMemory delegate;
 
     /**
-     * 模式 → 预算。取值来自 {@code hagent.memory.chat.*} 配置。
+     * 模式 → 预算。★ <b>与 {@code MemoryReadAdvisor} 共用同一份</b>
+     * （{@link MemoryBudgets}），来自 {@code hagent.memory.chat.*} 配置。
      *
-     * <p>用 {@code Map} 而不是 if-else：加第三种模式只需这里多一行，
-     * 且天然保证"每种模式都有对应预算"（修正前那个 bug 正是"有字段、无人读"）。
+     * <p>早先这里与切面各抄了一份 {@code Map.of(...)}，靠手写列举保证"每个模式都有预算"
+     * —— <b>那没有任何机制支撑</b>。现在 {@link MemoryBudgets} 用穷尽 switch
+     * 遍历 {@code MemoryMode.values()} 建表：新增模式时<b>编译期</b>就会失败，
+     * 而不是在 {@code forMode()} 上抛 NPE。
      */
-    private final Map<MemoryMode, TokenBudget> budgets;
+    private final MemoryBudgets budgets;
 
     /**
      * 旁路表：会话 ID → 模式。仅用于补足框架接口"无法传模式"的缺口。
@@ -91,13 +136,9 @@ public class ChatMemoryAdapter implements ChatMemory {
     public ChatMemoryAdapter(ConversationMemory delegate, MemoryProperties properties) {
         this.delegate = delegate;
         // ★ 每个模式各自绑定它在配置文件里的那两项 —— 不存在"共用一个大上限"
-        this.budgets = Map.of(
-                MemoryMode.CONVERSATION, new TokenBudget(
-                        properties.getConversationMaxTokens(), properties.getConversationMaxMessages()),
-                MemoryMode.WORKFLOW, new TokenBudget(
-                        properties.getWorkflowMaxTokens(), properties.getWorkflowMaxMessages()));
-        log.info("[记忆] 适配器已就绪：delegate={} 模式预算={}",
-                delegate.getClass().getSimpleName(), budgets);
+        this.budgets = MemoryBudgets.from(properties);
+        log.info("[记忆] 适配器已就绪（框架边界的预算闸门）：delegate={} 模式预算={}",
+                delegate.getClass().getSimpleName(), budgets.byMode());
     }
 
     // ========================================================================
@@ -107,14 +148,14 @@ public class ChatMemoryAdapter implements ChatMemory {
     /**
      * 按指定模式加载历史。
      *
-     * <p><b>这是本项目主链路应该用的方法</b>：模式由调用方给出，
+     * <p><b>这是框架组件应该用的方法</b>（主链路不走这里，见类注释）：模式由调用方给出，
      * 适配器据此读取对应的两项配置，不做任何猜测。
      *
      * @param conversationId 会话标识
      * @param mode           记忆模式（决定用哪一组预算配置）
      */
     public List<Message> loadFor(String conversationId, MemoryMode mode) {
-        return delegate.load(conversationId, budgets.get(mode));
+        return delegate.load(conversationId, budgets.forMode(mode));
     }
 
     /**
@@ -172,7 +213,7 @@ public class ChatMemoryAdapter implements ChatMemory {
             log.warn("[记忆] 适配器未登记会话 {} 的模式，已回退为 {}（预算 {} token）。"
                             + "若该会话属于工作流，请先调用 remember/appendFor 登记模式，"
                             + "否则读过来的历史会偏少。",
-                    conversationId, mode, budgets.get(mode).maxTokens());
+                    conversationId, mode, budgets.forMode(mode).maxTokens());
         }
         return loadFor(conversationId, mode);
     }

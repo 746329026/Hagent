@@ -8,7 +8,8 @@ import org.springframework.ai.chat.memory.ChatMemory;
  * <h2>★ 为什么需要这个枚举（一段设计修正的记录）</h2>
  *
  * <p>最初 {@code MemoryProperties} 里有两套预算（会话 5000 / 工作流 50000），
- * 但 {@code ConversationMemoryAdvisor} 里的预算选择方法是这么写的：
+ * 但当时那个记忆切面（{@code ConversationMemoryAdvisor}，<b>已在阶段 6 后半拆成
+ * {@code MemoryReadAdvisor} + {@code MemoryWritebackAdvisor}</b>）里的预算选择方法是这么写的：
  * <pre>
  *   private TokenBudget budgetFor(Prompt prompt) {
  *       return conversationBudget;   // ← 永远返回会话预算
@@ -94,7 +95,7 @@ public enum MemoryMode {
      *
      * <p>用法：{@code .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.WORKFLOW))}
      *
-     * <p>取值不带默认值语义 —— 取不到时由 {@code ConversationMemoryAdvisor}
+     * <p>取值不带默认值语义 —— 取不到时由 {@code MemoryReadAdvisor}
      * 落到 {@link #CONVERSATION}（更保守、更省成本）。
      */
     public static final String CONTEXT_KEY = "hagent_memory_mode";

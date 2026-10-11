@@ -441,7 +441,7 @@ data:[DONE]
 > | | 内容 |
 > |---|---|
 > | **已删除的代码** | `TaskIntent.java`（DTO）、`TaskIntentAppService.java`、`prompts/task-intent-prompt.md`、`POST /api/chat/intent` 端点、`taskIntentPrompt` Bean |
-> | **撤回原因** | 详见 [5.4 一个被撤回的坑：前置意图提取层](#54-一个被撤回的坑前置意图提取层)。核心是：**它的产出没有任何消费者**，且与模型自身的工具调用**重复同一个判断** |
+> | **撤回原因** | 详见 [5.4 一个被撤回的坑：前置意图提取层](#53-一个被撤回的坑前置意图提取层)。核心是：**它的产出没有任何消费者**，且与模型自身的工具调用**重复同一个判断** |
 > | **本节仍然有效的部分** | ① 框架的**两条结构化输出通道**（提示词通道 / 原生通道）及实测结论；② **"双字典"只有两处需要手工同步**这条认知；③ "我描述了它 ≠ 我做了它"这个踩坑 |
 >
 > **为什么保留而不删除**：这些结论是**关于框架的事实**（读了框架字节码与实测 prompt 得到），
@@ -690,9 +690,9 @@ BeanOutputConverter<T> implements StructuredOutputConverter<T>
 Your response should be in JSON format.
 Do not include any explanations, only provide a RFC8259 compliant JSON response...
 Do not include markdown code blocks in your response.
-Remove the ```json markdown from the output.
+Remove the json markdown fence from the output.
 Here is the JSON Schema instance your output must adhere to:
-```{ ...655 字符的 schema... }```
+{{SCHEMA}}   ← 占位符，实际会替换为 655 字符的完整 JSON Schema
 ```
 
 即：`getFormat()` = **一段英文指令（328 字符）+ 完整 schema（655 字符）**。
@@ -788,7 +788,7 @@ flowchart TD
     end
 
     subgraph chain["切面链 · 顺序由框架与数据依赖共同决定"]
-        P --> TC["ToolCallingAdvisor<br/>order = Integer.MIN_VALUE + 200<br/>★ 框架自带、最外层<br/>负责真正调模型 + 工具调用循环"]
+        P --> TC["ToolCallingAdvisor<br/>order = Integer.MIN_VALUE + 300<br/>★ 框架自带、最外层<br/>负责真正调模型 + 工具调用循环"]
         TC --> T["PromptTraceAdvisor<br/>order = 0（我们写的）<br/>记录【注入后】的完整 prompt"]
         T --> MM["ConversationMemoryAdvisor<br/>order = 1（我们写的）"]
         MM --> MODE["modeOf(request)<br/>从 context 读 MemoryMode<br/>读不到 → DEFAULT + WARN（不猜）"]
@@ -817,7 +817,7 @@ flowchart TD
         G1["MemoryConfigValidator<br/>在任何 Bean 创建之前校验 type 合法性<br/>★ 配置了未实现的实现 → 明确失败，不静默降级"]
     end
 
-    ADAPTER["ChatMemoryAdapter<br/>★ 不在主链路上！<br/>仅作为 Bean 预留（将来挂框架自带切面时才用）"]
+    ADAPTER["ChatMemoryAdapter<br/>★ 不在主链路上，但【不能删】<br/>框架边界的预算闸门 + 占位<br/>（挡住框架那个无预算的内存实现）"]
     ADAPTER -.-> LOAD
 
     style A3 fill:#ffe0e0
@@ -936,8 +936,8 @@ mindmap
 | 配置 | `memory/MemoryProperties.java` | 绑定 `hagent.memory.chat.*` |
 | 装配 | `memory/MemoryConfig.java` | 两个 `@ConditionalOnProperty` Bean |
 | 守卫 | `memory/MemoryConfigValidator.java` | `EnvironmentPostProcessor`，启动期校验 `type` |
-| 桥接 | `memory/ChatMemoryAdapter.java` | 适配成框架 `ChatMemory`；**当前不在主链路** |
-| 切面 | `advisor/ConversationMemoryAdvisor.java` | 读历史注入 prompt + 调完写回 |
+| 桥接 | `memory/ChatMemoryAdapter.java` | 适配成框架 `ChatMemory`。**不在主链路，但不可删** —— 它是框架边界的预算闸门 + 占位（见下方"坑 4 的复核补充"） |
+| 切面 | `advisor/MemoryReadAdvisor.java` + `advisor/MemoryWritebackAdvisor.java` | 读历史写 context / 调完写回一次。★ 原为一个 `ConversationMemoryAdvisor`，阶段 6 后半按"位置要求相反"拆成两个 |
 | 注册 | `META-INF/spring.factories` | 注册 `MemoryConfigValidator` |
 | 测试 | `memory/MemoryTrimmerTest.java`、`memory/file/FileConversationMemoryTest.java` | 17 个用例 |
 
@@ -1030,6 +1030,68 @@ mindmap
 - **收获**：**"取一个足够大的值"不是消除歧义，是隐藏歧义。**
   真正的解法是让调用方把缺失的信息显式传进来。
 
+#### 坑 4 的复核补充（阶段 6 后半）：★ 它是"闸门 + 占位"，**不能删**
+
+阶段 6 后半有人（正确地）注意到 `ChatMemoryAdapter` **零调用方**、而且
+"模式 → 预算"这张表在它和 `MemoryReadAdvisor` 里**各抄了一份**，于是提出删掉它。
+
+**这个建议是错的**，而且错得很有价值 —— 因为当时的文档就是这么写的：
+
+```text
+ChatMemoryAdapter  ★ 不在主链路上！仅作为 Bean 预留（将来挂框架自带切面时才用）
+```
+
+"仅作为 Bean 预留" 读起来就是"备而不用"，于是"零调用方"被当成了"可以删"。
+**但它是零调用方，不等于它没作用。** `javap -v` 实测框架的自动配置：
+
+```java
+@AutoConfiguration
+@ConditionalOnClass({ChatMemory.class, ChatMemoryRepository.class})
+class ChatMemoryAutoConfiguration {
+    @Bean @ConditionalOnMissingBean                       // ★
+    ChatMemoryRepository chatMemoryRepository() {
+        return new InMemoryChatMemoryRepository();        // 堆内存
+    }
+    @Bean @ConditionalOnMissingBean                       // ★
+    ChatMemory chatMemory(ChatMemoryRepository repo) {
+        return MessageWindowChatMemory.builder()
+                .chatMemoryRepository(repo).build();      // 只有条数窗口，无 token 预算
+    }
+}
+```
+
+两个 `@ConditionalOnMissingBean` 的含义是：**我们的 Bean 在，框架的不建；
+我们的 Bean 一删，框架立刻装一个自己的** —— 而那个是
+**纯内存（重启即丢）+ 无 token 预算 + 无模式概念**。
+
+★ 这正好命中 `MemoryProperties.afterPropertiesSet()` 自己警告过的失败模式：
+"你以为在用 MySQL 存，实际历史在堆里、重启就丢，且不报错"。
+
+**所以它的作用有两半，缺一不可**：
+
+| 作用 | 说明 |
+|---|---|
+| **闸门** | 把预算绑在框架边界上。框架的 `ChatMemory.get(String)` **没有预算参数**，不在这里绑一个已配置的预算，接框架组件时就是**无界读取历史** |
+| **占位** | 只要它在容器里，框架那个"无预算 + 纯内存"的实现就进不来 |
+
+**可迁移的判据（本轮最值钱的一条）**：
+
+> **判断一个零调用方的类能不能删，不能只看"谁调它"，还要看"没有它会发生什么"。**
+> 有些零调用方的 Bean 是在**占位** —— 挡住的是框架的默认实现。
+> 而"预留"这个词会掩盖这一点：**预留听起来是"将来才有用"，占位是"现在就在起作用"。**
+
+**同时修掉的两件事**：
+
+1. **重复是真的**（"模式 → 预算"写了两遍），但修法是**共用**而不是删除 ——
+   抽出 `MemoryBudgets` 值对象，两个调用点共用同一份；
+   并且内部用**穷尽的 `switch` 表达式 + 遍历 `MemoryMode.values()` 建表**，
+   把"新增模式漏配"从**运行期 NPE** 变成**编译期错误**（`Map.of` 手写列举没有任何机制保证覆盖）。
+   → 回归防线：`MemoryBudgetsTest#advisorAndAdapterAgreeOnTheSameBudget`
+   断言两条路径对同一模式拿到**同一个**预算。**该测试已用"植入缺陷"验证过确实会失败**。
+2. **陈旧注释**：删掉 `ConversationMemoryAdvisor` 时留下了 3 处在用**已删除的类名**
+   描述**当前行为**（其中 `ChatMemoryAdapter` 原注释还声称主链路用 `loadFor`，
+   与事实相反、且与同段另一句自相矛盾），已一并修正。
+
 #### 坑 5（跨阶段的模式）：配了却没人读 —— 一个"死字段"
 
 - **现象**：`ConversationMemoryAdvisor` 里同时存在 `conversationBudget` 与 `workflowBudget` 两个字段，
@@ -1109,7 +1171,8 @@ intent 分析说："交付物 = PPT"
 
 在论证过程中还发现，即使保留 intent 层，**它作为切面挂进切面链也是错的**：
 
-- 框架的 `ToolCallingAdvisor` order = `Integer.MIN_VALUE + 200`，在**最外层**，负责工具调用循环
+- 框架的 `ToolCallingAdvisor` order = `Integer.MIN_VALUE + 300`（★ 曾误写为 `+200`，阶段 6 后半用
+  `javap -constants` 实测更正），在**最外层**，负责工具调用循环
 - 所以任何挂在链上的切面，**在逻辑上都处于工具循环内部**，会被**重复执行 N 次**
 - 每次重复都白烧一次模型调用，且它看到的每次都是"带工具结果的消息"
 
@@ -1145,6 +1208,966 @@ intent 分析说："交付物 = PPT"
 这类错误靠 code review 抓不到，只能靠**动手前的那三问**。
 
 ---
+
+## 6. RAG 知识库 · 入库链路（加载 → 切分 → 打标签 → 向量化）
+
+> **本阶段范围声明**：本节只覆盖**入库链路**。检索链路（向量检索、权限过滤、
+> prompt 拼装聚合器、RAG 切面）**尚未实现**，它属于阶段 6 的后半部分。
+
+### 本阶段数据流向
+
+```mermaid
+flowchart TD
+    subgraph load["① 加载层"]
+        A["knowledge/ 目录<br/>.md / .txt"] --> B["SourceLoader.load()"]
+        B --> B1["★ 路径穿越防护<br/>断言解析后的绝对路径落在 rootDir 内"]
+        B1 --> B2["★ 显式 UTF-8 读取<br/>（Windows 默认 GBK，不指定则中文乱码）"]
+        B2 --> B3["解析 frontmatter（snakeyaml）<br/>kind / title / level / dept / 有效期"]
+        B3 --> B4["title 三级推断<br/>frontmatter → 首个 # 标题 → 文件名"]
+        B4 --> LD["LoadedDocument<br/>（source 统一用 / 分隔）"]
+    end
+
+    subgraph decide["② 幂等判定（唯一碰数据库的判定点）"]
+        LD --> H["computeDocHash()<br/>正文 + kind + level + title + 有效期<br/>★ 只改密级也算内容变更"]
+        H --> Q{"查 metadata->>'docHash'<br/>WHERE metadata->>'source' = ?"}
+        Q -->|"查不到"| ADD["ADDED<br/>全量写入"]
+        Q -->|"相同"| SKIP["SKIPPED_UNCHANGED<br/>★ 连切分都不做"]
+        Q -->|"不同"| UPD["UPDATED<br/>先删旧块再写"]
+    end
+
+    subgraph chunk["③ 切分层"]
+        ADD --> DISP["ChunkingDispatch.chunk()<br/>策略取自 kind.chunkingStrategy()"]
+        UPD --> DEL["vectorStore.delete(<br/>eq('source', ...))"]
+        DEL --> DISP
+        DISP --> S1["WHOLE_DOCUMENT<br/>整篇一块"]
+        S1 -.->|"超长→降级"| S3
+        DISP --> S2["BY_HEADING<br/>按 ## 切，带章节名"]
+        S2 -.->|"无标题→降级"| S3
+        DISP --> S3["BY_PARAGRAPH<br/>段落聚合"]
+        S3 -.->|"无段落→内部降级"| S4["句子滑动"]
+        S1 --> SUP["ChunkingSupport<br/>★ 每块 ≤400 字 + 60 字重叠<br/>★ 合并碎片尾块"]
+        S2 --> SUP
+        S3 --> SUP
+        SUP --> CH["List&lt;Chunk&gt;<br/>index / total / section / text"]
+    end
+
+    subgraph tag["④ 打标签与写入"]
+        CH --> MD["DocumentMetadata<br/>12 字段 → toMap()"]
+        MD --> DOC["new Document(text, metadata)"]
+        DOC --> VS["VectorStore.add()"]
+        VS --> EMB["Ollama mxbai-embed-large<br/>★ 每块一次 embedding"]
+        EMB --> PG[("pgvector<br/>hagent_knowledge")]
+    end
+
+    subgraph guard["启动期守卫"]
+        G["vectorTableSelfCheck<br/>★ 表不存在 → 启动失败<br/>（不是仅告警）"]
+    end
+
+    style SKIP fill:#e6f6ec
+    style H fill:#fff4d6
+    style SUP fill:#fff4d6
+    style B1 fill:#ffe0e0
+    style B2 fill:#ffe0e0
+    style G fill:#ffe0e0
+```
+
+**三条降级路径（切分策略的完整决策树）**：
+
+```mermaid
+flowchart TD
+    T["文档正文"] --> Q1{"kind 声明的策略"}
+    Q1 -->|WHOLE_DOCUMENT| W{"正文 ≤ maxSize?"}
+    Q1 -->|BY_HEADING| H{"有 ## 标题?"}
+    Q1 -->|BY_PARAGRAPH| P{"有段落(空行)?"}
+
+    W -->|是| W1["整篇 1 块 ✅"]
+    W -->|否| W2["降级 → 段落切分"]
+    H -->|是| H1["按标题切<br/>每块带章节名 ✅"]
+    H -->|否| H2["降级 → 段落切分"]
+    P -->|是| P1["段落聚合（贪心装到接近上限）✅"]
+    P -->|否| P2["按句子滑动切分"]
+
+    W2 --> P1
+    H2 --> P1
+    P2 --> P3{"有句末标点?"}
+    P3 -->|是| P4["按 。！？； 切句后聚合 ✅"]
+    P3 -->|否| P5["硬切（最后手段）"]
+
+    style W1 fill:#e6f6ec
+    style H1 fill:#e6f6ec
+    style P1 fill:#e6f6ec
+    style P4 fill:#e6f6ec
+    style P5 fill:#f0f0f0
+```
+
+### 本阶段核心对象结构
+
+```mermaid
+mindmap
+  root((阶段6<br/>入库链路))
+    加载层
+      SourceLoader
+        路径穿越防护
+        显式 UTF-8
+        frontmatter 解析
+        title 三级推断
+      YAML 日期陷阱
+        2024-01-01 是时间戳字面量
+        引号是类型声明
+        兼容 Date/LocalDate/字符串
+    切分层
+      策略绑定在枚举上
+        DocumentKind 携带 strategy
+        新增种类时编译器强制填齐
+      三条策略
+        整篇一块
+        按标题切
+        按段落聚合
+      两条降级链
+        整篇到段落
+        标题到段落
+      共用工具 ChunkingSupport
+        限长 400 防静默截断
+        重叠 60 防语义切断
+        合并碎片尾块
+    幂等判定
+      source 定位文档身份
+      docHash 内容指纹
+        含密级与种类
+        只改密级也算变更
+      三级结论
+        ADDED / UPDATED / SKIPPED
+    写入层
+      DocumentMetadata
+        字段名唯一出处
+        空值语义明确
+      VectorStore.add
+    embedding 上限
+      实测约 1000 汉字
+      超出静默截断不报错
+      400 字留 2.5 倍余量
+    切分契约
+      块不超限
+      不丢正文
+      序号连续
+      不适用时空列表
+```
+
+### 本阶段目标
+
+- 把"企业自有文档"变成**可被检索的知识**：加载 → 切分 → 打标签 → 向量化 → 落 pgvector
+- **幂等**：同一份文档重复入库不产生重复数据、不重复付 embedding 成本
+- **策略与文档种类绑定**：不同种类的文档走不同的切分策略，而策略声明只有一处
+- 让 `embedding 静默截断` 这类"不报错的错误"在结构上不可能发生
+
+### 本阶段价值（为什么做）
+
+- **这是 RAG 的地基**：检索质量的上限由入库质量决定。切分错了，再好的检索算法也救不回来
+- **幂等直接对应成本与正确性**：知识库需要"每天同步一次"，无变化时应当零 embedding 成本；
+  而"更新文档"若不删旧块，旧版本内容会继续被检索命中 —— **用户拿到已废止的规定，而系统毫无异常**
+- **`DocumentKind` 承载策略**是本项目"防双字典陷阱"的又一次落地：
+  新增文档种类时，编译器强制你在枚举常量里填齐"切分策略"与"默认密级"
+- **元数据字段名只有一处**（`DocumentMetadata.FIELD_*`）：元数据是"入库写、检索读"的领域，
+  字段名写错不会有编译错误，只会让过滤条件永远不命中
+
+### 主要新增/涉及文件
+
+**新增（21 个主代码 + 5 个测试 + 4 份示例数据）**
+
+| 分类 | 文件 | 作用 |
+|---|---|---|
+| 领域模型 | `document/AccessLevel.java` | 密级枚举（`PUBLIC`/`INTERNAL`/`CONFIDENTIAL`）+ `rank` 比较 + 默认偏保守 |
+| | `document/DocumentKind.java` | **文档种类枚举，策略跟着枚举走**（切分策略 + 默认密级） |
+| | `document/ChunkingStrategy.java` | 三种切分策略的声明 |
+| | `document/DocumentMetadata.java` | **元数据 schema，字段名唯一出处**（12 字段 + `FIELD_*` 常量 + 空值语义） |
+| | `document/Chunk.java` | 块的载体（index/total/section/text） |
+| | `document/LoadedDocument.java` | 已加载文档（含 frontmatter 结果） |
+| | `document/IngestOutcome.java` | 处理结论枚举（`ADDED`/`UPDATED`/`SKIPPED_UNCHANGED`） |
+| | `document/IngestResult.java` | 单文档入库结果 |
+| 工具 | `document/HashingSupport.java` | SHA-256 内容指纹（归一化换行符，跨平台一致） |
+| 加载 | `document/SourceLoader.java` | 读 `.md`/`.txt` + frontmatter 解析 + **路径穿越防护** |
+| 切分 | `document/chunking/TextChunker.java` | 切分接口（四条契约） |
+| | `document/chunking/ChunkingSupport.java` | 限长/重叠/碎片合并的**唯一出处** |
+| | `document/chunking/WholeDocumentChunker.java` | 整篇一块（超长返回空列表 → 降级） |
+| | `document/chunking/HeadingChunker.java` | 按 Markdown 标题切（带章节名） |
+| | `document/chunking/ParagraphChunker.java` | 按段落聚合切（内部可降到句子） |
+| | `document/chunking/ChunkingDispatch.java` | **降级链的唯一持有者** |
+| 配置 | `config/ChunkingProperties.java` | 切分参数（含取值依据与 embedding 上限说明） |
+| | `config/IngestProperties.java` | 入库参数（`default-kind` 刻意无默认值） |
+| | `config/RagConfig.java` | RAG 配置类注册 |
+| 编排 | `app/DocumentIngestService.java` | **入库编排**（幂等判定 + 删旧写新 + 批量扫描） |
+| | `app/BatchIngestReport.java` | 批量报告（**含结构化失败清单**，不只是计数） |
+| 测试 | `document/chunking/TextChunkerTest.java` | 17 个用例：契约、边界、章节名、Markdown 识别 |
+| | `document/chunking/ChunkingSupportTest.java` | 7 个用例：**暴力组合扫超限**（见坑 4） |
+| | `app/DocumentIngestIntegrationTest.java` | 14 个用例：真实 pgvector + 真实 embedding，每个方法自给自足 |
+| | `app/DocumentIngestStableStateTest.java` | 6 个用例：需要"全库已入库"状态的断言 |
+| | `app/KnowledgeCleanupListener.java` | 每个测试方法前清空向量表 |
+| 数据 | `knowledge/*.md`、`knowledge/*.txt` | 4 份示例文档，**每份覆盖一条不同的代码路径** |
+
+**修改**
+
+| 文件 | 改动 |
+|---|---|
+| `pom.xml` | **显式声明 snakeyaml**（原为传递依赖；代码里直接 import 的东西应当显式声明） |
+| `config/VectorStoreProperties.java` | `initializeSchema` false→**true**（见坑 1）；新增 `vectorTableValidationsEnabled` |
+| `config/VectorStoreConfig.java` | 抽出 `pgVectorJdbcTemplate` Bean（与 PgVectorStore 共用）；自检从 WARN 升级为**缺失即启动失败**；新增列类型打印 |
+| `resources/application.yml` | 新增 `hagent.rag.*` 配置段（39 行，每项带取值依据） |
+| `docs/WORKING-AGREEMENT.md` | 新增**第 10 条**：切面必须考虑内层重复调用，可重复的用幂等 |
+
+### 踩坑记录
+
+#### 坑 1：向量表**从未被创建过** —— 一条"看起来配对了"的配置
+
+- **现象**：集成测试在写入时报错，提示表不存在。而此前阶段 0 的启动自检只打印过一条
+  `WARN 表 'hagent_knowledge' 尚不存在 —— 阶段 7 会用显式 DDL 创建`，没人当回事。
+- **原因**：反编译 `PgVectorStore.afterPropertiesSet()` 的字节码，其逻辑是：
+
+  ```text
+    if (schemaValidation) { 校验表名合法性 }
+    if (!initializeSchema) {
+        只记一条 debug 日志，然后 validateTableSchemaIfEnabled();
+        return;                    // ★ 直接返回，不建表
+    }
+    ... CREATE EXTENSION / CREATE SCHEMA / CREATE TABLE / CREATE INDEX
+  ```
+
+  本项目的配置是 `initialize-schema: false` + `schema-validation` 默认 false，
+  **两个开关都是假** → 表永远不会被创建。
+- **为什么此前没暴露**：阶段 0 只做了**连通性探测**（直查 `information_schema`），
+  没有写入路径。**没有代码走过那条路，配置错不错就无从验证。**
+- **处理**：`initialize-schema: true`（交给框架建表），并把启动自检从"仅告警"
+  升级为"**表不存在即启动失败**"。
+- **收获（可迁移）**：
+  1. **一个配置项是否生效，不能看它写没写，要看有没有代码走那条路。**
+     阶段 0 的探测是只读的，所以整条写入路径的配置从未被验证过。
+  2. **告警会被忽略。** 同一条 WARN 存在很久没人处理 ——
+     当"表不存在"真的会导致功能全废时，它就不该是 WARN 而该是**启动失败**。
+     这与本项目"兜底处理器要报出缺口"的立场一致：**错误的严重程度要匹配后果**。
+
+#### 坑 2：`validFrom: 2024-01-01` 被 YAML 解析成 `Date` 对象
+
+- **现象**：入库直接失败 ——
+  `frontmatter 的 validFrom 不是合法日期：Mon Jan 01 08:00:00 CST 2024`
+- **原因**：**YAML 1.1 里 `2024-01-01` 是时间戳字面量**，隐式类型解析会把它转成
+  `java.util.Date`，于是 `String.valueOf(...)` 得到英文长日期，再 `LocalDate.parse` 必然失败。
+- **收获**：**引号不是装饰，是类型声明。**
+  在 YAML 里 `2024-01-01` 与 `"2024-01-01"` 是两种不同的值。
+  这类问题的排查成本很高 —— 报错信息里显示 `Mon Jan 01 ...`，
+  而配置文件里明明写着 `2024-01-01`，一眼看不出因果。
+- **处理**：`parseDate` 同时接受 `Date`/`LocalDate`/`LocalDateTime`/`Calendar` 与字符串
+  （这样作者写不写引号都能工作），但**对无法解析的值仍然明确报错**而不是静默忽略。
+  同时在示例文档与 `docs/KNOWLEDGE-SAMPLE-DATA.md` 里示范**加引号**的写法。
+
+#### 坑 3：降级链的顺序错了 —— "结构化程度"不是降级依据
+
+- **现象**：`公司介绍.md`（正文 717 字，超过 400 上限，且**一个标题都没有**）
+  被切成 2 块，本以为会走 `BY_PARAGRAPH`，日志显示它先试了 `BY_HEADING`。
+- **原因**：最初的降级链是 `WHOLE_DOCUMENT → BY_HEADING → BY_PARAGRAPH`，
+  理由是"标题比段落更结构化"。但**降级的对象是切分粒度，不是文档结构类型**：
+
+  ```text
+    真正要表达的是：整篇一块（最粗） → 按段落（中等） → 按句子（最细）
+    BY_HEADING 是【平行策略】，只在文档确实有标题时才有意义 ——
+    而"整篇装不下"这件事本身并不提示文档有标题
+  ```
+
+- **处理**：降级链改为 `WHOLE_DOCUMENT → BY_PARAGRAPH`。
+  有标题的文档一开始就声明了 `BY_HEADING`，不依赖这条链。
+- **收获**：**平行的策略之间不存在"降级"关系。** 把两种独立方案硬排成一个序列，
+  会产生"走了一轮无效尝试"的浪费，并让日志误导人以为某个策略生效过。
+
+#### 坑 4 ★：`overlap` 没被计入大小检查 —— 系统性突破上限
+
+> **这是本阶段最严重的缺陷，也是"暴力组合测试"价值最直接的体现。**
+
+- **现象**：暴力组合测试（穷举 `maxSize` × `overlap` × 文本长度）一次性报出
+  **200 多个超限组合**，且超出幅度随 `overlap` 增大而恶化：
+
+  ```text
+    maxSize=60 overlap=45 → 产出 95 字的块（超 35 字）
+    maxSize=80 overlap=45 → 产出 102 字的块（超 22 字）
+    maxSize=40 overlap=20 → 产出 60 字的块（超 20 字，即超出上限的 50%）
+  ```
+
+- **原因**：`enforceMaxSize` 的写法是"判断要不要开新块 → 开新块 → **追加重叠** → 追加上句子"，
+  而**大小检查只发生在追加重叠之前**：
+
+  ```java
+    if (current.length() + sentence.length() > maxSize) {   // ← 检查时 current 是空的
+        ...
+        current.append(tailOverlap(previous, overlap));      // ★ 追加后没有再检查
+    }
+    current.append(sentence);                                // ★ 于是可能超限
+  ```
+
+  关键在于 `tailOverlap` 会"退到最近的句子边界"，**它的返回值可能远大于 `overlap` 参数**。
+  `ParagraphChunker` 里还有同类的两处（"重叠 + 已限长的片段"必然超限、大小检查漏算换行符）。
+- **为什么手写测试没发现**：手写用例很难恰好撞上"句子长度 / 重叠长度 / 上限"三者的
+  特定相对关系。**这个缺陷只在参数组合的密集扫描下才暴露。**
+  真实配置 `maxSize=400 / overlap=60` 恰好没触发（60 相对 400 很小），所以手写用例全绿 —— 而缺陷一直在。
+- **后果的严重性**：块超过 `maxSize` → embedding **静默截断** →
+  **块尾内容永远检索不到，且没有任何报错**。这正是本阶段的核心防范目标，却在实现里被自己违反了。
+- **处理**：把重叠的追加纳入大小决策 —— 先算候选重叠，只有它与下一句能一起装下时才用；
+  装不下就**放弃这一块的重叠**。取舍理由：重叠是"锦上添花"（提升语义连续性），
+  超限是"正确性问题"（内容永久检索不到），冲突时必须保上限。
+- **收获（可迁移）**：
+  1. **"先追加、后检查"是危险模式** —— 检查过了不代表追加后还成立。
+     凡是"拼接 + 有上限"的逻辑，都要在**每次追加之后**保证不变量仍然成立。
+  2. **参数的边界组合要靠穷举，不能靠挑用例。** 本例的教训是：
+     真实配置恰好避开了缺陷，于是手写测试给了一个**虚假的安全感**。
+  3. **一个不变量一旦成为"核心防范目标"，就要为它写穷举测试。**
+     "每块 ≤ maxSize"在本项目里等于"防 embedding 静默截断"，
+     它的重要性配得上一次参数空间扫描。
+
+#### 坑 5：集成测试依赖了"上一次运行留下的数据库状态"
+
+- **现象**：集成测试**单独跑能过，全量跑失败 4 个**：
+
+  ```text
+    firstIngestOfMarkdownIsAdded   expected: ADDED   but was: SKIPPED_UNCHANGED
+  ```
+
+- **原因**：用例断言"首次入库应当 ADDED"，但库里残留着上一次运行写入的数据，
+  于是"首次"变成了"重复"，被**正确地**判定为跳过 ——
+  **被测系统的行为是对的，错的是测试对环境状态的假设。**
+- **第一次修法与它的反效果**：加了"每个测试方法前清空向量表"的监听器之后，
+  那些**依赖前序用例已入库**的断言（如"批量入库应当全部跳过"）又反过来失败了。
+  两次失败指向**同一个根因：测试方法之间有隐式依赖。**
+- **处理**：拆成两个类，按需求性质区分：
+  - `DocumentIngestIntegrationTest`：每个方法**自给自足**（清库 → 自己入库 → 断言），
+    可任意顺序、任意次数运行；
+  - `DocumentIngestStableStateTest`：需要"全库已入库"这一稳定状态，
+    在 `@BeforeAll` 里**幂等准备**（检查库里有没有数据，没有才入库）。
+- **收获**：
+  1. **顺序依赖的测试在"单独跑"与"全量跑"时行为不同** —— 失败时无法判断
+     是代码坏了还是顺序变了，**它作为回归防线的价值大打折扣**。
+  2. **"让测试能独立运行"不是洁癖，是可靠性的前提。**
+  3. 判断一个测试该怎么写，先问：**它需要的前置状态，能不能由它自己建立？**
+     能 → 自给自足；不能（需要大规模状态）→ 放到专门的类里做一次幂等准备。
+
+#### 坑 6：测试的"自动清理"必须自动，不能靠人工步骤
+
+- **现象**：修复坑 5 时，第一反应是"跑测试前先 `DROP TABLE`"。但立刻意识到：
+  忘记执行的表现是"测试失败"，而**排查方向会被误导到业务代码上**；CI 上更没有人可提醒。
+- **处理**：用 `TestExecutionListener`（`beforeTestMethod`）自动清库。
+  选它而不是 `@BeforeEach`，是因为横切的准备逻辑应当集中一处，而不是每个测试类各写一遍。
+- **一个容易踩的细节**：注册时必须写 `mergeMode = MERGE_WITH_DEFAULTS`，
+  否则会**覆盖掉框架的默认监听器**（依赖注入、事务、事件发布全靠它们），
+  表现为测试里 `@Autowired` 拿不到值。
+- **收获**：**凡是"必须做但容易忘"的步骤，都要做成自动的。**
+  这条与 `WORKING-AGREEMENT.md` 第 6 条（操作性错误重复出现必须机制化）同源。
+
+### 阶段结果
+
+- **测试**：105 个用例全绿
+  （`FailureMapper` 26 + `TextChunker` 17 + `DocumentIngestIntegration` 14 +
+  `GlobalExceptionHandler` 9 + `FileConversationMemory` 9 + `MemoryTrimmer` 8 +
+  `ChunkingSupport` 7 + `DocumentIngestStableState` 6 + `SseSupport` 5 +
+  `AdvisorChainMessageSemantics` 4）
+- **真实数据落库**（pgvector 实测）：
+
+  ```text
+  表结构：id uuid | content text | metadata json | embedding USER-DEFINED
+
+  公司介绍.md      | COMPANY_PROFILE | PUBLIC   | 2 块 | 最长 386 字
+  公司简介.md      | COMPANY_PROFILE | PUBLIC   | 1 块 | 最长  51 字
+  办公设备管理.txt | POLICY          | INTERNAL | 2 块 | 最长 371 字
+  员工手册.md      | POLICY          | INTERNAL | 5 块 | 最长 240 字
+
+  合计 10 块 / 4 份文档，最长块 386 字 < 400 上限（未触发截断）
+  ```
+
+- **三条降级路径都被真实数据覆盖**：按标题切（员工手册）、整篇一块（公司简介）、
+  超长降级（公司介绍）、无标题降级（办公设备管理）
+- **幂等生效**：重复入库返回 `SKIPPED_UNCHANGED`，块数不变；批量入库第二次全部跳过
+- **安全防护生效**：`../../../etc/passwd` 被明确拒绝
+- **诚实记录（一个待评估的性能问题）**：`metadata` 列的类型是 **`json` 而不是 `jsonb`** ——
+  这是框架建表定的。影响是**元数据过滤无法使用 GIN 索引**（`json` 类型不支持），
+  当前 10 块规模下无影响，但知识库到上千块时元数据过滤会退化为全表扫描。
+  **这是性能问题而非正确性问题，不会报错** —— 故记录在此，等量真的大了再评估是否自建 DDL 换 `jsonb`。
+
+---
+
+### ★ 阶段 6 后半：RAG 检索链路（鉴权 → 过滤 → 检索 → 拼装）
+
+> 本节是阶段 6 的后半部分。它单独成节的原因是：**这一半的产出不是"又一个功能"，
+> 而是把前面所有能力串成一条链**，并因此暴露出四类只在"多切面共存"时才出现的问题
+> （顺序、镜像、context 类型、谁重建消息列表）。
+
+#### 本阶段数据流向
+
+```mermaid
+flowchart TD
+    subgraph WEB["① 入口层（Servlet / MVC）"]
+        I["UserContextInterceptor<br/>preHandle<br/>解析 X-Hagent-Token → UserContext<br/>放进 request attribute"]
+        C["ChatController（4 条对话路径）<br/>@RequestAttribute 取出 UserContext<br/>生成/沿用 conversationId"]
+    end
+
+    subgraph APP["② 应用层（app）"]
+        S["ChatAppService<br/>把 3 样东西放进 request.context：<br/>ChatMemory.CONVERSATION_ID<br/>MemoryMode.CONTEXT_KEY<br/>UserContext.CONTEXT_KEY"]
+    end
+
+    subgraph CHAIN["③ 切面链（全在工具循环之外）"]
+        T["PromptTraceAdvisor · MIN+100<br/>before：记注入前的 prompt<br/>after：记回复 + 全链耗时"]
+        W["MemoryWritebackAdvisor · MIN+150<br/>after：聚合出最终答 → append 一次"]
+        R["MemoryReadAdvisor · MIN+200<br/>before：load 历史 → 写 context"]
+        G["RagRetrievalAdvisor · MIN+220<br/>before：检索+权限过滤 → 写成片段 → 写 context"]
+        A["PromptAssemblyAdvisor · MIN+250<br/>before：★唯一重建消息列表者<br/>拼 system+约束+片段 / 历史 / 用户<br/>并记「模型真正收到的 prompt」"]
+        TC["ToolCallingAdvisor（框架）· MIN+300<br/>工具循环（N 轮，自理内部历史）"]
+        M["ChatModelCallAdvisor（框架）· MAX<br/>真正调模型"]
+    end
+
+    subgraph STORE["④ 出口层 / 外部依赖"]
+        PG[("pgvector<br/>hagent_knowledge<br/>metadata: json")]
+        OL["Ollama<br/>mxbai-embed-large<br/>1024 维"]
+        MEM[("ConversationMemory<br/>file / redis / mysql")]
+        DS["DeepSeek<br/>deepseek-flash"]
+    end
+
+    I --> C --> S --> T --> W --> R --> G --> A --> TC --> M
+    G -.->|"similaritySearch(query, filter, topK)"| PG
+    PG -.->|"候选块（已按 level 过滤）"| G
+    G -.-> OL
+    R -->|"load(convId, budget)"| MEM
+    W -->|"append(convId, 问+答)"| MEM
+    M --> DS
+
+    R -. "context[MEMORY_MESSAGES] = List&lt;Message&gt;" .-> A
+    G -. "context[RAG_FRAGMENTS] = List&lt;RetrievedChunk&gt;" .-> A
+    C -. "context[UserContext] → 只被 G 消费" .-> G
+```
+
+**三处标注的含义**（都是本轮定型、不能随意改的结构性质）：
+
+| 标注 | 含义 | 改了会怎样 |
+|---|---|---|
+| **全部切面在 `MIN+300` 之前** | 在框架工具循环**之外** → 一次请求只被调用一次 | 写回变 N 次（污染历史）、检索变 N 次（成本 ×N）、拼装在循环内重建会丢 `tool_call` 消息 |
+| **`G` 与 `R` 只写 context，不碰 prompt** | 让 `A` 成为唯一的"重建消息列表者" | 两个重建者互相覆盖，先注入的**静默消失**（实验 2 已证） |
+| **`after` 顺序与 `before` 相反** | 洋葱式包裹：内层先返回 | `MIN+100` 的 after 最后执行（量到全链耗时）；`MIN+150` 的 after 落在它之前（写回结果能被日志记到） |
+
+#### 本阶段核心对象结构
+
+```mermaid
+mindmap
+  root((RAG 检索链路))
+    安全层 security
+      Role
+        枚举直接携带许可等级<br/>防双字典
+      UserContext
+        record userId + role<br/>CONTEXT_KEY / REQUEST_ATTRIBUTE
+      UserTokenResolver
+        明文 token 解析<br/>缺失=匿名 非法=抛异常
+      UserContextInterceptor
+        HandlerInterceptor<br/>只拦 /chat/**
+    检索层 retrieval
+      KnowledgeRetrievalService
+        真正的检索<br/>失败降级为不注入
+      RetrievalFilterBuilder
+        权限→Filter.Expression<br/>唯一出处
+      RetrievalProperties
+        单位=距离<br/>换算只在此处
+      RetrievedChunk
+        领域记录<br/>displaySource 处理空 section
+      RelevanceBand
+        高中低<br/>提示词只认档位
+    拼装层 prompt
+      PromptFragmentKeys
+        context key 唯一出处
+      PromptProperties
+        提示词资源路径
+      PromptAssemblyAdvisor
+        唯一重建者<br/>+ 记最终 prompt
+      rag-answer-prompt.md
+        5 条回答约束
+    顺序 advisor
+      AdvisorOrders
+        具名常量<br/>+ 对着框架常量自检
+```
+
+#### 本阶段目标
+
+把已经入库的向量知识真正用起来，并把"谁在问"一路传到检索的 SQL 条件上：
+
+1. **鉴权链路**：从自定义请求头解析身份 → 请求作用域 → 请求 context → 检索切面；
+2. **检索链路**：向量检索 + **检索前**权限过滤（越权内容不离开数据库）；
+3. **拼装链路**：把记忆、检索片段、回答约束、用户消息合成**一份** prompt；
+4. **切面拆解**：把原来的 `ConversationMemoryAdvisor` 拆成"读"与"写回"两个切面 ——
+   因为它们的位置要求相反，一个 order 装不下。
+
+#### 本阶段价值（为什么做）
+
+解答"每个组件解决什么问题、产出谁消费"（协议第 7 条）：
+
+| 组件 | 解决什么问题 | 产出谁消费 | 不做会怎样 |
+|---|---|---|---|
+| `UserContextInterceptor` + `UserTokenResolver` | "谁在问"从请求头传到业务层 | `RagRetrievalAdvisor` 经 context 读 | 检索只有一种视角，要么全可见（越权）要么全不可见 |
+| `RetrievalFilterBuilder` | 把"用户许可"翻成 SQL 的 `level IN (...)` | `SearchRequest.filterExpression` | 机密内容被取回、拼进 prompt、由模型复述 —— **越权且不留痕迹** |
+| `KnowledgeRetrievalService` | 召回与问题相关的企业资料 | `RetrievedChunk` 列表 → 拼装 | 模型只能凭训练时的一般知识回答"年假几天"，与本司制度可能完全不符 |
+| `MemoryReadAdvisor` | 把历史放进 context（不再自己重建 prompt） | `PromptAssemblyAdvisor` | 模型看不到上一轮说了什么 |
+| `MemoryWritebackAdvisor` | 一次请求恰好把"问+答"落库一次 | 下一轮的 `MemoryReadAdvisor` | 历史永远为空；若在循环内则会写 N 次并污染历史 |
+| `PromptAssemblyAdvisor` | 把四个来源合成一份 prompt | 模型 | 前面所有切面的产出**没有任何消费者** |
+| `AdvisorOrders` | 顺序的唯一出处 + 可自检 | 全部切面 + `AdvisorOrderTest` | 顺序散成裸数字，改一处不知影响谁 |
+
+#### 主要新增/涉及文件
+
+**新增（主代码 13 个 + 资源 1 个）**
+
+| 包 | 文件 | 作用 |
+|---|---|---|
+| `security` | `Role` | 角色 → 许可等级（策略跟着枚举走，防双字典） |
+| `security` | `UserContext` | 身份 record + `CONTEXT_KEY` + `ANONYMOUS` |
+| `security` | `UserTokenResolver` | 自定义 token 解析（缺失=匿名；非法=抛异常） |
+| `security` | `UserContextInterceptor` | 拦截器，只拦 `/chat/**` |
+| **`app`** | `KnowledgeRetrievalService` | 检索（失败降级为不注入，记 ERROR）。★ **Service 归 app** |
+| **`config`** | `RetrievalProperties` | `hagent.rag.retrieval.*`；**单位=距离**，换算收口 |
+| **`config`** | `PromptProperties` | `hagent.rag.prompt.*` |
+| `retrieval` | `RelevanceBand` | 高/中/低档位（提示词只认档位，不认原始分数） |
+| `retrieval` | `RetrievedChunk` | 检索命中的领域记录 + `displaySource()` |
+| `retrieval` | `RetrievalFilterBuilder` | 权限 → `Filter.Expression`（唯一出处，空清单显式拒绝） |
+| `advisor` | `AdvisorOrders` | 全部 order 具名常量 + 对着框架常量自检 |
+| `advisor` | `PromptLogFormat` | 截断/单行化（追溯与拼装两个切面共用） |
+| `advisor` | `PromptFragmentKeys` | context key 常量 —— **与它的使用者（三个切面）同包** |
+| `resources` | `prompts/rag-answer-prompt.md` | 5 条回答约束 |
+
+**新增切面（3 个）**：`MemoryReadAdvisor` / `MemoryWritebackAdvisor` / `RagRetrievalAdvisor` / `PromptAssemblyAdvisor`
+
+**删除（1 个）**：`ConversationMemoryAdvisor` —— 拆成上面两个；理由见"踩坑记录"
+
+**修改（8 个）**
+
+| 文件 | 改了哪里、为什么 |
+|---|---|
+| `AccessLevel` | 新增 `visibleLevels()`：把 `visibleTo` 这条规则产出成"等级清单"，供 SQL 的 `IN` 用。**规则仍只有一个出处**（清单由 `visibleTo` 派生） |
+| `AiConfig` | 注册 5 个切面并按 order 声明；`ChatClient` 增加 `PromptProperties` / 检索服务 / 约束资源三个参数 |
+| `ChatAppService` | 4 条对话路径都接收并放入 `UserContext`；补写"方式一/二不带记忆"的准确含义 |
+| `ChatController` | 4 个端点用 `@RequestAttribute` 取身份并下传 |
+| `WebConfig` | 注册身份拦截器（`/chat/**`）；构造器注入 `UserTokenResolver` |
+| `RagConfig` | 注册 `RetrievalProperties` / `PromptProperties`；新增"约束资源存在性"Bean（缺失即启动失败） |
+| `PromptTraceAdvisor` | 截断逻辑抽到 `PromptLogFormat`；order 改为具名常量；**修正"能看到注入后 prompt"这一方向写反的注释** |
+| `application.yml` | 新增 `hagent.rag.retrieval.*`（含单位说明与实测依据）与 `hagent.rag.prompt.*` |
+
+#### 踩坑记录（只记有可迁移认知的）
+
+**坑 1 ★★ 文档里的 `ToolCallingAdvisor` order 写错了（`+200` 实际是 `+300`），
+而"错"的后果不是数字不同，是少了一个可用区间**
+
+```text
+javap -constants ...ToolCallingAdvisor
+  public static final int DEFAULT_ORDER = -2147483348;   ← MIN_VALUE + 300
+```
+
+项目文档（`HANDOFF.md` / `WORKING-AGREEMENT.md` / 本节之前的 `PROCEDURES.md`）共 5 处
+写成 `MIN_VALUE + 200`。差别在于：`MIN+201 … MIN+299` 这一段是
+**"工具循环之外、且能被本项目使用"的空档**；按 `+200` 去算，很容易以为"没有位置可用"。
+
+- **收获**：**引用框架常量而不是抄写数字**。`AdvisorOrders.TOOL_CALLING` 直接写
+  `ToolCallingAdvisor.DEFAULT_ORDER`，`AdvisorOrderTest` 再断言它等于 `MIN_VALUE+300` ——
+  框架一改，测试立刻失败并指出来。
+
+**坑 2 ★★★ 切面链的 `after` 是 `before` 的镜像，旧注释把方向写反了**
+
+旧注释（`AiConfig` / `ConversationMemoryAdvisor`）写着
+"`traceAdvisor` order=0 在最外层，所以能看到**注入后**的完整 prompt"。**方向恰好相反。**
+
+`DefaultAroundAdvisorChain.nextCall` 从队列 pop 出下一个切面、把 request 的新版本继续往下交，
+**内层的修改不回流给外层**。所以最外层在 before 侧看到的永远是"还没被加工过"的那一版。
+
+- **为什么当时没发现**：项目只有一个业务切面，而记忆切面自己的日志
+  （`[记忆] 注入历史 N 条`）也能证明"注入发生了" —— 于是没人去核对
+  "那行日志里的**消息数**对不对"。**两个各自都"看起来正常"的日志，掩盖了一个方向错误。**
+- **处理**：日志拆成两条并各司其职 ——
+  `PromptTraceAdvisor` 记"请求进链时的样子"，`PromptAssemblyAdvisor` 记"模型真正收到的 prompt"。
+  `AdvisorOrderTest#outerAdvisorCannotSeeInnerInjection` 用断言把这条固化下来。
+- **收获**：**"两个组件各自日志正常"不等于它们之间没有错。**
+  要验证方向，必须有一个观察者同时看到两侧。
+
+**坑 3 ★★★ 框架会探测"记忆切面是否在工具循环内层"，据此关掉自己的内部历史**
+
+```java
+// DefaultChatClient$DefaultChatClientRequestSpec#autoRegisterToolCallingAdvisor 字节码
+boolean memInside = advisors.stream()
+    .anyMatch(a -> a instanceof MemoryAdvisor && a.getOrder() > toolCallingAdvisorOrder);
+advisors.add(toolCallingAdvisorBuilder.copy()
+    .conversationHistoryEnabled(!memInside)      // ★ 反向
+    .build());
+```
+
+而 `MemoryAdvisor` 是个**空标记接口**（`interface MemoryAdvisor extends Advisor {}`）。
+
+`doGetNextInstructionsForToolCall` 的语义：开关为真 → 返回
+`toolExecutionResult.conversationHistory()`（累积全部）；为假 → 只留
+`List.of(systemMessage, 最新一条)`，把历史的维护**交给内层的记忆切面**。
+
+- **本项目的状态**：`ConversationMemoryAdvisor` 只实现了 `CallAdvisor, StreamAdvisor`，
+  **没有** `implements MemoryAdvisor` → 框架认为"内层没有记忆切面" →
+  `conversationHistoryEnabled = true` → 框架自己累积完整历史。
+- **如果当时按"把它标记成 MemoryAdvisor"去改**：框架会关掉内部历史、只发
+  `system + 最新一条`，而我们的记忆只存"问 + 最终答"、**不存中间工具轮次** →
+  阶段 8 工具循环会缺 `tool_result` 而失效。
+- **收获**：**"实现一个看起来更专业的接口"可能是在把控制权交出去。**
+  决定不实现 `MemoryAdvisor` 是有意的：我们只想要"单轮问答的记忆"，
+  不想要"多步循环的记忆" —— 后者由框架自己管更合适。
+
+**坑 4 ★★ 一个抽象如果"只有 before"或"只有 after"，它的位置仍然只有一个 —— 而两种功能的
+位置要求可能相反**
+
+`ConversationMemoryAdvisor` 同时做"读历史"和"写回本轮"，共用一个 `order=1`。但：
+
+| | 位置要求 | 方向 |
+|---|---|---|
+| 读历史 | 必须在**拼装之前**（产出要被拼装消费） | 往内层推 |
+| 写回本轮 | 必须在**整条链收尾**（要最终回复、要避开工具循环） | 往外层推 |
+
+两条要求方向相反，挤在一个切面里只能二选一牺牲。**拆成两个切面后各自干净。**
+
+- **收获**：**判据是"需不需要请求级业务数据"** —— 需要（读历史要 `conversationId`）→ 属于
+  "这一次请求的编排"；不需要（日志、耗时）→ 属于"每次调用的横切"。
+  这条线同时决定了"它能不能真·即插即用"：只有不需要请求级数据的切面才是插上就生效的。
+
+**坑 5 ★ 把日志写进 `target/` 再执行 `clean` —— 构建自己把自己绊倒**
+
+```text
+[ERROR] Failed to clean project: Failed to delete ...\target\full-test-run.log
+        （另一个进程正在使用此文件）
+```
+
+同一条命令里先 `clean` 删 `target/`，而输出日志正重定向到 `target/` 里 —— 文件被占用，清理失败。
+
+- **收获**：**工具的产物不要和工具要清理的目录放一起。** 已改到 `tmp/`（已被 `.gitignore` 覆盖）。
+
+**坑 6 ★ 检索失败会"伪装成没命中"**
+
+`KnowledgeRetrievalService` 在检索失败时**降级返回空列表**（设计如此：检索不在关键路径上）。
+于是一个**坏掉的过滤条件**（例如 jsonpath 在真实 pgvector 上不被接受）
+与"知识库里确实没有相关内容"在结果上**完全一样**，都是空列表。
+
+- **处理**：集成测试里特意加了一条"员工视角**必须**检索到 INTERNAL 内容"的断言 ——
+  若过滤条件不可执行，那次查询会抛异常、被降级成空列表，这条断言立刻失败。
+  **它同时验证了"过滤生效"与"过滤可执行"两件事。**
+- **收获**：**降级路径必须有一条"正向断言"作对照。**
+  只断言"失败时返回空"会把"永远返回空"也判成通过。
+
+**坑 7 ★★★ `FilterExpressionBuilder.in` 的重载回退 —— 泛型不变导致的静默失效**
+
+这是本阶段**实际踩到**的坑，根因比"两个重载行为不同"更隐蔽。
+
+`javap` 实证，框架上有两个 `in` 重载：
+
+```java
+public Op in(String, Object...);        // 逐值展开 → OR 链
+public Op in(String, List<Object>);     // ★ 参数是 List<Object>，不是 List<?>
+```
+
+关键在第二个的参数类型。**泛型是不变的** —— `List<String>` **不能**赋给 `List<Object>`：
+
+```java
+List<String> levelNames = visible.stream().map(Enum::name).toList();
+new FilterExpressionBuilder().in("level", levelNames)
+//  → List 重载【不适用】（List<String> 不是 List<Object>）
+//  → 静默回退到 in(String, Object...)，把整个 List 当成【一个值】
+//  → metadata::jsonb @@ '($."level" == ["PUBLIC","INTERNAL"])'::jsonpath
+```
+
+而正确写法的渲染是：
+
+```java
+new FilterExpressionBuilder().in("level", levelNames.toArray())
+//  → metadata::jsonb @@ '($."level" == "PUBLIC" || $."level" == "INTERNAL")'::jsonpath
+```
+
+前者是拿**字符串**去和**数组字面量**比较，jsonpath 求值**恒为 `false`**。
+后果：查询正常执行、正常返回，只是**一条都不命中** ——
+**没有编译错误、没有警告、没有异常、没有 ERROR 日志**，表现是"检索功能好像没生效"。
+
+**四种写法的实测渲染对照**（`RetrievalFilterSqlTest#inOverloadRenderingsArePinned` 固化）：
+
+| 写法 | 渲染 | 结果 |
+|---|---|---|
+| `in(key, "PUBLIC", "INTERNAL")` | `($."level" == "PUBLIC" \|\| ...)` | ✅ |
+| `in(key, List<String> 变量)` | `($."level" == ["PUBLIC","INTERNAL"])` | ❌ **静默失效** |
+| `in(key, List<Object> 变量)` | `($."level" == "PUBLIC" \|\| ...)` | ✅ |
+| `in(key, stringList.toArray())` | `($."level" == "PUBLIC" \|\| ...)` | ✅（本项目采用） |
+
+★ 第 2 行与第 3 行**只差一个泛型声明**，结果完全相反 —— 这就是它最难被发现的地方。
+
+**为什么原有的 `RetrievalFilterSqlTest` 没拦住它**：它只断言了
+"生成的 SQL 不含 `@>` 与 `?`"（那是在防 `json` 列不支持 jsonb 操作符），
+**没有核对渲染结果**。也就是说它验证的是"没用到错误的操作符"，
+而不是"生成了正确的条件" —— **断言选错了对象，测试就给不了保护**。
+
+**发现方式**：集成测试里那条正向断言 "员工视角**必须**检索到 INTERNAL 内容"。
+若只有那些"匿名只能看到 PUBLIC"的反向断言，它们会在**空结果**上全部通过 ——
+**一个坏掉的查询与一个安全的查询，在反向断言下看起来一模一样。**
+
+**处理**（三处一起改，缺一不可）：
+1. `RetrievalFilterBuilder` 改用 `levelNames.toArray()`，并写明根因；
+2. `RetrievalFilterBuilderTest` 新增断言：**必须含 `||`，且不得含 `== [`**；
+3. `RetrievalFilterSqlTest` 新增四种写法的渲染对照表，**刻意把错误行为也钉住** ——
+   它的作用不是验证正确行为，而是把"这种写法会静默失效"变成**可执行的文档**。
+
+- **收获 1**：**"过滤条件写错了"与"库里确实没有数据"在结果上完全一样。**
+  凡是这类"失败与正常同形"的地方，都必须有一条**正向断言**（"必须查到"）作对照。
+- **收获 2**：**重载 + 泛型不变 = 静默降级。**
+  当重载的参数类型是 `List<Object>` 这类"看起来通用、实际很窄"的形状时，
+  传一个 `List<String>` 不会报错，而是掉进另一个重载。
+  **判据：凡是"传集合给重载方法"的地方，都要确认它命中了哪个重载** ——
+  显式 `toArray()` 就是把意图写出来。
+
+**坑 8 ★★★ 抛了 `IllegalArgumentException`，调用方的错被报成 500 —— 184 个测试都没抓到**
+
+第一版 `UserTokenResolver` 对非法 token 抛 `IllegalArgumentException`。
+当时 `UserTokenResolverTest` 10 个用例全绿、全量 177 个用例全绿。而真实 HTTP：
+
+```text
+POST /api/chat   X-Hagent-Token: badtoken
+→ HTTP 500  {"code":50000,"message":"服务内部错误"}        ← ❌
+修复后：
+→ HTTP 400  {"code":40001,"message":"请求参数不合法"}      ✅
+```
+
+**根因**：`GlobalExceptionHandler` 里**没有** `IllegalArgumentException` 的处理器，
+于是它落进 `Exception.class` 兜底 → 500。
+
+★ **这正是 `PROCEDURES.md` 踩坑 #10 记录过的同一类问题**
+（阶段 2：协议级异常因"没有显式处理器"被报成 500），
+当时的结论是"**补异常分支要按『一类』补**"。本轮又一次踩在同一处 ——
+区别只是换了一个异常类型。
+
+**为什么整套测试都没抓到**：现有测试覆盖了"组件内部行为"与"真库链路"，
+但**没有任何一个用例经过 MVC 的异常处理路径** ——
+抛异常的那个类（`UserTokenResolver`）和把它翻译成 HTTP 响应的那个类
+（`GlobalExceptionHandler`）**从未在同一个用例里同时出现**。
+单元测试测的是"它抛了什么"，而缺陷在"抛出来的东西没人接"。
+
+**处理**（三处）：
+1. `UserTokenResolver` 改抛 `AgentException(ErrorCode.INVALID_PARAM, ...)` ——
+   由既有的 `AgentException` 分支处理，不新增处理器；
+   ★ **不给 `IllegalArgumentException` 加全局处理器**：它在 JDK 与框架内部到处被抛，
+   加全局处理器会把**真正的程序错误也当成 400**，那是在掩盖 bug。
+   正确做法是让"可归因于调用方"的异常**携带明确错误码**；
+2. 分层保持不变：领域枚举（`Role`）继续抛 `IllegalArgumentException`（纯领域，
+   不依赖 Web 错误码），由 `UserTokenResolver` 这个 **HTTP 边界组件**负责翻译 —— 翻译点只有一个；
+3. **新增 `ChatEndpointIdentityTest`**：用 `@SpringBootTest(RANDOM_PORT)` + JDK 的
+   `HttpClient` 发**真实 HTTP 请求**，断言"非法 token → 400 + 40001"。
+   ★ 它把"抛出"与"HTTP 形态"放进同一个断言 —— 这正是缺失的那一层。
+
+- **收获 1（协议第 3 条的老话，但这次有具体形状）**：
+  **"单测全绿 ≠ 功能可用"不是一句口号，它是一个可定位的结构缺口**：
+  当 A 类负责抛、B 类负责接时，测 A 的用例和测 B 的用例都通过，
+  **而 A→B 这条边没人测**。写测试时要问："这条链路上，有没有一条边只被两端各自覆盖？"
+- **收获 2**：**同一个坑会在不同异常类型上重演。**
+  踩坑 #10 的教训是"按类补分支"，本轮**没有把它变成机制**，于是换了个异常又踩一次 ——
+  这正是协议第 6 条说的"同一类操作性错误重复 ≥2 次必须机制化"。
+  **待办**：加一条"凡是新增可抛出的异常类型，必须同时在 `GlobalExceptionHandler` 里有落点
+  或明确说明它归入哪条既有分支"的检查（见"需要本人决策的事"）。
+- **收获 3（诚实标注一个遗留）**：非法凭证语义上更接近 **401 Unauthorized**，
+  而本项目错误码契约里没有 401（4xxxx 段只有参数/协议类）。
+  当前用 400 表达"该改凭证、别重试"。**是否新增 401 语义的错误码属于契约变更，留给本人定。**
+
+**坑 9 ★★ 包放错：把 `Service` 放进了领域包，破坏了既有的分层惯例**
+
+第一版把 5 个类放进了（新造的）`retrieval` 包与 `prompt` 包：
+
+```text
+❌ retrieval/KnowledgeRetrievalService.java     ← 项目里所有 *Service 都在 app/
+❌ retrieval/RetrievalProperties.java           ← RAG 领域的 ChunkingProperties / IngestProperties 都在 config/
+❌ prompt/PromptProperties.java                 ← 切面参数 AdvisorProperties 在 config/
+❌ prompt/PromptFragmentKeys.java               ← 3 个使用者全在 advisor/，却单独占一个包
+```
+
+**根因：本项目同时存在两套组织规则，而我没有先问"这个类属于哪一套"。**
+
+<table border="1">
+  <caption>同一棵树上的两套规则</caption>
+  <tr><th>规则</th><th>适用对象</th><th>包</th></tr>
+  <tr><td><b>按技术角色</b></td>
+      <td>外壳 / 基础设施类：Service、Controller、DTO、配置、异常、切面</td>
+      <td><code>app</code> / <code>controller</code> / <code>dto</code> / <code>config</code> /
+          <code>exception</code> / <code>advisor</code></td></tr>
+  <tr><td><b>按能力域</b></td>
+      <td>领域模型与其内部组件：值对象、枚举、加载器、切分器</td>
+      <td><code>document</code> / <code>document/chunking</code> / <code>memory</code> /
+          <code>retrieval</code> / <code>security</code></td></tr>
+</table>
+
+**判据（写下来，下次先问）**：
+- 类的**种类**有既定归属吗？（`*Service`→`app`、`*Properties`→`config`、`*Advisor`→`advisor`）
+  → **有，就跟种类走**，不要跟"它讲的是哪个业务"走；
+- 没有既定归属（值对象、枚举、能力内部 `@Component`）→ **跟能力域走**。
+
+**核实手段（本次用的）** —— 不靠记忆，靠列出来看：
+```powershell
+Get-ChildItem -Recurse -Filter '*Service.java'     | 看它们都在哪个包
+Get-ChildItem -Recurse -Filter '*Properties.java'  | 看它们都在哪个包
+```
+实测结果：`*Service` **3/4 在 `app/`**；`*Properties` **7/10 在 `config/`**。
+一眼就能看出我那两个是破例。
+
+**★ 顺带确认了一件事（避免过度纠正）**：`config/IngestProperties` **本身就 import
+领域枚举 `com.hagent.document.DocumentKind`** —— 所以"配置类依赖领域"是本项目的既有模式，
+不需要为了"解耦"把 `bandOf()` 挪进 `RelevanceBand`。**先确认惯例，再决定要不要重构。**
+
+- **收获 1**：**"新代码放哪"不是风格问题，是"库里已有多少同类、它们在哪"。**
+  下笔前跑一条 `Get-ChildItem -Filter '*Xxx.java'` 比自己想快得多，也准得多。
+- **收获 2**：**一个能力被劈成两个包，是"放错"的典型信号。**
+  `PromptAssemblyAdvisor` 在 `advisor/`、它读的 key 在 `prompt/` —— 这种"做事的在一处、
+  约定在另一处"的劈裂，比包名难听严重得多。判据：**谁用它，它就跟谁走。**
+
+---
+
+#### 阶段结果
+
+**测试：189 个用例全绿**（`mvnw.cmd -B -ntp clean test`），本阶段新增 **9 个测试类 / 77 个用例**，
+并把既有的 `RetrievalFilterSqlTest` 从 6 个用例扩到 7 个（新增 `in` 四种写法对照）：
+`111 + 77 + 1 = 189`。
+
+| 测试类 | 用例 | 覆盖什么 |
+|---|---|---|
+| `AdvisorOrderTest` | 6 | order 与框架常量的边界关系、before/after 镜像、"外层看不到内层注入" |
+| `PromptAssemblyAdvisorTest` | 17 | 拼装的形状与顺序、片段格式、未知消息保留、options 不丢、资源缺失即失败 |
+| `RetrievalPropertiesTest` | 11 | 距离↔相似度换算、分档边界、浮点容差、启动期校验 |
+| `RetrievalFilterBuilderTest` | 10 | 三种角色的可见清单、SQL 形态、`in` 必须渲染成 OR 链 |
+| `RetrievalFilterSqlTest` | 7 | 各条件渲染实测 + **`in` 四种写法对照**（含陷阱留档） |
+| `RetrievalPermissionIntegrationTest` | 9 | ★ 真库端到端权限过滤 |
+| `RetrievalScoreProbeTest` | 2 | 分数语义与阈值单位的实测探针 |
+| `UserTokenResolverTest` | 11 | token 解析：缺失=匿名 / 非法=抛异常 / **异常必须带 4xxxx 错误码** |
+| `ChatEndpointIdentityTest` | 6 | ★ **真实 HTTP 往返**：非法 token → 400 + 40001（补上"抛出→HTTP 形态"那条边） |
+| `MemoryBudgetsTest` | 5 | ★ 预算表覆盖全部模式、每个模式读自己的配置项、**两个调用点拿到同一份预算**（回归防线，已用植入缺陷验证） |
+
+#### 验证证据
+
+**① 权限过滤 —— 端到端实测（`target/retrieval-permission-report.txt`）**
+
+同一提问「年假要提前几天申请」、同一个库、同样 `topK=3`，三种视角的结果：
+
+```text
+--- 匿名（仅可见 PUBLIC）：3 条 ---
+   相似度=0.6009  档位=中  密级=PUBLIC      出处=公司简介 第 1 块
+   相似度=0.5936  档位=中  密级=PUBLIC      出处=公司介绍 第 1 块
+   相似度=0.5705  档位=中  密级=PUBLIC      出处=公司介绍 第 2 块
+
+--- 员工（可见 PUBLIC+INTERNAL）：3 条 ---
+   相似度=0.7495  档位=高  密级=INTERNAL    出处=员工手册 第二章 假期管理
+   相似度=0.6980  档位=中  密级=INTERNAL    出处=员工手册 第三章 薪酬与福利
+   相似度=0.6934  档位=中  密级=INTERNAL    出处=员工手册 第四章 差旅与报销
+```
+
+**这张表同时证明了四件事**（每一件都是"不报错但会错"的类型）：
+
+1. **过滤真的作用在检索上** —— 匿名那栏**一条 INTERNAL 都没有**；
+2. **过滤条件在真实 pgvector 上可执行** —— 员工那栏**非空**。
+   （若 jsonpath 在 `json` 列上不被接受，查询会抛异常、被降级成空列表 ——
+   而"空列表"与"没命中"看起来完全一样，所以这条正向断言是必需的。）
+3. **topK 名额没有被无权内容挤占** —— 匿名拿到的是 3 条 PUBLIC 文档，
+   而不是"检索出 3 条机密、筛掉后一条不剩"。这正是"检索前过滤"相对"取回后筛选"
+   的实质差别。
+4. **相关度分档在真实数据上工作** —— 员工视角的 top-1 是 0.7495 → 【高】，
+   其余落【中】；匿名视角最好的也只有 0.6009 → 【中】。
+
+**② 分数语义与阈值单位 —— 实测（`target/retrieval-score-report.txt`）**
+
+| 提问 | score（相似度） | 换算距离 = 1 − score | HANDOFF 3.5 记录的距离 |
+|---|---|---|---|
+| 年假要提前几天申请（相关） | 0.7495 | 0.2505 | 0.2168 |
+| 出差住宿费能报多少（相关） | 0.7582 | 0.2418 | 0.2237 |
+| 我们的年假怎么算？（相关） | 0.7369 | 0.2631 | 0.2514 |
+| 公司总部在哪里（相关） | 0.8171 | 0.1829 | 0.2570 |
+| 请假流程是什么（相关） | **0.5415** | **0.4585** | **0.4827** |
+| **今天杭州天气怎么样（无关）** | **0.7402** | **0.2598** | **0.2883** |
+| 帮我翻译这段英文（无关） | 0.6812 | 0.3188 | 0.3396 |
+| 帮我写一封催款邮件（无关） | 0.6720 | 0.3280 | 0.3563 |
+| 推荐几本好看的小说（无关） | 0.6643 | 0.3357 | 0.3819 |
+| 红烧肉怎么做好吃（无关） | 0.5147 | 0.4853 | 0.5055 |
+
+**两个结论**：
+
+- `Document.getScore()` 是**相似度**（`1 − 余弦距离`），与 HANDOFF 3.5 的距离表吻合
+  （误差 0.02~0.04，差异来自入库状态不同）。**这是"分档方向不能写反"的依据。**
+- ★ **相关与无关的分布依然完全重叠**：相关的「请假流程是什么」距离 0.4585，
+  而无关的「今天杭州天气怎么样」只有 0.2598 —— **无关的比相关的"近"得多**。
+  **阈值挡不住无关问题，这条在本轮再次被实测确认。真正的兜底是提示词约束。**
+
+**③ `similarityThreshold` 的单位 —— 实测**
+
+传入 `similarityThreshold=0.70` 后只返回 `score=0.7495` 一条（`≥ 0.70`），
+**证明它是"相似度下限"**（越大越严），与 `RetrievalProperties` 的换算方向一致。
+
+**④ `in` 重载渲染对照（`target/in-overload-report.txt`）**
+
+```text
+① in(key, "PUBLIC", "INTERNAL")     → ($."level" == "PUBLIC" || $."level" == "INTERNAL")   ✅
+② in(key, List<String> 变量)         → ($."level" == ["PUBLIC","INTERNAL"])                 ❌ 恒为假
+③ in(key, List<Object> 变量)         → ($."level" == "PUBLIC" || $."level" == "INTERNAL")   ✅
+④ in(key, stringList.toArray())     → ($."level" == "PUBLIC" || $."level" == "INTERNAL")   ✅
+```
+
+**② 与 ③ 只差一个泛型声明，结果完全相反** —— 详见"踩坑记录 坑 7"。
+
+**⑤ 框架事实 —— 字节码实证（不是记忆）**
+
+| 事实 | 证据来源 |
+|---|---|
+| `ToolCallingAdvisor.DEFAULT_ORDER = MIN_VALUE + 300` | `javap -constants` |
+| `ChatModelCallAdvisor.getOrder() = Integer.MAX_VALUE` | `javap -c` |
+| 每个切面自动建 observation，且 `order` 进标签 | `DefaultAroundAdvisorChain.nextCall` 字节码里的 `AdvisorObservationContext.builder().order(...)` |
+| 链是单向转发：`callAdvisors.pop()` 后把 request 转交下一环 | `DefaultAroundAdvisorChain.nextCall` 字节码 |
+| 框架探测内层有无 `MemoryAdvisor` 来决定自己的循环历史开关 | `autoRegisterToolCallingAdvisor` + `doGetNextInstructionsForToolCall` 字节码 |
+| `mutate()` 会复制 prompt 与 context（`new HashMap<>(context)`） | `ChatClientRequest.mutate()` 字节码 |
+| `in(String, List<Object>)` 的参数是 `List<Object>` 而非 `List<?>` | `javap -p FilterExpressionBuilder` |
+
+**⑥ 真实 HTTP 往返 —— 四个用例（服务真实启动，`spring-boot:run`，端口 8123）**
+
+| # | 请求 | 结果 | 说明 |
+|---|---|---|---|
+| ① | `X-Hagent-Token: badtoken`（无分隔符） | **HTTP 400** `{"code":40001}` | ★ **第一版这里是 500**，见"踩坑记录 坑 8" |
+| ② | `X-Hagent-Token: zhangsan:ADMN` | **HTTP 400** `{"code":40001}` | 未知角色同样按客户端错误处理 |
+| ③ | 不带 token（匿名） | **HTTP 502** `{"code":50005}` 模型服务认证失败 | 占位 key 必然失败；**能走到模型这一步，说明前面五层切面全部正常执行** |
+| ④ | `X-Hagent-Token: zhangsan:EMPLOYEE` | **HTTP 502** `{"code":50005}` | 同上 |
+
+③④ 的 502 不是缺陷 —— 它恰好是**最有力的证据**：链上每一环都跑通了，只差最后一步调用真实模型。
+
+**⑦ ★★ 切面链的真实执行轨迹（从服务日志抓取，含权限差异）**
+
+同一个提问「年假要提前几天申请」，两种身份的日志对比：
+
+```text
+--- 匿名 ---
+[检索] 命中 3 条（topK=3 粗筛=距离<= 0.5）| 视角 userId=anonymous role=ANONYMOUS 可见密级=[PUBLIC]
+[检索]   · 相似度=0.6009 档位=中 出处=公司简介 第 1 块
+[检索]   · 相似度=0.5936 档位=中 出处=公司介绍 第 1 块
+[检索]   · 相似度=0.5705 档位=中 出处=公司介绍 第 2 块
+[PromptAssemblyAdvisor] ← 模型收到的 prompt | 消息数=2（system=1 历史=0 未知=0 用户=1）| 片段=3
+
+--- 员工 ---
+[鉴权] 已解析身份：userId=zhangsan role=EMPLOYEE → 可见范围=INTERNAL
+[PromptTraceAdvisor][call] → 请求 | 消息数=1 | 内容=年假要提前几天申请          ← ★ 注意这里是 1
+[记忆-读] 会话 6db1a112-… 模式=CONVERSATION 注入历史 0 条（预算 5000 token / 30 条）
+[检索] 命中 3 条（topK=3 粗筛=距离<= 0.5）| 视角 userId=zhangsan role=EMPLOYEE 可见密级=[PUBLIC, INTERNAL]
+[检索]   · 相似度=0.7495 档位=高 出处=员工手册 第二章 假期管理
+[检索]   · 相似度=0.6980 档位=中 出处=员工手册 第三章 薪酬与福利
+[检索]   · 相似度=0.6934 档位=中 出处=员工手册 第四章 差旅与报销
+[PromptAssemblyAdvisor] ← 模型收到的 prompt | 消息数=2（system=1 历史=0 未知=0 用户=1）| 片段=3
+```
+
+**这段日志一次性证明了五件事**：
+
+1. **权限过滤在真实链路上生效** —— 匿名视角的可见密级是 `[PUBLIC]`，
+   员工是 `[PUBLIC, INTERNAL]`，命中的来源完全不同（公司简介/公司介绍 vs 员工手册）。
+2. **★★ "外层看不到内层注入"被实时日志直接证实** ——
+   同一个请求里 `PromptTraceAdvisor` 打 `消息数=1`，
+   而 `PromptAssemblyAdvisor` 打 `消息数=2（system=1 … 片段=3）`。
+   **坑 2 那条被写反的注释，不需要专门造实验就能证伪 —— 两条日志摆在一起就够了。**
+   这也是把它们拆成两条日志的价值所在。
+3. **拼装结果可见**：日志里完整打出约束 + `【知识库片段 1／来源：员工手册 第二章 假期管理／相关度：高】`
+   + 块正文，说明片段格式与档位都正确落进了 prompt。
+4. **记忆读取在真实链路上执行**（`注入历史 0 条` —— 新会话，符合预期）。
+5. **★ 模型调用失败时没有写回** —— 日志里**没有** `[记忆-写]` 行。
+   这实证了决策 5（先调模型、后写记忆）：失败调用**不留半截记录**。
+   它是"副产品证据"：本来只是在验 4xx/5xx，却顺手验证了一条设计决策。
+
+---
+
+## 待推进
 
 - RAG 企业知识库：文档加载 / frontmatter 打标签 / 幂等入库 / 检索 / prompt 注入，并在其上抽象可替换的向量存储
   - **同时要提供会话记忆的 MySQL 实现**（`hagent.memory.chat.type: mysql` 目前会启动失败，

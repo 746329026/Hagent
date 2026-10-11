@@ -1,10 +1,14 @@
 package com.hagent.config;
 
 import com.hagent.controller.ChatController;
+import com.hagent.security.UserContextInterceptor;
+import com.hagent.security.UserTokenResolver;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.util.List;
@@ -36,6 +40,9 @@ public class WebConfig implements WebMvcConfigurer {
     private final List<String> allowedOrigins;
     private final int corsMaxAgeSeconds;
 
+    /** 身份解析拦截器 —— 见下面 {@link #identityInterceptor()} 的说明。 */
+    private final UserTokenResolver userTokenResolver;
+
     /**
      * ★ 用 {@link WebProperties}（{@code @ConfigurationProperties}）而不是
      * {@code @Value("${hagent.web.allowed-origins}")} 注入：
@@ -43,9 +50,10 @@ public class WebConfig implements WebMvcConfigurer {
      * {@code @Value} 只做"按键取值"，取不到；{@code @ConfigurationProperties}
      * 才做"按结构绑定"。实测 {@code @Value} 方式会直接导致启动失败。
      */
-    public WebConfig(WebProperties webProperties) {
+    public WebConfig(WebProperties webProperties, UserTokenResolver userTokenResolver) {
         this.allowedOrigins = webProperties.getAllowedOrigins();
         this.corsMaxAgeSeconds = webProperties.getMaxAgeSeconds();
+        this.userTokenResolver = userTokenResolver;
         log.info("[Web] CORS 白名单={}  预检缓存={}s", allowedOrigins, corsMaxAgeSeconds);
     }
 
@@ -80,6 +88,44 @@ public class WebConfig implements WebMvcConfigurer {
                 // 预检结果的浏览器缓存时长。外置成配置项，因为开发与生产的合理取值相反：
                 // 开发要小（改配置立即生效），生产要大（省预检往返）。详见 WebProperties 注释。
                 .maxAge(corsMaxAgeSeconds);
+    }
+
+    /**
+     * 身份解析拦截器 Bean。
+     *
+     * <p>声明成 Bean（而不是在 {@link #addInterceptors} 里内联 new）是为了
+     * 可以在别处按类型引用它 —— 与 {@code AiConfig} 把切面声明成 Bean 的理由一致。
+     */
+    @Bean
+    public UserContextInterceptor identityInterceptor() {
+        return new UserContextInterceptor(userTokenResolver);
+    }
+
+    /**
+     * 注册身份解析拦截器。
+     *
+     * <h3>★ 为什么只拦 {@code /chat/**}，不是 {@code /**}</h3>
+     *
+     * <p>身份解析只在"要拿身份去做权限判定"的端点上才有意义。
+     * 若拦全部路径，健康检查与静态资源也会走"非法 token 即失败"的分支 ——
+     * 而那些端点与身份无关，一次错误的请求头就会让它们不可用。
+     *
+     * <p>按 URL 模式注册的好处正在于此：将来新增 {@code /knowledge/**}、
+     * {@code /workflow/**} 时，<b>只需在这里加一条 pattern</b>，
+     * 解析逻辑与 Controller 一行都不改。这也是"身份解析该留在 HTTP 层"
+     * 相对于"做成切面"的一个具体优势 —— 切面只能覆盖走 ChatClient 的路径。
+     *
+     * <h3>★ 这里不做"未认证就拒绝"</h3>
+     *
+     * <p>拦截器<b>始终放行</b>：未携带凭证 → 匿名（仅可见 PUBLIC）；
+     * 凭证非法 → 抛异常交给全局异常处理器。判定"能不能看某篇文档"不在这一层，
+     * 而在检索的 SQL 条件里（决策 1）。这与决策 21"匿名 = 最小权限，不拒绝"一致。
+     */
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(identityInterceptor())
+                .addPathPatterns("/chat/**");
+        log.info("[Web] 身份解析拦截器已注册：/chat/**（未携带凭证 = 匿名，仅可见 PUBLIC）");
     }
 
     // ==========================================================================

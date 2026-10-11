@@ -4,6 +4,7 @@ import com.hagent.app.ChatAppService;
 import com.hagent.common.BaseResponse;
 import com.hagent.dto.ChatRequest;
 import com.hagent.dto.ChatResponse;
+import com.hagent.security.UserContext;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -11,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -79,10 +81,11 @@ public class ChatController {
      */
     @PostMapping
     public BaseResponse<ChatResponse> chat(@Valid @RequestBody ChatRequest request,
+                                           @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext,
                                            jakarta.servlet.http.HttpServletResponse servletResponse) {
         String conversationId = resolveConversationId(request.conversationId());
         servletResponse.setHeader(CONVERSATION_ID_HEADER, conversationId);
-        return BaseResponse.success(chatAppService.chat(request.message(), conversationId));
+        return BaseResponse.success(chatAppService.chat(request.message(), conversationId, userContext));
     }
 
     /**
@@ -119,9 +122,10 @@ public class ChatController {
      * <p><b>缺点</b>：代码量大；线程与生命周期要自己管（超时、断连、关闭）。
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter stream(@Valid @RequestBody ChatRequest request) {
+    public SseEmitter stream(@Valid @RequestBody ChatRequest request,
+                             @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext) {
         SseEmitter emitter = new SseEmitter(600_000L);
-        chatAppService.stream(request.message(), emitter);
+        chatAppService.stream(request.message(), userContext, emitter);
         return emitter;
     }
 
@@ -132,9 +136,10 @@ public class ChatController {
      * 若只提供 POST 入口，浏览器端就无法用最原生的方式消费这个流。
      */
     @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter streamGet(@RequestParam String message) {
+    public SseEmitter streamGet(@RequestParam String message,
+                                @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext) {
         SseEmitter emitter = new SseEmitter(600_000L);
-        chatAppService.stream(message, emitter);
+        chatAppService.stream(message, userContext, emitter);
         return emitter;
     }
 
@@ -152,8 +157,9 @@ public class ChatController {
      * 判定为"必须放行"，因此不会被统一响应包装破坏。
      */
     @GetMapping(value = "/stream-flux", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<ServerSentEvent<String>> streamFlux(@RequestParam String message) {
-        return chatAppService.streamAsFlux(message);
+    public Flux<ServerSentEvent<String>> streamFlux(@RequestParam String message,
+                                                    @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext) {
+        return chatAppService.streamAsFlux(message, userContext);
     }
 
     /**
@@ -173,13 +179,14 @@ public class ChatController {
      */
     @PostMapping(value = "/stream-sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamSse(@Valid @RequestBody ChatRequest request,
+                                @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext,
                                 jakarta.servlet.http.HttpServletResponse servletResponse) {
         String conversationId = resolveConversationId(request.conversationId());
         // 与同步路径一致：会话 ID 用响应头返回，前端下次带上即可续用同一会话。
         // 注意必须已暴露在 WebConfig 的 exposedHeaders 里，否则浏览器读不到（且不报错）。
         servletResponse.setHeader(CONVERSATION_ID_HEADER, conversationId);
         SseEmitter emitter = new SseEmitter(600_000L);
-        chatAppService.streamWithServerSentEvent(request.message(), conversationId, emitter);
+        chatAppService.streamWithServerSentEvent(request.message(), conversationId, userContext, emitter);
         return emitter;
     }
 
@@ -201,11 +208,12 @@ public class ChatController {
     @GetMapping(value = "/stream-sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamSseGet(@RequestParam String message,
                                    @RequestParam(required = false) String conversationId,
+                                   @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext,
                                    jakarta.servlet.http.HttpServletResponse servletResponse) {
         String resolved = resolveConversationId(conversationId);
         servletResponse.setHeader(CONVERSATION_ID_HEADER, resolved);
         SseEmitter emitter = new SseEmitter(600_000L);
-        chatAppService.streamWithServerSentEvent(message, resolved, emitter);
+        chatAppService.streamWithServerSentEvent(message, resolved, userContext, emitter);
         return emitter;
     }
 }

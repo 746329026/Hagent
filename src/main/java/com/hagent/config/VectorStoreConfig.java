@@ -89,53 +89,122 @@ public class VectorStoreConfig {
      * 这类"配置写了却不用"的静默失效，正是本项目要系统性避免的问题。
      */
     @Bean
-    public PgVectorStore vectorStore(DataSource pgVectorDataSource,
+    public PgVectorStore vectorStore(JdbcTemplate pgVectorJdbcTemplate,
                                      EmbeddingModel embeddingModel,
                                      VectorStoreProperties properties) {
-        log.info("[向量库] 装配 PgVectorStore：table={} schema={} dimensions={} index={} distance={}",
+        log.info("[向量库] 装配 PgVectorStore：table={} schema={} dimensions={} index={} distance={} initSchema={}",
                 properties.getTableName(), properties.getSchemaName(), properties.getDimensions(),
-                properties.getIndexType(), properties.getDistanceType());
+                properties.getIndexType(), properties.getDistanceType(), properties.isInitializeSchema());
 
-        return PgVectorStore.builder(new JdbcTemplate(pgVectorDataSource), embeddingModel)
+        return PgVectorStore.builder(pgVectorJdbcTemplate, embeddingModel)
                 .vectorTableName(properties.getTableName())
                 .schemaName(properties.getSchemaName())
                 .dimensions(properties.getDimensions())
                 .indexType(properties.getIndexType())
                 .distanceType(properties.getDistanceType())
                 .initializeSchema(properties.isInitializeSchema())
+                .vectorTableValidationsEnabled(properties.isVectorTableValidationsEnabled())
                 .maxDocumentBatchSize(properties.getMaxDocumentBatchSize())
                 .build();
     }
 
     /**
-     * 启动自检：把<b>实际生效</b>的向量表名打印出来，并与配置值核对。
+     * 向量库专用的 {@link JdbcTemplate} —— <b>与 PgVectorStore 共用同一个实例</b>。
      *
-     * <p>为什么需要这一步：上面的坑说明"我配置了什么"和"实际用了什么"可能不一致，
-     * 而系统不会报错。这里直查 PostgreSQL 的系统表，用事实而不是配置来确认 ——
-     * 发现不一致时明确告警，避免数据悄悄写进一张计划外的表。
+     * <p><b>为什么要把它抽成 Bean，而不是在需要时各自 {@code new}</b>：
+     * 入库服务需要用原生 SQL 直查向量表的 metadata（框架的 {@code VectorStore}
+     * 接口没有"按元数据条件查询"的方法）。如果它在自己方法里 new 一个，
+     * 就会出现"同一个数据源上两个 JdbcTemplate 实例"—— 功能上不会出错，
+     * 但连接池使用、异常转换配置、将来加拦截器时都要改两处。
+     * <b>共用同一个 Bean，让"访问向量库"只有一个入口。</b>
+     *
+     * <p>注意 {@code vectorStore(...)} 是通过<b>方法参数</b>拿到它的，
+     * 而不是在方法体内调用 {@code pgVectorJdbcTemplate(...)} ——
+     * 后者依赖 {@code @Configuration} 的 CGLIB 代理才会返回容器中的单例，
+     * 一旦有人改成 {@code proxyBeanMethods = false}，那个写法就会
+     * 悄悄变成"每次都 new 一个新的"。参数注入不依赖这个隐式规则。
+     */
+    @Bean
+    public JdbcTemplate pgVectorJdbcTemplate(DataSource pgVectorDataSource) {
+        return new JdbcTemplate(pgVectorDataSource);
+    }
+
+    /**
+     * 启动自检：核对向量表<b>是否真的存在</b>，并把关键列类型打出来。
+     *
+     * <p>为什么需要这一步：上面那个坑说明"我配置了什么"与"实际用了什么"可能不一致，
+     * 而系统不会报错。这里直查 PostgreSQL 的系统表，用事实而不是配置来确认。
+     *
+     * <p><b>★ 阶段 6 起，这条自检从"仅告警"升级为"缺失即启动失败"</b>：
+     * 阶段 0 时没有写入路径，表不存在只是"尚未用到"；而阶段 6 引入入库后，
+     * 表不存在意味着<b>每一次入库都会失败</b>。若继续只打 WARN，
+     * 应用会正常启动、健康检查全绿，直到真的去入库才发现问题 ——
+     * 这正是本项目全篇在防的"看起来一切正常"。
+     *
+     * <p>所以规则改为：<b>表必须存在，否则启动失败并说明原因与修法</b>。
+     * 同时打印列结构 —— 下一轮做检索过滤时要按 metadata 字段写条件，
+     * 事先知道它是 {@code json} 还是 {@code jsonb} 是有用的（两者对索引与操作符支持不同）。
      */
     @Bean
     public org.springframework.boot.ApplicationRunner vectorTableSelfCheck(
             DataSource pgVectorDataSource, VectorStoreProperties properties) {
         return args -> {
-            String sql = "SELECT table_name FROM information_schema.tables "
+            String existenceSql = "SELECT table_name FROM information_schema.tables "
                     + "WHERE table_schema = ? AND table_name = ?";
+            boolean exists = false;
             try (java.sql.Connection conn = pgVectorDataSource.getConnection();
-                 java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                 java.sql.PreparedStatement ps = conn.prepareStatement(existenceSql)) {
                 ps.setString(1, properties.getSchemaName());
                 ps.setString(2, properties.getTableName());
                 try (java.sql.ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        log.info("[向量库] 表 '{}' 已存在（schema={}）", properties.getTableName(), properties.getSchemaName());
-                    } else {
-                        log.warn("[向量库] 表 '{}' 尚不存在（schema={}）—— 阶段 7 会用显式 DDL 创建，"
-                                        + "届时维度必须与 embedding 实测维度一致",
-                                properties.getTableName(), properties.getSchemaName());
-                    }
+                    exists = rs.next();
+                }
+                if (exists) {
+                    log.info("[向量库] 表 '{}' 已存在（schema={}）",
+                            properties.getTableName(), properties.getSchemaName());
+                    logColumnTypes(conn, properties);
                 }
             } catch (Exception e) {
-                log.warn("[向量库] 表名自检失败（向量库不可用时不阻断启动）：{}", e.getMessage());
+                // 连不上库时不在这里报错 —— 该数据源本身已配置为"不阻断启动"（检索可降级）
+                log.warn("[向量库] 表存在性检查未能完成（向量库不可用时不阻断启动）：{}", e.getMessage());
+                return;
+            }
+
+            if (!exists) {
+                throw new IllegalStateException(String.format(
+                        "向量表 '%s'（schema=%s）不存在，入库功能依赖它，应用不应带着这个问题启动。"
+                                + "【为什么会出现】PgVectorStore 只在 "
+                                + "spring.ai.vectorstore.pgvector.initialize-schema=true 时才建表；"
+                                + "为 false 时它既不建表也不校验（schema-validation 同为 false 时校验是空操作），"
+                                + "于是表永远不会被创建，直到第一次写入才报错。"
+                                + "【怎么修】把 initialize-schema 设为 true 后重启。"
+                                + "【若设为 true 后仍不存在】检查名为 %s 的数据源配置是否正确。",
+                        properties.getTableName(), properties.getSchemaName(),
+                        PG_VECTOR_DATASOURCE_BEAN));
             }
         };
+    }
+
+    /** 打印向量表的关键列类型 —— metadata 是 json 还是 jsonb 会影响下一轮检索过滤的写法。 */
+    private void logColumnTypes(java.sql.Connection conn, VectorStoreProperties properties) {
+        String sql = "SELECT column_name, data_type FROM information_schema.columns "
+                + "WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position";
+        try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, properties.getSchemaName());
+            ps.setString(2, properties.getTableName());
+            try (java.sql.ResultSet rs = ps.executeQuery()) {
+                StringBuilder sb = new StringBuilder();
+                while (rs.next()) {
+                    if (sb.length() > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(rs.getString("column_name")).append(' ').append(rs.getString("data_type"));
+                }
+                log.info("[向量库] 表结构：{}", sb);
+            }
+        } catch (Exception e) {
+            // 打印列类型只为可观测性，失败不影响启动
+            log.debug("[向量库] 读取表结构失败（不影响启动）：{}", e.getMessage());
+        }
     }
 }

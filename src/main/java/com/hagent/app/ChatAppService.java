@@ -3,6 +3,7 @@ package com.hagent.app;
 import com.hagent.config.StreamProperties;
 import com.hagent.dto.ChatResponse;
 import com.hagent.memory.MemoryMode;
+import com.hagent.security.UserContext;
 import com.hagent.stream.StreamEventType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -73,17 +74,36 @@ public class ChatAppService {
      * 由 {@link MemoryMode} 承载类型。
      * 阶段 9 的工作流引擎在这里改传 {@link MemoryMode#WORKFLOW} 即可，切面无需改动。
      *
+     * <p><b>★ 身份（{@code userContext}）为什么用方法参数传进来，而不是从别处取</b>：
+     * 身份的来源是 {@code UserContextInterceptor}（HTTP 层），
+     * 它把结果挂在请求属性上，由 Controller 用 {@code @RequestAttribute} 取出后
+     * <b>作为参数传到这里</b>。
+     * <ul>
+     *   <li>不用 {@code ThreadLocal} 直取：本项目的流式接口是
+     *       {@code SseEmitter} + {@code Flux.subscribe()}，后续推送发生在 Reactor 线程上，
+     *       ThreadLocal 在那里会静默拿到 null；</li>
+     *   <li>用方法参数的好处是<b>编译期检查</b>：谁改了签名，所有调用点立刻编译失败。
+     *       切面内部读 context 时是运行期检查（key 拼错不报错），
+     *       所以"能编译期保证的那一段"要尽量留在编译期。</li>
+     * </ul>
+     *
+     * <p>它最终的消费者是 {@code RagRetrievalAdvisor}：由它把许可等级
+     * 翻成检索的 SQL 条件，让无权内容留在数据库里。
+     *
      * @param message        已经过参数校验的用户消息（非空）
      * @param conversationId 会话标识（由 Controller 生成或透传）
+     * @param userContext    调用方身份（未认证时为 {@link UserContext#ANONYMOUS}）
      * @return 模型回复
      */
-    public ChatResponse chat(String message, String conversationId) {
+    public ChatResponse chat(String message, String conversationId, UserContext userContext) {
         String reply = chatClient.prompt()
                 .user(message)
                 // key 用框架常量 ChatMemory.CONVERSATION_ID，保持单一出处
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
                 // ★ 记忆模式也由 app 层显式声明，切面不去猜（见 MemoryMode 的类注释）
                 .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.CONVERSATION))
+                // ★ 身份：切面只能通过 context 拿到请求级数据（见方法注释）
+                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
                 .call()
                 .content();
         return new ChatResponse(reply);
@@ -112,11 +132,31 @@ public class ChatAppService {
      * <p><b>★ 本方法刻意不带会话记忆</b>（方式三是唯一带记忆的流式路径，理由见
      * {@link #streamWithServerSentEvent}）。它不对应任何产品路径，
      * 只用于展示"SseEmitter 手动驱动"这一种机制。
+     *
+     * <p>⚠️ <b>"不带记忆"的准确含义（阶段 6 后半核实后补充）</b>：
+     * 这里说的是<b>不传 {@code conversationId} 与身份</b>。
+     * 但记忆、检索、拼装都是挂在 ChatClient 上的 {@code defaultAdvisors}，
+     * 所以它们<b>依然会执行</b>，只是落到各自的兜底值：
+     * <pre>
+     *   会话 ID  → MemoryReadAdvisor 的 FALLBACK_CONVERSATION_ID（"default"）
+     *   身份     → RagRetrievalAdvisor 按【匿名】处理（仅可见 PUBLIC，并记 WARN）
+     * </pre>
+     * 也就是说：方式一/二<b>会与"所有未传会话 ID 的调用"共享同一个 default 会话</b>。
+     * 这一点在原实现中就存在（旧的 {@code ConversationMemoryAdvisor} 同样有兜底），
+     * 不是本轮引入的 —— 但它此前没有被写下来，属于"读代码看不出来"的行为。
+     * 是否要把这两条对照路径彻底摘出记忆/检索，是一个待定的设计问题
+     * （见 {@code docs/PROCEDURES.md} 的本阶段"需要本人决策的事"）。
+     *
+     * <p><b>★ 但身份是要传的</b>：身份是<b>HTTP 请求的属性</b>，不是某条路径的属性 ——
+     * 拦截器对所有 {@code /chat/**} 请求都已经解析好了，不传反而是白解析。
+     * 而且不传会让 {@code RagRetrievalAdvisor} 按匿名处理并<b>每次都打一条 WARN</b>，
+     * 把日志变成噪声。所以四条对话路径一律传身份，只有会话 ID 是方式三独有。
      */
-    public void stream(String message, SseEmitter emitter) {
+    public void stream(String message, UserContext userContext, SseEmitter emitter) {
         // ChatClient.stream() 返回一个冷的 Flux：只有被订阅时才开始请求模型。
         chatClient.prompt()
                 .user(message)
+                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
                 .stream()
                 .content()
                 .doOnNext(chunk -> sendEvent(emitter, StreamEventType.MESSAGE, chunk))
@@ -153,11 +193,12 @@ public class ChatAppService {
      * <p><b>★ 本方法刻意不带会话记忆</b>（方式三是唯一带记忆的流式路径，理由见
      * {@link #streamWithServerSentEvent}）。它只用于展示"框架驱动"这一种机制。
      */
-    public Flux<ServerSentEvent<String>> streamAsFlux(String message) {
+    public Flux<ServerSentEvent<String>> streamAsFlux(String message, UserContext userContext) {
         // 用一个从 1 开始的自增序号作为事件 id
         AtomicLong seq = new AtomicLong();
         return chatClient.prompt()
                 .user(message)
+                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
                 .stream()
                 .content()
                 .map(chunk -> ServerSentEvent.<String>builder()
@@ -235,20 +276,23 @@ public class ChatAppService {
      * 这也是"同一能力不要在多处重复实现"的应用：有记忆的流式只有一份实现。
      *
      * <p>记忆的接法与同步路径<b>完全一致</b>（同一套 context 机制）：
-     * 会话 ID 与模式都通过 {@code advisors(...)} 放进请求 context。
+     * 会话 ID、模式与身份都通过 {@code advisors(...)} 放进请求 context。
      *
      * @param conversationId 会话标识（由 Controller 生成或透传）
+     * @param userContext    调用方身份（未认证时为 {@link UserContext#ANONYMOUS}）
      */
-    public void streamWithServerSentEvent(String message, String conversationId, SseEmitter emitter) {
+    public void streamWithServerSentEvent(String message, String conversationId,
+                                          UserContext userContext, SseEmitter emitter) {
         AtomicLong seq = new AtomicLong();
         long retryMs = streamProperties.getReconnectDelayMs();
         boolean[] retrySent = {false};
 
         chatClient.prompt()
                 .user(message)
-                // 与同步路径同一套机制：会话 ID + 模式走 context，不进 prompt
+                // 与同步路径同一套机制：会话 ID + 模式 + 身份走 context，不进 prompt
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
                 .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.CONVERSATION))
+                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
                 .stream()
                 .content()
                 .doOnNext(chunk -> {

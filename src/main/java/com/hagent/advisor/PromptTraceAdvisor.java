@@ -41,22 +41,49 @@ import reactor.core.publisher.Flux;
  * 等流结束时把聚合结果回调给我们。
  * <b>代价是它要把整段响应攒在内存里</b>——对一次对话来说完全可接受。
  *
+ * <h2>★ 本切面记的是哪一版 prompt（阶段 6 后半修正的一处认知错误）</h2>
+ *
+ * <p><b>它在最外层，因此它记到的是【注入前】的 prompt</b> ——
+ * 只有 system（若有）与本次用户消息，看不到历史注入与检索片段。
+ *
+ * <p>这是由切面链的转发方向决定的：{@code DefaultAroundAdvisorChain.nextCall}
+ * 从队列里 pop 出下一个切面，把 <b>request 的新版本</b>继续往下交 ——
+ * <b>内层的修改不会回流给外层</b>。所以外层切面在 before 侧看到的，
+ * 永远是"还没被内层加工过"的那一版。
+ *
+ * <p>⚠️ <b>修正记录</b>：本类与 {@code AiConfig}、{@code ConversationMemoryAdvisor}
+ * 的旧注释曾写着"order=0 在最外层，所以能看到注入后的完整 prompt"，
+ * 方向恰好是反的。当时没有发现问题，是因为项目只有一个业务切面，
+ * 而记忆切面的自身日志（{@code [记忆] 注入历史 N 条}）也能证明"注入发生了"，
+ * 于是没人去核对"这行日志里的消息数对不对"。
+ *
+ * <p><b>现在两条日志各有分工</b>：
+ * <pre>
+ *   [PromptTraceAdvisor]     请求进链时的样子（≈ 用户原始输入）→ 确认"入口是干净的"
+ *   [PromptAssemblyAdvisor]  模型真正收到的 prompt              → 确认"注入生效了"
+ * </pre>
+ * 后者的 order 是 {@code MIN+250}，即"最后一个改 prompt 的人"，
+ * 所以它记到的才是模型真正收到的那一份。
+ *
  * <h2>★ 参数取值依据</h2>
  *
- * <p><b>getOrder() = 0（最外层）</b>
+ * <p><b>getOrder() = {@link AdvisorOrders#OUTER_TRACE}（{@code Integer.MIN_VALUE + 100}）</b>
  * <ul>
  *   <li>{@link org.springframework.core.Ordered} 的语义：<b>值越小越先执行</b>，
- *       而"先执行的切面在退出时最后完成"，因此 0 表示本切面处于调用链最外层。</li>
- *   <li>当前项目只有这一个切面，取值不影响任何输出 —— 这一点是实事求是的。</li>
- *   <li>它真正开始起作用是在<b>有第二个切面之后</b>：届时 order 决定
- *       "日志记到的是<b>注入前</b>的 prompt 还是<b>注入后</b>的 prompt"。
- *       比如 RAG 检索结果注入、记忆注入都是通过切面做的，
- *       日志在外层就看不到那些注入内容。</li>
- *   <li>选 0 的含义是：<b>保证日志是最外层、能看到最完整的请求</b>。
- *       将来若发现"看不到 RAG 注入的内容"，就把 order 调大往内层挪。</li>
+ *       而"先执行的切面在退出时最后完成"，因此取最小值表示本切面处于调用链最外层。</li>
+ *   <li><b>为什么必须最外层</b>：它测的耗时（{@code after} 侧）要覆盖链上其它所有切面的开销 ——
+ *       最外层的 after 最后执行，所以它量到的才是"这次请求花了多久"。</li>
+ *   <li><b>为什么取 {@code MIN_VALUE + 100} 而不是 0</b>：
+ *       框架的工具循环 {@code ToolCallingAdvisor} 在 {@code MIN+300}，
+ *       它内层的切面会被跑 N 次（N = 工具轮数）。
+ *       本项目要让所有自定义切面待在循环<b>之外</b>，所以统一挪到负数区间，
+ *       详见 {@link AdvisorOrders}。
+ *       <br>（旧注释写的是"留出负数区间给鉴权、限流"—— 那个理由已经作废：
+ *       鉴权最终走的是<b>拦截器</b>而不是切面，理由见 {@code UserContextInterceptor}。）</li>
  * </ul>
  *
- * <p><b>截断长度</b>：见 {@link AdvisorProperties#getMaxLogLength()}。
+ * <p><b>截断长度</b>：见 {@link AdvisorProperties#getMaxLogLength()}，
+ * 格式化规则在 {@link PromptLogFormat}（与 {@code PromptAssemblyAdvisor} 共用）。
  *
  * <h2>★ 与参考实现的区别（有意为之）</h2>
  *
@@ -126,10 +153,14 @@ public class PromptTraceAdvisor implements CallAdvisor, StreamAdvisor {
         }
         var prompt = request.prompt();
         // 注意：直接取用 request.prompt()，不经过 context 传递 —— 避免隐式耦合。
-        // getContents() 会给出这条 prompt 里所有消息拼起来的完整内容，
-        // 这正是"模型实际会收到什么"。
+        // getContents() 会给出这条 prompt 里所有消息拼起来的完整内容。
+        //
+        // ★ 本切面在 MIN+100（最外层），所以这里看到的是【注入前】的 prompt ——
+        //   只有 system（若有）与本次用户消息，还没有历史与检索片段。
+        //   原因见类注释"★ 本切面记的是哪一版 prompt"。
         log.info("[{}][{}] → 请求 | 消息数={} | 内容={}",
-                ADVISOR_NAME, mode, prompt.getInstructions().size(), truncate(prompt.getContents()));
+                ADVISOR_NAME, mode, prompt.getInstructions().size(),
+                PromptLogFormat.truncate(prompt.getContents(), properties));
     }
 
     private void logResponse(String mode, ChatClientResponse response, long costMillis) {
@@ -141,31 +172,18 @@ public class PromptTraceAdvisor implements CallAdvisor, StreamAdvisor {
             text = response.chatResponse().getResult().getOutput().getText();
         }
         log.info("[{}][{}] ← 响应 | 耗时={}ms | 内容={}",
-                ADVISOR_NAME, mode, costMillis, truncate(text));
+                ADVISOR_NAME, mode, costMillis, PromptLogFormat.truncate(text, properties));
     }
 
     /**
-     * 截断长文本。
+     * 截断与单行化统一走 {@link PromptLogFormat}。
      *
-     * <p>为什么要截断而不是全打：一次 RAG 调用可能带几千字检索结果，
-     * 全量打进 INFO 日志会让日志文件暴涨，且把用户输入与内部文档内容大量写进日志
-     * （参考实现正是这么做的，属于手册点名的"日志脱敏"问题）。
-     * 需要看全文时用 {@code hagent.advisor.trace.log-full-content=true} 临时打开。
+     * <p>原先这里是本类的私有方法，阶段 6 后半抽出去了 —— 因为
+     * {@code PromptAssemblyAdvisor} 也要打 prompt 文本，两处必须用同一条规则
+     * （否则"一处改了另一处没改"会让两条日志口径分叉，而排查时正是靠对比它们）。
      */
     private String truncate(String text) {
-        if (text == null) {
-            return "<null>";
-        }
-        // 换行会让一条日志散成多行，排查时反而难读，所以先压成一行
-        String oneLine = text.replaceAll("\\s+", " ").trim();
-        if (properties.isLogFullContent()) {
-            return oneLine;
-        }
-        int max = properties.getMaxLogLength();
-        if (max > 0 && oneLine.length() > max) {
-            return oneLine.substring(0, max) + "...[截断，共 " + oneLine.length() + " 字符]";
-        }
-        return oneLine;
+        return PromptLogFormat.truncate(text, properties);
     }
 
     // ========================================================================
@@ -178,15 +196,15 @@ public class PromptTraceAdvisor implements CallAdvisor, StreamAdvisor {
     }
 
     /**
-     * 见类注释"参数取值依据"。0 = 最外层。
+     * 见类注释"★ 参数取值依据"。
      *
-     * <p>不用 {@code Ordered.HIGHEST_PRECEDENCE}（Integer.MIN_VALUE）而用 0：
-     * 留出负数区间给"必须最先执行的基础设施切面"（如未来的鉴权、限流），
-     * 0 是"业务切面的最外层"。
+     * <p>取值来自 {@link AdvisorOrders#OUTER_TRACE}，而不是裸数字 ——
+     * order 会进入框架的 observation 标签（见 {@link AdvisorOrders} 的类注释），
+     * 裸数字会让监控里出现一个没人看得懂的量。
      */
     @Override
     public int getOrder() {
-        return 0;
+        return AdvisorOrders.OUTER_TRACE;
     }
 
     /** 便于将来在别处按类型判断，避免裸字符串比较。 */

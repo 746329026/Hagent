@@ -44,10 +44,54 @@ public class VectorStoreProperties {
 
     /**
      * 是否自动建表。
-     * ★ 本项目设为 false：建表 DDL 由我们显式管理，先看清表结构再动手。
-     * 若为 true，PgVectorStore 会自动建表 —— 这也正是"表名配错却没人发现"的温床。
+     *
+     * <p><b>★ 阶段 6 从 false 改为 true —— 这是一段实测得出的结论，不要改回去。</b>
+     *
+     * <p>反编译 {@code PgVectorStore.afterPropertiesSet()} 可见其逻辑是：
+     * <pre>
+     *   if (schemaValidation) { 校验表名/列名合法性 }
+     *   if (!initializeSchema) {
+     *       仅记一条 debug 日志，然后 validateTableSchemaIfEnabled();
+     *       return;                       // ★ 直接返回，不建表
+     *   }
+     *   ... CREATE EXTENSION / CREATE SCHEMA / CREATE TABLE / CREATE INDEX
+     * </pre>
+     * 也就是说本值为 {@code false} 时<b>框架不会建表</b>；而
+     * {@code schemaValidation} 默认也是 {@code false}，所以"表结构校验"同样是空操作。
+     * 结论：两者都为假时<b>表永远不会被创建</b>，直到第一次写入才报错。
+     *
+     * <p>本项目阶段 0 只做了连通性探测、没有写入路径，所以这个问题一直没暴露 ——
+     * 典型的"配置看起来对、路径没人走"。阶段 6 引入入库后它立刻成为必须解决的前置问题。
+     *
+     * <p><b>为什么交给框架建表，而不是自己写 DDL</b>：DDL 必须与框架的读写逻辑
+     * （列名、类型、id 生成方式）严格一致。自己写等于把这份一致性变成"需要人工维护的约定"，
+     * 一旦漂移就是"写入报错"或更糟的"写进了结构相似但不被读取的表"。
      */
-    private boolean initializeSchema = false;
+    private boolean initializeSchema = true;
+
+    /**
+     * 是否做"表名合法性"校验（分隔符、非法字符等）。
+     *
+     * <p>保持 {@code false}，且<b>刻意不把它接到 builder 上</b>：
+     * builder 上暴露的是另一个名字相近但语义不同的开关
+     * （{@code vectorTableValidationsEnabled}，见 {@link #vectorTableValidationsEnabled}）。
+     * 把 {@code schema-validation} 硬塞给那个方法，会造成
+     * "配置名说的一件事、实际做的是另一件事" —— 这正是本项目要避免的。
+     *
+     * <p>保留这个字段是为了与 {@code application.yml} 的配置项一一对应。
+     * 真正要保证的"表存在且有正确结构"，由启动自检用事实核对（见 {@code VectorStoreConfig}），
+     * 那比依赖框架的黑盒校验更可靠。
+     */
+    private boolean schemaValidation = false;
+
+    /**
+     * 是否启用框架自身的"向量表校验"。
+     *
+     * <p>保持 {@code false}：框架的校验条件较严格（要求已有表的 id 列类型
+     * 与它生成的 DDL 完全一致），而本项目要的是"<b>建表</b>"而不是"<b>锁死结构</b>"。
+     * 表结构与存在性由启动自检负责确认。
+     */
+    private boolean vectorTableValidationsEnabled = false;
 
     /** 单批最大文档数（入库时批量写入，避免单条循环 insert） */
     private int maxDocumentBatchSize = 100;

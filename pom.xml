@@ -244,6 +244,17 @@
             <artifactId>reactor-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- 5.9 YAML 解析：读取知识库文档 .md 头部的 frontmatter（kind/title/level/dept/有效期）
+             为什么显式声明它：snakeyaml 本来会经由 spring-boot-starter 传递进来，
+             但"传递依赖"意味着它的存在不由我们控制 —— 将来 Boot 换掉内部实现，
+             我们就会在毫无征兆的情况下编译失败。凡是代码里【直接 import】的东西，
+             都应当显式声明（与前面显式声明 Lombok 注解处理器是同一个理由）。
+             版本不写：由 Spring Boot 的 dependencyManagement 仲裁，避免版本漂移。 -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
     </dependencies>
 
     <!-- (6) 构建插件 -->

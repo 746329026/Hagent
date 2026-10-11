@@ -67,7 +67,7 @@ Started HagentApplication in x.xxx seconds
 | 2 | [2.2](#22--立刻检查文件是否产生) | **写入端** | `tmp/chat-memory/` 出现**恰好 1 个** `.json`，文件名 = 响应头那个 UUID |
 | 3 | [2.4](#24--最关键的测试下一轮能不能看到历史) | **读取端（最关键）** | 第二轮回复里**说出了「张三」和「企业服务」** |
 | 4 | [2.6](#26-开一个全新会话验证不串话) | 会话隔离 | 新会话拿到**不同**的 UUID，且**答不出**名字 |
-| 5 | [五](#五验证-chatmemoryadapter-的预算装配) | 预算边界 | 启动日志里 `ChatMemoryAdapter` 打出**两组**预算：`CONVERSATION=5000` 与 `WORKFLOW=50000` |
+| 5 | [五](#五验证-chatmemoryadapter-的预算装配) | 预算边界 | 启动日志里 `ChatMemoryAdapter` 打出**两组**预算：`CONVERSATION=5000` 与 `WORKFLOW=50000` → ✅ **已于阶段 6 后半实测通过**（见下方"验证状态更新"） |
 | 6 | [四](#四验证错误码与异常契约可选的顺手一测) | 异常契约 | `POST /chat` → **502+50005**；**GET `/chat` → 405+40005 + `Allow: POST`**；不存在的路径 → **404+40004** |
 
 **为什么第 3 项是最关键的**：第 2 项证明"写得进去"，第 3 项证明"读得出来且模型用上了"。
@@ -76,6 +76,38 @@ Started HagentApplication in x.xxx seconds
 
 **为什么第 5 项必跑**：适配器是"上下文窗口预算"这条约束在**框架边界**上的闸门。
 它现在不在主链路上，**除了启动日志没有别的办法证明它按模式各自绑了配置**。
+
+### ★ 验证状态更新（阶段 6 后半）
+
+| # | 状态 | 说明 |
+|---|---|---|
+| 5 | ✅ **已通过** | 端到端实测时抓到启动日志，逐字满足三条判定要点 |
+| 3 | ❌ **仍未跑** | 需要真实 `DEEPSEEK_API_KEY`；这是阶段 5 唯一还没验证的一环 |
+| 1 / 2 / 4 / 6 | ⚪ 未在本轮复跑 | 阶段 5 当时通过；本轮没有回归验证 |
+
+**第 5 项的实测日志原文** —— 阶段 6 后半复核时用 `mvnw spring-boot:run` 重新捕获
+（`tmp/startup3.log`，2026-10-11 16:31:18）。**原始行照抄如下**：
+
+```text
+2026-10-11T16:31:18.501+08:00  INFO 2092 --- [hagent] [main] com.hagent.memory.MemoryConfig       : [记忆] 使用文件实现（type=file）
+2026-10-11T16:31:18.975+08:00  INFO 2092 --- [hagent] [main] com.hagent.memory.ChatMemoryAdapter  : [记忆] 适配器已就绪（框架边界的预算闸门）：delegate=FileConversationMemory 模式预算={CONVERSATION=TokenBudget[maxTokens=5000, maxMessages=30], WORKFLOW=TokenBudget[maxTokens=50000, maxMessages=200]}
+```
+
+> ⚠️ **为什么这里要"重新捕获"而不是沿用旧记录**：本轮把适配器的日志文案与
+> 内部数据结构都改了（`Map.of` → `LinkedHashMap`），
+> **旧的日志已经不再可能出现**。沿用旧文本会让这份验收清单引用一段"没发生过的证据" ——
+> 而本项目的原则是**结论必须有证据**，清单里的日志也不例外。
+
+三条判定要点逐条对上：
+1. `delegate` = 当前 `type` 对应的实现（`type: file` → `FileConversationMemory`）✅
+2. `CONVERSATION` = `5000 / 30`，与 `application.yml` 的 `conversation-max-*` 一致 ✅
+3. `WORKFLOW` = `50000 / 200`，与 `workflow-max-*` 一致 ✅
+
+> ★ 阶段 6 后半对这项又补了一层认知：这个适配器**不只是"预算闸门"，还是"占位"** ——
+> 框架的 `ChatMemoryAutoConfiguration` 两个 `@Bean` 都是 `@ConditionalOnMissingBean`，
+> 如果我们不提供这个 Bean，框架会装一个 **纯内存 + 无 token 预算**的
+> `MessageWindowChatMemory`。**所以它也删不得。**
+> 完整证据见 `PROCEDURES.md` 阶段 5 的"坑 4 的复核补充"。
 
 **这 6 项通过 = 本阶段合格。** 后面各项是加分项。
 
@@ -413,13 +445,16 @@ Select-String -Path "<你的日志文件>" -Pattern "适配器已就绪" | ForEa
 - **预期结果**（一字不差地出现两组、且数值分别对应两组配置）：
 
   ```
-  [记忆] 适配器已就绪：delegate=FileConversationMemory
-        模式预算={WORKFLOW=TokenBudget[maxTokens=50000, maxMessages=200],
-                  CONVERSATION=TokenBudget[maxTokens=5000, maxMessages=30]}
+  [记忆] 适配器已就绪（框架边界的预算闸门）：delegate=FileConversationMemory
+        模式预算={CONVERSATION=TokenBudget[maxTokens=5000, maxMessages=30],
+                  WORKFLOW=TokenBudget[maxTokens=50000, maxMessages=200]}
   ```
 
-  > ⚠️ **两个键的顺序可能颠倒**（`WORKFLOW` 在前或 `CONVERSATION` 在前都正常）——
-  > 内部用的是 `Map.of(...)`，它的迭代顺序**不保证**。这不是 bug，不要当成异常。
+  > ★ **键的顺序现在是稳定的**（`CONVERSATION` 在前、`WORKFLOW` 在后）——
+  > 阶段 6 后半把内部实现从 `Map.of(...)`（迭代顺序不保证）
+  > 换成了 `LinkedHashMap` + `com.hagent.memory.MemoryBudgets`，顺序按 `MemoryMode` 的声明顺序。
+  > **原文那条"两个键的顺序可能颠倒，不要当成异常"的提醒已作废** ——
+  > 现在顺序颠倒反而是异常信号。
 
 - **判定要点**（三条都要满足）：
   1. `delegate` = 当前 `type` 对应的实现（`type: file` 时是 `FileConversationMemory`）
