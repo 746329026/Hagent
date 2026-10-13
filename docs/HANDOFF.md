@@ -3,8 +3,8 @@
 > **用途**：新开对话时先读本文件，即可在**不重读历史对话**的前提下继续推进。
 > 本文件是"当前状态 + 已定决策 + 全部待办 + 踩坑红线"的**唯一权威快照**。
 >
-> **最后更新**：阶段 7 **完成**（会话记忆双层重构：MySQL 记录层 + Redis 上下文层，
-> 并顺带修掉两个潜伏的数据源装配缺陷），**239 个用例全绿、未提交**
+> **最后更新**：阶段 7 **已提交**（`468413e` —— 会话记忆双层重构 + 修两个数据源装配缺陷，**239 用例全绿**）；
+> ★ **阶段 8 的设计已拍板、尚未动代码** —— 新对话请从 §七 优先级 1 开始。
 
 ---
 
@@ -25,9 +25,10 @@
 | 3 | 结构化输出 —— **该层的"任务意图理解"已整体撤回** | ✅ 已提交（历史记录保留） |
 | 4 | （有意跳过：手册里的阶段 4 已在阶段 1 用 `PromptTraceAdvisor` 完成） | — |
 | 5 | 会话记忆（memory 抽象 + 切面）+ 上游失败分类 + 撤回意图层 | ✅ 已提交（`6e5600e`） |
-| **6** | **RAG · 入库链路**（加载→切分→打标签→向量化） | ⚠️ 代码+文档完成、**未提交** |
-| **6 后半** | **RAG · 检索链路**（鉴权 + 权限过滤 + 检索 + 拼装） | ⚠️ **本轮完成、未提交**（含 4 个新切面与拆解） |
-| 7 起 | 见 `docs/PROCEDURES.md` 的「待推进」 | ❌ 未开始 |
+| **6** | **RAG 企业知识库**（入库链路 + 检索链路 + 权限过滤 + 切面拆分） | ✅ 已提交（`0338493`） |
+| **7** | **会话记忆双层重构**（MySQL 记录层 + Redis 上下文层）<br>★ 顺带修掉两个潜伏的数据源装配缺陷 | ✅ 已提交（`468413e`） |
+| **8** | **结构重构：advisor 链 → pipeline**（工具调用顺延阶段 9）<br>★ **设计已拍板、尚未动代码** | 📐 设计完成 —— 见 §七 优先级 1 |
+| 9 起 | 工具调用与多步 Agent；见 `docs/PROCEDURES.md` 的「待推进」 | ❌ 未开始 |
 
 **当前测试状态**：`239 个用例全绿`（`mvnw.cmd -B -ntp clean test`）
 
@@ -530,9 +531,113 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 ## 七、待办（按优先级，新对话从这里开始）
 
-### ★ 优先级 1：提交阶段 7（**双层重构，全部未提交**）
+### ★ 优先级 1：开始阶段 8（**设计已拍板、尚未动代码**）
 
-用户已批准提交，但要求**等他说"可以提交"**才执行。提交内容：
+**阶段 8 = 一次纯粹的结构重构**：把 advisor 链换成 pipeline。
+工具调用**顺延到阶段 9** —— 因为 advisor 的遗留问题必须先还掉，否则阶段 9 会盖在旧结构上。
+
+#### 已拍板的范围（本人明确）
+
+| # | 决定 |
+|---|---|
+| 1 | **工具调用顺延阶段 9**；阶段 8 不含工具 → pipeline 在阶段 8 是**直线**（不是循环） |
+| 2 | **只保留两条入口**：`/chat`（call）与 `/stream-sse`（stream with SSE）。★ **方式一 `/stream` 与方式二 `/stream-flux` 直接删除、不再维护** |
+| 3 | **删除 `ChatMemoryAdapter`** |
+| 4 | 阶段 8 **要为工具调用准备接口，但只留最小形态**：`AgentEvent` 用 `sealed`，阶段 9 加 `ToolCall`/`ToolResult` 是**新增变体**，不改已有代码 |
+| 5 | 阶段 9 **第一件事**：读参考实现里 `.toolcall()` 的**真实签名**（协议第 3 条：不凭记忆写） |
+| 6 | ★ **不再为每个阶段写验收清单文档**（协议第 5 条）—— 清单在对话里给，**待跑项进本文件** |
+
+#### 改动的形状（别误读成"给链再加一层"）
+
+```
+现在：ChatAppService → ChatClient（+5 个自定义 advisor + 框架工具循环）→ ChatModel
+之后：ChatAppService → AgentPipeline（显式顺序）→ ChatModel
+```
+
+★ pipeline **直接对 `ChatModel` 说话、不经 `ChatClient`** →
+整条切面链（含框架的 `ToolCallingAdvisor`）**根本不参与**，于是"怎么关掉自动注册"这个问题不存在。
+
+★ 已核实：`ChatModel` 是现成 Bean；`StartupProbe` 本来就直连它（`chatModel.call(new Prompt("ping"))`）
+→ **它一行都不用改**。
+
+#### 文件清单（执行摘要）
+
+- **新增（3）**：`app/AgentPipeline`（直线管道，对外只暴露**一个事件流**）/
+  `app/AgentEvent`（`Retrieved` / `Token` / `Final`，**sealed**）/
+  `app/PromptBuilder`（从 `PromptAssemblyAdvisor` 搬出的"唯一拼装者"）
+  - ★ **刻意不新增**：`AgentProperties`（`max-steps` 现在**没有消费者**，协议第 7 条）、
+    `ToolRegistry`、工具类 —— 全部阶段 9
+- **迁移（4 个切面的逻辑换位置，逻辑不丢）**：`PromptTrace` → pipeline 内联日志（保留）/
+  `MemoryWriteback` → 模型调用**成功后** / `MemoryRead` → 调用**前** /
+  `RagRetrieval` → 调用**前**（★ 它那句"幂等检查"直接不要了）/ `PromptAssembly` → `PromptBuilder`
+- **删除（10 个类）**：`advisor/` 下 8 个（`AdvisorOrders`、`PromptTraceAdvisor`、`MemoryWritebackAdvisor`、
+  `MemoryReadAdvisor`、`RagRetrievalAdvisor`、`PromptAssemblyAdvisor`、`PromptFragmentKeys`、`PromptLogFormat`）、
+  `config/AdvisorProperties`、`memory/ChatMemoryAdapter`
+- **删除方式一/二（3 个端点方法 + 3 个 service 方法 + 1 个页面）**：
+  `ChatController.stream` / `streamGet` / `streamFlux`；
+  `ChatAppService.stream` / `streamAsFlux`；★ `sendEvent(SseEmitter, ServerSentEvent)` 重载
+  （注释里自己写着"只用于 `streamAsFlux` 那条路"）；`static/stream-demo.html` 改成只展示 `/chat/stream-sse`
+- **修改**：`AiConfig`（删 `ChatClient` + 5 个 advisor + `chatMemory` Bean）/
+  `ChatAppService`（只剩 2 条入口）/ `ChatController`（删两个端点）/
+  `UserContext`（删 context key）/ `MemoryMode`（删 `CONTEXT_KEY`）/ `PromptProperties`（**保留**）
+- **测试**：删 `AdvisorOrderTest` / `AdvisorChainMessageSemanticsTest`；
+  ★ **迁移 `PromptAssemblyAdvisorTest`（17 用例）→ `PromptBuilderTest`**（断言基本可复用 ——
+  这是删切面时**最不该丢**的东西）；新增 `AgentPipelineTest`；`ChatEndpointIdentityTest` 保留
+
+#### 动手顺序（★ 先立后破）
+
+```
+① 核实三件（不写代码）：
+     a. 删 ChatMemoryAdapter 的副作用（框架会装什么、谁会去读）
+     b. 方式一/二的引用是否已列全
+     c. SseSupport 的 Publisher 分支去留
+② AgentEvent + AgentPipeline（直线）+ PromptBuilder —— 先让 /chat 与现状【等价】
+③ /stream-sse 改为消费事件流
+④ 删方式一/二（端点 + service 方法 + HTML 瘦身 + 文档注记）
+⑤ 删切面那一套（10 个类）—— ★ 在 ②③④ 跑通【之后】才删
+⑥ 删 ChatMemoryAdapter + AiConfig 瘦身
+⑦ 全量测试 + 文档 + 人工验收
+```
+
+★ 顺序上刻意把"删"放在"新路径跑通"之后：**先立后破** —— 任何一步出问题都能退回上一个可工作状态，
+而不是先拆掉、再在废墟上重建。
+
+#### ★ 一处待本人定的小事
+
+`SseSupport` 的 `Publisher` 分支**留不留**？（方式二删掉后它就没有生产者了）
+倾向**留**：它是"若响应体是 `Publisher` 就不能包 `BaseResponse`"的 3 行护栏。
+与 `ChatMemoryAdapter` 不同 —— 那个是**有实际作用的占位**，这个是**防误用的护栏**。
+
+#### ★★ 两个待拍板项将被阶段 8 自动解决
+
+- 原 #1「`UserContext` 的传递方式」—— pipeline 没有 context，"最后一段字符串 key"消失
+- 原 #4「方式一/二的记忆语义」—— 端点删了，问题不存在
+
+#### 另外：协议第 10 条的失效**触发点在阶段 9**
+
+有循环才谈得上"内层被重复调用"。但**产生它的机制（order 常量 / context 键）本阶段就拆掉了**，
+所以阶段 9 无需再处理它。
+★ 这条要写进决策表作为**对决策 24、25 的修订**，附理由：它们的前提是"循环属于框架"，B 拿掉了这个前提。
+
+#### ★ 顺带：阶段 7 的 4 项人工验收**还没跑**（不阻塞阶段 8，但别丢）
+
+应用已能启动（启动日志 5 行全中）。4 项**核心**（用 `tools/hagent-test.ps1` 发请求）：
+
+| # | 怎么跑 | 判定 |
+|---|---|---|
+| 1 | 同会话先"我叫张三，在一家做企业服务的公司上班"，再问"我叫什么？" | 第二轮答出**「张三」**，日志里 `注入历史` 从 0 变 2 |
+| 2 | **停掉应用 → 清 Redis（`FLUSHDB`）→ 重启 → 用同一个 `cid` 再问** | 仍答得出 → 证明 **MySQL 是权威** |
+| 3 | **不重启**，只 `DEL hagent:chat:memory:<cid>`，再问 | 仍答得出，且该 key 被**回填** → 证明上下文层**可重建** |
+| 4 | `查MySQL "SELECT id, role, LEFT(content,30) FROM chat_message ORDER BY id DESC LIMIT 10"` | 每轮都在、中文完好；再发一条含 `😀𠮷` 的，`HEX` 里应出现 `F09F9880`/`F0A0AEB7` |
+
+> ★ 查库用 `tools/sql.ps1` 的 `查MySQL`（**不要手写 `docker exec ... -e "SQL"`** —— 引号会被 PowerShell 吃掉，
+> 见 §六 6.3 第 3 条）。
+
+---
+
+#### 附：阶段 7 的提交内容（**留档**，已于 `468413e` 提交）
+
+内容如下：
 
 - **新增（10）**：`LayeredConversationMemory` / `FailureCircuit` / `LayerStatus` /
   `record/ConversationRecordStore` / `record/MysqlConversationRecordStore` /
@@ -549,10 +654,20 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
   —— 以及随之空掉的 `memory/file/`、`memory/redis/` 两个包
 - **测试**：**+50 用例（189 → 239）**；契约测试抽象类 + 3 个组合子类 + 装配断言 + 校验器测试
 - **文档**：`PROCEDURES.md`（阶段 7 开头两张图 + 坑 12–15 + 阶段结果 + 验证证据）/
-  `HANDOFF.md`（决策 1、2、3 修订 + 决策 37–50 + 坑 28–31）/ 新增 `docs/STAGE7-VERIFICATION.md`
+  `HANDOFF.md`（决策 1、2、3 修订 + 决策 37–50 + 坑 28–31）
+  / 新增 `docs/STAGE7-VERIFICATION.md` —— ★ 该文档随后按**协议第 5 条**删除（不再为每阶段写验收清单文档），
+  内容已压缩进本节上面的「阶段 7 的 4 项人工验收」
 
 ★ **注意**：`chat_message` 的表结构在本轮**中途改过一次**（删掉了 `seq` 列）。
-如果之前已经建过表，需按 `STAGE7-VERIFICATION.md` §1.2 重建（表为空，无数据损失）。
+如果之前已经建过表（**表结构在本轮中途改过一次，删掉了 `seq` 列**），需要重建 —— 表为空、无数据损失：
+
+```powershell
+docker cp src\main\resources\db\chat_message.sql hagent-mysql:/tmp/chat_message.sql
+docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default-character-set=utf8mb4 -uroot hagent < /tmp/chat_message.sql'
+```
+
+若报 `table already exists` 说明表已存在（**刻意的**：没写 `IF NOT EXISTS`，因为它查不出"表在但结构不对"）——
+先 `DROP TABLE chat_message;` 再执行上面第二条。
 
 - 合计工作树 **41 项变更**（`git status --porcelain`：16 新增 / 21 修改 / 4 删除；
   注：未跟踪的目录各算 1 项）
@@ -561,10 +676,10 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 | # | 问题 | 背景 | AI 倾向 |
 |---|---|---|---|
-| 1 | **`UserContext` 的传递方式** | 当前实现：拦截器 → request attribute → Controller 的 `@RequestAttribute` → **方法参数** → app 层放进 context（切面从 context 读）。四段里前两段是编译期检查，**最后一段仍是字符串 key** | 保持现状。切面只能读 context，那一段无法消除；已在 `ChatAppService` 注释里写明 |
+| 1 | ~~**`UserContext` 的传递方式**~~ ★ **阶段 8 将自动解决**（pipeline 无 context） | 当前实现：拦截器 → request attribute → Controller 的 `@RequestAttribute` → **方法参数** → app 层放进 context（切面从 context 读）。四段里前两段是编译期检查，**最后一段仍是字符串 key** | 保持现状。切面只能读 context，那一段无法消除；已在 `ChatAppService` 注释里写明 |
 | 2 | **`PromptFragment` 这个类没有建** | 计划里有它，但它是 `RetrievedChunk` 的纯透传（没有第二个使用者）→ 按协议第 7 条不建，片段格式化直接放在 `PromptAssemblyAdvisor#renderFragments` | 不建。若将来出现第二种片段来源（例如长期记忆注记），那时再抽 |
 | 3 | **默认 system prompt 现在是"约束文件"** | `AiConfig` 旧注释说 system 留到"工具就位后用 `ToolCapabilityAdvisor` 校验"—— 那个切面已撤回。现在 system 由 `PromptAssemblyAdvisor` 从 `prompts/rag-answer-prompt.md` 拼出（角色 + 5 条约束） | 保持。若要加"通用办公助手"人格描述，改那个 `.md` 即可 |
-| 4 | **方式一/二的记忆语义** | `/stream` 与 `/stream-flux` 是"流式机制对照实验"，**不传 `conversationId`** → 落到兜底会话 `"default"`，与"所有没传会话 ID 的调用"共享历史。**这是原实现就有的行为，本轮只是把它写进了注释**（此前"读代码看不出来"） | 建议**给这两条路径传一个请求内唯一 ID**，让它们不落进共享会话。但那会改变对照实验的行为，**等本人定** |
+| 4 | ~~**方式一/二的记忆语义**~~ ★ **已解决**（端点将在阶段 8 删除） | `/stream` 与 `/stream-flux` 是"流式机制对照实验"，**不传 `conversationId`** → 落到兜底会话 `"default"`，与"所有没传会话 ID 的调用"共享历史。**这是原实现就有的行为，本轮只是把它写进了注释**（此前"读代码看不出来"） | 建议**给这两条路径传一个请求内唯一 ID**，让它们不落进共享会话。但那会改变对照实验的行为，**等本人定** |
 | 5 | **非法凭证要不要 401 语义的错误码？** | 当前用 `INVALID_PARAM(40001)` → HTTP 400。语义上"凭证无效"更接近 **401 Unauthorized**，但 `ErrorCode` 的 4xxxx 段只有参数/协议类错误，**新增 401 = 契约变更** | 保持 400。理由：400 已足以让调用方知道"该改凭证、别重试"；要不要加 401 是契约问题，不是技术问题 |
 | 6 | **★ 把"异常必须有着落"机制化（协议第 6 条）** | 踩坑 #10（协议级异常被报成 500）的教训是"按类补分支"，但**没机制化** → 本轮换个异常类型又踩一次（177 用例全绿但非法 token 报 500） | 二选一：<br>(a) 写一个测试，**扫描所有自定义异常类**，断言每个都在 `GlobalExceptionHandler` 里有分支或明确归入兜底；<br>(b) 在 `GlobalExceptionHandler` 的 `Exception.class` 兜底分支里**打一条 WARN 带上异常类名**（让它"报出缺口"—— 该类的注释里其实已经写了这个原则） |
 
@@ -715,8 +830,13 @@ Hagent/
 
 ```
 读 docs/HANDOFF.md 和 docs/WORKING-AGREEMENT.md。
-阶段 6（入库 + 检索）代码已完成、177 用例全绿、未提交。
-先问我要"提交"还是"继续推进"；若推进，先答第七节的四个待拍板事项，再写代码。
+
+当前状态：阶段 7 已提交（468413e，239 用例全绿）；
+★ 阶段 8 的设计已拍板、尚未动代码 —— 请从 §七 优先级 1【阶段 8 启动包】开始。
+
+先做那里的三步核实（① a/b/c，不写代码），再按顺序 ②→⑦ 动手（先立后破：新路径跑通之后才删旧的）。
+
+另：§七 优先级 1 末尾有【阶段 7 的 4 项人工验收】还没跑 —— 不阻塞阶段 8，但别丢。
 ```
 
 **记住三件最容易被违反的事**：
