@@ -10,38 +10,77 @@ import java.util.Set;
 /**
  * 会话记忆相关配置项，绑定 {@code hagent.memory.chat.*}。
  *
- * <p>这里集中了"实现选择"与"各项参数"——目的是让 <b>换实现只改一行配置</b>：
+ * <h2>★ 阶段 7：从"一个 type"变成"两个开关"</h2>
+ *
+ * <p>阶段 5 时这里是单一开关：
  * <pre>
- *   hagent.memory.chat.type: file | redis | mysql
+ *   hagent.memory.chat.type: file | redis | mysql     ← 三选一（已废弃）
  * </pre>
  *
- * <p><b>★ 实现了 {@link InitializingBean} 做启动自检</b>：
- * 配置写错（比如 {@code mysql} 还没实现、或者打错字）时
- * <b>在启动阶段就明确失败</b>，而不是让应用跑起来后"静默降级到某个默认实现" ——
- * 后者会让人以为"配置生效了"，实际数据存在了完全不同的地方。
+ * <p>它背后的假设是"<b>一份数据的三种存法</b>"。阶段 7 纠正了这个定位：
+ * <ul>
+ *   <li><b>记录层</b>（{@link #recordStore}）—— 用户可见的对话记录：权威、完整、永久；</li>
+ *   <li><b>上下文层</b>（{@link #contextCache}）—— 模型这一次要用的上下文：有损、TTL、可重建。</li>
+ * </ul>
+ *
+ * <p>这两层<b>同时存在、各司其职</b>，不是二选一 —— 条件装配天然表达不了那种关系，
+ * 所以配置也必须变成两个开关。
+ *
+ * <p><b>"换实现只改配置"这句话依然成立</b>，只是它的对象从"三个平级实现"变成了"两层各自可换"：
+ * <pre>
+ *   # 生产组合
+ *   hagent.memory.chat.record-store:  mysql
+ *   hagent.memory.chat.context-cache: redis
+ *   # 零基础设施组合（不起 MySQL / Redis 也能跑）
+ *   hagent.memory.chat.record-store:  file
+ *   hagent.memory.chat.context-cache: none
+ * </pre>
+ *
+ * <p><b>★ 刻意不留旧 {@code type} 的兼容层</b>：本项目尚未上线、没有外部调用方，
+ * 兼容层会成为一个<b>永久的负担</b>（两套语义并存，后来者不知道该看哪个）。
+ * 配置写错的表现是<b>启动直接失败</b>，而不是悄悄用了别的实现 —— 见 {@link #afterPropertiesSet()}。
  */
 @Getter
 @Setter
 @ConfigurationProperties(prefix = "hagent.memory.chat")
 public class MemoryProperties implements InitializingBean {
 
-    /** 当前已提供实现的类型。阶段 7 提供 MySQL 实现后，这里会变为"已实现"。 */
-    private static final Set<String> IMPLEMENTED_TYPES = Set.of("file", "redis");
+    /** 记录层的合法取值。 */
+    public static final Set<String> VALID_RECORD_STORES = Set.of("mysql", "file");
 
-    /** 所有合法取值（含尚未实现的 mysql）。 */
-    private static final Set<String> VALID_TYPES = Set.of("file", "redis", "mysql");
+    /** 上下文层的合法取值。 */
+    public static final Set<String> VALID_CONTEXT_CACHES = Set.of("redis", "none");
+
+    // ==================== 两个角色开关 ====================
 
     /**
-     * 记忆实现类型。
+     * 【记录层】实现 —— 对话记录的权威存储。
      *
-     * <p><b>合法取值</b>：{@code file} / {@code redis} / {@code mysql}。
-     *
-     * <p>★ 关于 {@code mysql}：本阶段（阶段 6）尚未实现，配置后<b>启动会明确失败</b>
-     * 并提示原因，而不是静默降级到别的实现 ——
-     * 因为"你以为在用 MySQL 存、其实历史在内存里、重启就丢"是最难排查的一类问题。
-     * 阶段 7 会提供实现并放开这个值。
+     * <p>{@code mysql}（默认，生产）：完整落库、可审计、不丢；
+     * {@code file}：零基础设施、人可读，作为兜底与"成长记录"。
      */
-    private String type = "file";
+    private String recordStore = "mysql";
+
+    /**
+     * 【上下文层】实现 —— 模型上下文缓存。
+     *
+     * <p>{@code redis}（默认）：跨实例、带 TTL；
+     * {@code none}：不缓存，每次读取回源记录层（功能完全正确，只是少了缓存）。
+     *
+     * <p>★ 注意 {@code none} 是<b>正常配置</b>，不是故障 ——
+     * 健康检查对它报"可用"，避免在正常部署上亮红灯。
+     */
+    private String contextCache = "redis";
+
+    /**
+     * 某一层失败后，静默多少秒不再尝试它（熔断窗口），默认 30 秒。
+     *
+     * <p><b>为什么需要</b>：Redis / MySQL 挂掉时若不熔断，<b>每个请求都会白等一次连接超时</b>
+     * （3s / 5s）—— 一次对话从 1 秒变成 4–8 秒，<b>故障期体验反而比正常时差得多</b>。
+     *
+     * <p>设为 {@code 0} 表示<b>关闭熔断</b>（永远尝试）—— 便于排查时对照。
+     */
+    private long circuitBreakSeconds = 30;
 
     // ==================== 预算参数 ====================
 
@@ -68,58 +107,68 @@ public class MemoryProperties implements InitializingBean {
 
     // ==================== 各实现的参数 ====================
 
-    /** 文件实现的存储目录（type=file 时使用）。 */
+    /** 记录层 file 实现的存储目录（record-store=file 时使用）。 */
     private String fileDir = "tmp/chat-memory";
 
     /**
-     * Redis 实现的会话过期时间（秒），type=redis 时使用。
+     * 上下文层 Redis 实现的缓存寿命（秒），context-cache=redis 时使用。
+     *
+     * <p><b>★ 阶段 7 起这个值的语义变了</b>：不再是"数据寿命"（那会让历史永久残缺），
+     * 而是"<b>缓存寿命</b>" —— 过期只是下次读取回源记录层，数据仍在 MySQL 里。
      *
      * <p><b>取值依据</b>：24 小时 —— 办公场景里"当天没聊完、第二天接着聊"很常见，
-     * 而过期时间太长会让无用会话长期占内存。
+     * 而过期太长会让无用会话长期占内存。
      */
     private long redisTtlSeconds = 24 * 60 * 60L;
 
-    /** Redis key 前缀，避免与其它应用的 key 冲突。 */
+    /** 上下文层 Redis 的 key 前缀，避免与其它应用的 key 冲突。 */
     private String redisKeyPrefix = "hagent:chat:memory:";
 
-    // ==================== MySQL（阶段 7 使用）====================
+    // ==================== 记录层 MySQL ====================
 
     /**
-     * MySQL 实现的表名（阶段 7 使用）。
+     * 记录层 MySQL 的表名。
      *
-     * <p>现在就把配置项列出来，是为了<b>阶段 7 只加实现、不改配置结构</b>。
-     * 这不属于"备而不用"——它是配置文档的一部分，且阶段 7 会真的消费它。
+     * <p>它会被拼进 SQL，因此只允许普通标识符（在
+     * {@code MysqlConversationRecordStore} 的构造器里校验）。
      */
     private String mysqlTableName = "chat_message";
 
     /**
-     * 启动自检 —— 把"配置写错"与"配了没实现的实现"变成**明确失败**。
+     * 启动自检 —— 把"配置写错"变成<b>明确失败</b>。
      *
-     * <p>为什么必须在启动阶段拦：如果放过它，{@code @ConditionalOnProperty} 会让
-     * 所有实现都不创建，容器里没有 {@code ConversationMemory}，
-     * 而 Spring 可能装配一个内存兜底实现 →
-     * <b>你以为在用 MySQL 存，实际历史在堆里、重启就丢，且不报错</b>。
-     * 这类"配置没生效却看起来正常"的问题，正是本项目要系统性避免的。
+     * <p><b>这道校验有两次（这里是第二次）</b>：真正的早期拦截在
+     * {@link MemoryConfigValidator}（{@code EnvironmentPostProcessor}，
+     * 在任何 Bean 创建之前）。本方法作为第二道防线，防止有人绕过那条路径。
+     *
+     * <p>为什么必须拦：若放过它，Spring 会因缺少实现而抛出难以理解的
+     * "找不到 Bean"，或者更糟 —— 静默用了别的实现，
+     * <b>你以为在用 MySQL 存，实际历史在别处（甚至重启就丢），且不报错</b>。
      */
     @Override
     public void afterPropertiesSet() {
-        if (type == null || type.isBlank()) {
-            throw new IllegalStateException(
-                    "hagent.memory.chat.type 不能为空。合法取值：" + VALID_TYPES);
-        }
-        String normalized = type.trim().toLowerCase();
-        if (!VALID_TYPES.contains(normalized)) {
-            throw new IllegalStateException(
-                    "hagent.memory.chat.type 取值非法：" + type + "。合法取值：" + VALID_TYPES);
-        }
-        if (!IMPLEMENTED_TYPES.contains(normalized)) {
+        String record = normalize(recordStore);
+        if (!VALID_RECORD_STORES.contains(record)) {
             throw new IllegalStateException(String.format(
-                    "hagent.memory.chat.type=%s 尚未提供实现（当前已实现：%s）。"
-                            + "MySQL 实现计划在阶段 7 提供 —— 该阶段会有专门的数据表与 DDL。"
-                            + "在此之前请使用 file 或 redis。"
+                    "hagent.memory.chat.record-store 取值非法：%s。合法取值：%s。"
                             + "【为什么直接失败而不是降级】：降级会让你以为配置生效了，"
-                            + "而历史其实存在别处（甚至只在内存里，重启即丢），且不会有任何报错。",
-                    type, IMPLEMENTED_TYPES));
+                            + "而对话记录其实存在别处，且不会有任何报错。",
+                    recordStore, VALID_RECORD_STORES));
         }
+        String context = normalize(contextCache);
+        if (!VALID_CONTEXT_CACHES.contains(context)) {
+            throw new IllegalStateException(String.format(
+                    "hagent.memory.chat.context-cache 取值非法：%s。合法取值：%s。",
+                    contextCache, VALID_CONTEXT_CACHES));
+        }
+        if (circuitBreakSeconds < 0) {
+            throw new IllegalStateException(
+                    "hagent.memory.chat.circuit-break-seconds 不能为负：" + circuitBreakSeconds
+                            + "（0 表示关闭熔断）");
+        }
+    }
+
+    private String normalize(String value) {
+        return value == null ? "" : value.trim().toLowerCase();
     }
 }

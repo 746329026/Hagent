@@ -4,6 +4,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.ai.vectorstore.pgvector.PgVectorStore;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -30,9 +31,15 @@ import javax.sql.DataSource;
  *   <li><b>自己声明 PgVectorStore Bean，不用自动装配</b>：自动装配在两个
  *       DataSource 之间"选哪个"的逻辑不透明；显式构造则"用哪个 DataSource、
  *       用哪个 EmbeddingModel"一目了然，配置错误在启动阶段就暴露。</li>
- *   <li><b>pgVectorDataSource 不标 @Primary</b>：业务主库（MySQL，由
- *       spring.datasource 自动装配）才是主数据源，保持默认 @Primary 语义，
- *       避免事务管理器等误连到 PostgreSQL。</li>
+ *   <li><b>pgVectorDataSource 不标 @Primary</b>：业务主库（MySQL）才是主数据源，
+ *       避免事务管理器等误连到 PostgreSQL。
+ *       ★ <b>但这条注释曾经建立在一个错误认知上，阶段 7 实测纠正了它</b>：
+ *       原文写的是"业务主库由 {@code spring.datasource} 自动装配"——<b>它并不存在</b>。
+ *       本类声明的 {@code pgVectorDataSource} 让
+ *       {@code DataSourceAutoConfiguration}（带 {@code @ConditionalOnMissingBean(DataSource.class)}）
+ *       <b>退避</b>了，于是 {@code spring.datasource.*} 整段配置被静默忽略，
+ *       而"全局 DataSource 是 MySQL"这句话是 false —— 直到阶段 7 才第一次有人用它。
+ *       现在业务主库由 {@link BusinessDataSourceConfig} <b>显式</b>声明并标 {@code @Primary}。</li>
  *   <li><b>两个数据源的失败策略相反</b>：MySQL 保持默认 fail-fast（业务数据
  *       不可缺失，连不上就该启动失败）；pgvector 关掉 fail-fast
  *       （向量库不可用时检索降级即可，不该阻断整个应用启动）。</li>
@@ -45,6 +52,34 @@ public class VectorStoreConfig {
 
     /** pgvector 专用数据源 Bean 名，供探针按名获取（避免探针硬依赖它）。 */
     public static final String PG_VECTOR_DATASOURCE_BEAN = "pgVectorDataSource";
+
+    /**
+     * pgvector 专用 {@link JdbcTemplate} 的 Bean 名。
+     *
+     * <p>★★ <b>引用它时必须带 {@code @Qualifier}，不能按类型注入。</b>
+     * 本项目有<b>两个</b>数据源，而业务主库（{@link BusinessDataSourceConfig}）标了
+     * {@code @Primary}。
+     *
+     * <p><b>★ 一条必须记住的注入规则：{@code @Primary} 压过"按参数名匹配"。</b>
+     * 参数名只在"没有 primary 时"用来打破平局。这条规则是阶段 7 实测撞出来的：
+     * <pre>
+     *   VectorStoreConfig.pgVectorJdbcTemplate(DataSource pgVectorDataSource)
+     *        ↑ 参数名叫 pgVectorDataSource，看起来万无一失
+     *   但按类型解析时有两个候选，且业务主库是 @Primary
+     *        → 实际拿到的是【MySQL 数据源】
+     *        → 于是这个"pgvector 专用"的 JdbcTemplate 其实连着 MySQL
+     *        → PgVectorStore 对着 MySQL 执行 CREATE EXTENSION IF NOT EXISTS vector
+     *        → 报错：You have an error in your SQL syntax ... near 'EXTENSION IF NOT EXISTS vector'
+     * </pre>
+     *
+     * <p><b>这个症状极具误导性</b>：它读起来像"PostgreSQL 版本太老不支持 CREATE EXTENSION"，
+     * 而真实原因是"这条 SQL 发给了另一个数据库"。
+     *
+     * <p>所以本项目对有歧义的 Bean 一律<b>按名取</b>：
+     * {@code @Qualifier} 的优先级高于 {@code @Primary}，
+     * 让"用哪个库"在代码上看得见，而不是靠参数名这个隐式约定。
+     */
+    public static final String PG_VECTOR_JDBC_TEMPLATE_BEAN = "pgVectorJdbcTemplate";
 
     /**
      * pgvector 专用数据源（PostgreSQL）。
@@ -89,8 +124,9 @@ public class VectorStoreConfig {
      * 这类"配置写了却不用"的静默失效，正是本项目要系统性避免的问题。
      */
     @Bean
-    public PgVectorStore vectorStore(JdbcTemplate pgVectorJdbcTemplate,
-                                     EmbeddingModel embeddingModel,
+    public PgVectorStore vectorStore(
+            @Qualifier(PG_VECTOR_JDBC_TEMPLATE_BEAN) JdbcTemplate pgVectorJdbcTemplate,
+            EmbeddingModel embeddingModel,
                                      VectorStoreProperties properties) {
         log.info("[向量库] 装配 PgVectorStore：table={} schema={} dimensions={} index={} distance={} initSchema={}",
                 properties.getTableName(), properties.getSchemaName(), properties.getDimensions(),
@@ -125,7 +161,8 @@ public class VectorStoreConfig {
      * 悄悄变成"每次都 new 一个新的"。参数注入不依赖这个隐式规则。
      */
     @Bean
-    public JdbcTemplate pgVectorJdbcTemplate(DataSource pgVectorDataSource) {
+    public JdbcTemplate pgVectorJdbcTemplate(
+            @Qualifier(PG_VECTOR_DATASOURCE_BEAN) DataSource pgVectorDataSource) {
         return new JdbcTemplate(pgVectorDataSource);
     }
 
@@ -147,7 +184,8 @@ public class VectorStoreConfig {
      */
     @Bean
     public org.springframework.boot.ApplicationRunner vectorTableSelfCheck(
-            DataSource pgVectorDataSource, VectorStoreProperties properties) {
+            @Qualifier(PG_VECTOR_DATASOURCE_BEAN) DataSource pgVectorDataSource,
+            VectorStoreProperties properties) {
         return args -> {
             String existenceSql = "SELECT table_name FROM information_schema.tables "
                     + "WHERE table_schema = ? AND table_name = ?";

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 
@@ -56,6 +57,7 @@ class DocumentIngestStableStateTest {
     private DocumentIngestService ingestService;
 
     @Autowired
+    @Qualifier("pgVectorJdbcTemplate")
     private JdbcTemplate pgVectorJdbcTemplate;
 
     /** 一次批量入库的结果，供本类所有用例共享（它们都是只读断言）。 */

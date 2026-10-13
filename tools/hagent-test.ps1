@@ -31,6 +31,29 @@
 #     注意开头的那个「点 + 空格」——表示把本文件加载进当前会话。
 #     不加点的话函数会在子作用域里定义，调用时找不到。
 #
+# ============================================================================
+# 【★ 响应方向的同款陷阱（阶段 6 验收时发现并修掉）】
+#
+# 上面讲的是【发送】方向：没有 charset 时按 ISO-8859-1 编码。
+# 【接收】方向有同一个默认值，而且长期没被发现：
+#
+#     服务端响应头是 application/json（★ 没有 charset，实测）
+#     Invoke-WebRequest 在缺 charset 时按 ISO-8859-1 解码响应体
+#     → $resp.Content 里的中文全是乱码
+#
+# 为什么长期没被发现：【原始字节是对的】，服务端日志也是对的，而验证时大家都是
+# "看服务端日志"（下一节就是这么写的）—— 没人去读函数返回的「回复」字段。
+# 这正是 WORKING-AGREEMENT 第 3 条记过的坑："把【发出去了】误当成【能看到】"。
+#
+# 实测证据（同一份 125 字节的响应体，两种读法）：
+#     $resp.Content | ConvertFrom-Json              →  æ ¹æ®ãåå·¥æå...   ❌
+#     UTF8.GetString($resp.RawContentStream 的字节)  →  根据《员工手册》第二章… ✅
+#
+# 所以本文件里【读响应体一律走 读响应体 / 读错误响应体 两个函数】：
+# 拿原始字节、显式按 UTF-8 解码，绝不依赖框架的自动解码。
+# 自己写测试代码时也请照这个来。
+# ============================================================================
+#
 # 【关于控制台显示中文乱码】
 # 你的控制台是 936 代码页，显示中文可能乱码 —— 那只是「显示」问题，
 # 不影响实际发送的内容。要确认发送是否正确，看服务端日志的
@@ -42,6 +65,53 @@ $ErrorActionPreference = 'Stop'
 # 默认地址。若你的应用跑在别的端口，改这一行即可。
 if (-not $Global:HagentBaseUrl) {
     $Global:HagentBaseUrl = 'http://127.0.0.1:8123/api'
+}
+
+# ============================================================================
+# 读响应体的两个辅助函数 —— 本文件里【所有】读响应的地方都必须走它们
+# ============================================================================
+#
+# 为什么不能直接用 $resp.Content：服务端响应头是 application/json（无 charset），
+# 而 Invoke-WebRequest 缺 charset 时按 ISO-8859-1 解码响应体 → 中文全乱码。
+# 详见文件顶部"响应方向的同款陷阱"。
+#
+# 做法：取原始字节 → 显式 UTF-8 解码。不依赖任何自动解码。
+# ============================================================================
+
+<#
+.SYNOPSIS
+    按 UTF-8 读【成功响应】的正文（绕开 Invoke-WebRequest 的错误解码）。
+.PARAMETER Response
+    Invoke-WebRequest 返回的响应对象（必须带 RawContentStream）。
+#>
+function 读响应体 {
+    param([Parameter(Mandatory = $true)]$Response)
+
+    if (-not $Response.RawContentStream) {
+        # 拿不到原始流时明确告警再用 .Content 兜底 —— 乱码可见，不是静默降级
+        Write-Host "⚠️ 拿不到 RawContentStream，退回 .Content（中文可能乱码）" -ForegroundColor Yellow
+        return $Response.Content
+    }
+    $ms = New-Object System.IO.MemoryStream
+    $Response.RawContentStream.Position = 0
+    $Response.RawContentStream.CopyTo($ms)
+    return [System.Text.Encoding]::UTF8.GetString($ms.ToArray())
+}
+
+<#
+.SYNOPSIS
+    按 UTF-8 读【失败响应（4xx/5xx）】的正文。
+.DESCRIPTION
+    走异常路径时拿不到响应对象，只有 $_.Exception.Response 上的流。
+    同样按字节读、显式 UTF-8 解码 —— 否则中文错误信息（如"请求参数不合法"）也是乱码。
+#>
+function 读错误响应体 {
+    param([Parameter(Mandatory = $true)]$Response)
+
+    $stream = $Response.GetResponseStream()
+    $ms = New-Object System.IO.MemoryStream
+    $stream.CopyTo($ms)
+    return [System.Text.Encoding]::UTF8.GetString($ms.ToArray())
 }
 
 <#
@@ -73,19 +143,20 @@ function 问 {
             -ContentType 'application/json; charset=utf-8' `
             -Body $bytes -UseBasicParsing -TimeoutSec 60
 
-        $parsed = $resp.Content | ConvertFrom-Json
+        # ★ 不用 $resp.Content（它会按 ISO-8859-1 解码 → 中文乱码），走按字节读
+        $body = 读响应体 -Response $resp
+        $parsed = $body | ConvertFrom-Json
         [PSCustomObject]@{
             状态码   = [int]$resp.StatusCode
             会话ID   = $resp.Headers['X-Conversation-Id']
             回复     = $parsed.data.reply
-            原始响应 = $resp.Content
+            原始响应 = $body
         }
     }
     catch {
         $r = $_.Exception.Response
         if ($r) {
-            $sr = New-Object System.IO.StreamReader($r.GetResponseStream())
-            $body = $sr.ReadToEnd()
+            $body = 读错误响应体 -Response $r
             写日志 "出错：HTTP $([int]$r.StatusCode)  $body"
             [PSCustomObject]@{
                 状态码   = [int]$r.StatusCode
@@ -203,14 +274,13 @@ function 探测 {
         $r = Invoke-WebRequest @args
         Write-Host "HTTP $([int]$r.StatusCode)" -ForegroundColor Green
         Write-Host "  Allow 头 : $($r.Headers['Allow'])"
-        Write-Host "  响应体   : $($r.Content)"
+        Write-Host "  响应体   : $(读响应体 -Response $r)"
     }
     catch {
         $resp = $_.Exception.Response
         if (-not $resp) { Write-Host "连接失败：$($_.Exception.Message)" -ForegroundColor Red; return }
 
-        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
-        $body = $sr.ReadToEnd()
+        $body = 读错误响应体 -Response $resp
         Write-Host "HTTP $([int]$resp.StatusCode)" -ForegroundColor Yellow
         Write-Host "  Allow 头 : $($resp.Headers['Allow'])"
         Write-Host "  Accept 头: $($resp.Headers['Accept'])"

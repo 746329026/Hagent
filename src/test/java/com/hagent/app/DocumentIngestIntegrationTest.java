@@ -6,6 +6,7 @@ import com.hagent.document.IngestResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestExecutionListeners;
@@ -63,6 +64,7 @@ class DocumentIngestIntegrationTest {
     private IngestProperties ingestProperties;
 
     @Autowired
+    @Qualifier("pgVectorJdbcTemplate")
     private JdbcTemplate pgVectorJdbcTemplate;
 
     // ========================================================================

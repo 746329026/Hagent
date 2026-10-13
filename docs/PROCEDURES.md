@@ -2013,6 +2013,87 @@ Get-ChildItem -Recurse -Filter '*Properties.java'  | 看它们都在哪个包
   `PromptAssemblyAdvisor` 在 `advisor/`、它读的 key 在 `prompt/` —— 这种"做事的在一处、
   约定在另一处"的劈裂，比包名难听严重得多。判据：**谁用它，它就跟谁走。**
 
+**坑 10 ★★★ 响应方向的同款编码陷阱 —— "发出去了"又被当成"能看到"**
+
+端到端验收时，我打出来的模型回复全是乱码：
+
+```text
+$resp.Content | ConvertFrom-Json   →  æ ¹æ®ãåå·¥æåãç¬¬äºç« ï¼...     ❌
+```
+
+**根因**：服务端响应头是 `application/json`（**不带 charset**，实测），
+而 PowerShell 的 `Invoke-WebRequest` 在缺 charset 时**按 ISO-8859-1 解码响应体**。
+按原始字节显式 UTF-8 解码就完全正确：
+
+```text
+UTF8.GetString($resp.RawContentStream 的字节)  →  根据《员工手册》第二章…   ✅
+```
+
+★★ **这是 `WORKING-AGREEMENT` §9.1 那个"请求方向"陷阱的镜像** ——
+同一个"没有 charset 就按 ISO-8859-1"的默认值，**发送方向踩过、接收方向没踩**。
+
+**为什么长期没被发现（这才是重点）**：
+- `tools/hagent-test.ps1` 自己的注释写着"要确认发送是否正确，**看服务端日志**" ——
+  **所有人工验证都是看服务端日志做的，没人读脚本返回的「回复」字段**；
+- 而 `WORKING-AGREEMENT` §9.2 表里"响应出（JSON）✅ 中文完好"这个结论，
+  是**对原始字节**验的（用 `TcpClient` 之类），**没验过"观察者能不能看到"**。
+
+> ★ 这**正是协议第 3 条自己记录过的教训**：
+> "曾断言'你应该能看到 retry 字段'，实际浏览器 EventSource 面板不展示帧级字段 ——
+> **把「发出去了」误当成「能看到」**"。同一个错误换了一层，又犯一次。
+
+**处置**：`tools/hagent-test.ps1` 里所有读响应的地方改为
+**取原始字节 → 显式 `UTF8.GetString`**，收口到 `读响应体` / `读错误响应体` 两个函数
+（失败响应 4xx/5xx 的错误信息同样会乱码，也一并改）。
+细节与"以后怎么写"的规范进了 `WORKING-AGREEMENT.md` §9.2.1。
+
+**★ 处置过程中的两个附带发现**：
+1. **`edit` 类工具会剥掉 `.ps1` 的 BOM** —— 改完复验前 3 字节，果然变成非 BOM，
+   已补回。这实证了协议第 9 条那句"用编辑器/工具重写该文件会剥掉 BOM，改完必须复查"。
+2. **锚点要逐字节核对**：第一次改脚本时按"读到的样子"抄锚点，结果那几行实际是
+   `# 文字`（我抄成了 `#     文字`），编辑直接不匹配。**改用 `ReadAllLines` 打印
+   `[行内容]` 确认后才成功** —— 与"结论必须有证据"同源：连"这行长什么样"也要看真的。
+
+- **收获**：**"发出去了"和"能看到"是两个独立的事实，必须分别验证。**
+  本项目已经在 retry 字段上栽过一次；这次栽在响应解码上。
+  凡是"数据正确但用户看到的不是它"的场景，都要问一句：**观察者那一段有没有人验过？**
+
+**坑 11 ★★ 知识库文档之间自相矛盾，而"改了文档"不会自动生效**
+
+模型**每次都**回答"资料之间存在冲突，我无法自行取舍"。根因不在代码，在**示例数据**：
+
+| 文档 | 原始内容 | 冲突点 |
+|---|---|---|
+| `公司简介.md` | 二零一五年成立 / 约八十人 / 企业级**数据**服务 | 成立时间、人数、业务定位 |
+| `公司介绍.md` | 二零零八年三月成立 / 三百二十七人 / 企业级**软件**服务 | 同上 |
+
+两份都是 `COMPANY_PROFILE`、都被同一批提问命中 → 模型拿到两个互相矛盾的片段 →
+（正确地）报冲突。**代价是用户觉得"这个知识库不可信"。**
+
+**处置**：把「公司简介」改成「公司介绍」的**精简版**（事实一致、更短），
+并**刻意控制在约 60 字** —— 它必须继续满足"恰好切成 1 块"的断言。
+
+**★ 处理过程中我自己先犯了一个错，值得记**：第一版把"保持同步"的说明用
+`<!-- -->` 注释写进了**文档正文** —— 而**正文会原样进入切块内容**：
+既把字数从 62 推到近 400（可能触发切分、打破断言），又会让模型在检索片段里读到注释。
+**说明要写在 `KNOWLEDGE-SAMPLE-DATA.md`，不能写在数据里。**
+
+**★ 另一个真坑：改完文档不会自动生效。**
+入库**没有 HTTP 入口**，`ingestAll()` 只在测试里被调用；而那个测试的逻辑是
+"**库里已有数据就不再入库**"（为了不依赖前序状态）。
+所以直接跑它**不会**把改过的文档写进去 —— 你会在"明明改了文档"的情况下
+看到模型仍旧按旧内容回答，**且没有任何报错**。
+
+```powershell
+docker exec pgvector psql -U postgres -d hagent -c "TRUNCATE TABLE hagent_knowledge;"
+.\mvnw.cmd -B -ntp test -Dtest=DocumentIngestStableStateTest   # 库为空才会 ingestAll
+```
+
+- **收获 1**：**知识库是"数据"，它的正确性不在代码测试的覆盖范围内。**
+  189 个用例全绿也挡不住"两份文档说的不是一家公司" —— 这类问题只有**问一句真话**才能发现。
+- **收获 2**：**"改了配置/数据"与"生效了"之间隔着一步。**
+  凡是"改完要重启/重跑"的，都要问："不重跑会怎样？" —— 这里会**静默沿用旧内容**。
+
 ---
 
 #### 阶段结果
@@ -2167,13 +2248,420 @@ Get-ChildItem -Recurse -Filter '*Properties.java'  | 看它们都在哪个包
 
 ---
 
+## 7. 会话记忆的双层重构（MySQL 记录层 + Redis 上下文层）
+
+> ★ **本阶段是一次定位纠正，不是"再加一个实现"。**
+> 阶段 5 把 `ConversationMemory` 做成了"一个接口 + 三个靠配置二选一的平级实现"
+> （`file` / `redis`，`mysql` 预留）。**那个抽象装不下阶段 7 真正需要的东西**：
+> "对话记录"与"模型上下文"不是一份数据的两种存法，而是**两个角色、需求相反**。
+
+### 本阶段数据流向
+
+```mermaid
+flowchart TD
+    subgraph L1["① 切面层（本轮零改动）"]
+        MR["MemoryReadAdvisor · MIN+200<br/>before：load(convId, budget)"]
+        MW["MemoryWritebackAdvisor · MIN+150<br/>after：append(convId, 问 + 答)"]
+    end
+
+    subgraph L2["② 门面层"]
+        LM["LayeredConversationMemory<br/>实现 ConversationMemory（唯一实现）<br/>★ 组合两层 + 熔断 + 失败分级"]
+    end
+
+    subgraph L3["③ 上下文层（模型上下文）· 有损 · TTL · 可重建"]
+        CCX["ConversationContextCache"]
+        RCC["RedisConversationContextCache"]
+        NCC["NoOpContextCache"]
+        RDS[("Redis<br/>RPUSH / LRANGE · TTL 24h")]
+    end
+
+    subgraph L4["④ 记录层（对话记录）· 权威 · 完整 · 永久"]
+        RCS["ConversationRecordStore"]
+        MCS["MysqlConversationRecordStore<br/>事务 + 批量 INSERT<br/>★ 无序号、无锁、无重试"]
+        FCS["FileConversationRecordStore"]
+        SQL[("MySQL chat_message<br/>utf8mb4 · PRIMARY(id) + idx_conv_id")]
+        FIL[("file · tmp/chat-memory")]
+    end
+
+    MR -->|"读"| LM
+    MW -->|"写"| LM
+
+    LM -->|"① 先查上下文层"| CCX
+    CCX --> RCC --> RDS
+    CCX --> NCC
+    CCX -->|"命中 → 取最近的消息"| TR
+    CCX -->|"★ miss / none / Redis 不可用<br/>（WARN + 熔断 30s）"| RCS
+    RCS -->|"重建：readLatest(convId, maxMessages)"| TR
+    RCS --> MCS --> SQL
+    RCS --> FCS --> FIL
+    RCS -->|"★ 回填上下文层"| CCX
+    RCS -.->|"读失败 → ERROR<br/>★ 降级为「无历史」，对话继续"| EMP["空历史"]
+
+    TR["MemoryTrimmer.trim(消息, budget)<br/>★ 裁剪规则唯一出处"] --> OUT["List&lt;Message&gt;<br/>→ context[MEMORY_MESSAGES]<br/>→ PromptAssemblyAdvisor"]
+
+    LM -->|"② 先写记录层（权威·完整）"| RCS
+    LM -->|"③ 记录层成功后，追加上下文层"| CCX
+    RCS -->|"写失败 → ERROR（不影响本次响应）<br/>★ 且不写上下文层"| SKIP["上下文层保持落后<br/>（保住不变量：永不比记录新）"]
+    CCX -->|"写失败 → WARN（可从记录层重建）"| SKIP
+```
+
+**三条不能弄错的性质**（与阶段 6 的切面顺序同等重要）：
+
+| 性质 | 含义 | 破坏它的后果 |
+|---|---|---|
+| **先记录层、后上下文层** | 不变量：**上下文永不比记录新** | 出现"模型知道、用户刷新却看不到"的诡异状态 |
+| **读先上下文、miss 才记录** | 上下文是**可丢的派生层** | 每轮都查库 → 上下文层失去意义 |
+| **写失败分级** | 记录层失败=ERROR 但不影响响应；上下文层失败=WARN | 为写缓存失败丢掉已生成的回复（双重损失） |
+
+### 本阶段核心对象结构
+
+```mermaid
+mindmap
+  root((阶段7 记忆双层))
+    门面
+      ConversationMemory 接口 形状不变
+      LayeredConversationMemory
+        组合两层
+        失败分级 读降级写不阻塞
+        FailureCircuit 每层各一个
+    记录层 record
+      ConversationRecordStore 接口
+      MysqlConversationRecordStore
+        JdbcTemplate 事务
+        自增 id 排序 无锁无竞态
+        表结构与 utf8mb4 与索引 启动自检
+      FileConversationRecordStore
+        零基础设施
+        人可读 成长记录
+    上下文层 context
+      ConversationContextCache 接口
+      RedisConversationContextCache
+        RPUSH LRANGE
+        TTL 24h 语义为缓存寿命
+      NoOpContextCache
+        不缓存 直读记录层
+    配置
+      record-store mysql 或 file
+      context-cache redis 或 none
+      circuit-break-seconds 30
+      预算 会话 工作流 不变
+    启动自检
+      MemoryConfigValidator 扩展
+      两个开关合法性
+      mysql 表存在性与列类型
+    可观测
+      FailureCircuit 熔断
+      健康检查增加依赖明细 增量
+    测试
+      契约测试抽象类
+      三个组合子类
+      MySQL 专项集成测试
+    文档
+      PROCEDURES 阶段7 开头放本图
+      HANDOFF 决策 1 与 2 修订
+      STAGE7-VERIFICATION
+```
+
+### 本阶段目标
+
+把"一个接口三种平级实现"改成"**一个门面 + 两层各司其职**"：
+
+- **记录层**（MySQL，权威·完整·永久）= 用户可见的对话记录。**不做预算裁剪** ——
+  这正是"用户刷新页面能看到全部历史"的保证（将来给用户的历史读 API 直接读它）。
+- **上下文层**（Redis，有损·TTL·可重建）= 模型这一次要用的上下文。
+  miss 时从记录层重建，**权威永远在记录层**。
+- **两层的关系是「派生」，不是「缓存同一份数据」** —— 这个区别决定了写路径是
+  "两层各自写入"，而不是"写库后删缓存"。
+
+### 本阶段价值（为什么做）
+
+| 解决了什么 | 不做的后果 |
+|---|---|
+| 会话历史**永久**保留 | 阶段 5 的 Redis 实现带 24h TTL 且**它就是最终存储** → 用户第二天回来，历史**永久残缺**（不是"慢一点"，是"没了"） |
+| 定位澄清 | 原设计容易被读成"同一份数据存两份" → 于是导出"写时删缓存"这种**命中率≈0**的无意义策略 |
+| 上下文层承载"不该进用户记录"的东西 | 阶段 8 的工具中间态、本轮检索片段是**执行态**，写进对话记录会污染用户看到的历史 |
+
+### ★ 接口命名约定（跨阶段复用）
+
+> 这一节回答"**为什么记忆的三个接口方法名不一样**"。
+> 它不属于某个阶段 —— 记忆这块抽象一旦定型就一直适用；放在这里，是因为这个问题在阶段 7 被提出。
+> **同一份规则已写进三个接口的类注释**（正文在 `ConversationMemory`，另两个接口给指针 + 本层差异），
+> 这里留一份便于回看与复用。
+
+**背景**：三个接口的方法集合是
+
+| 接口 | 方法 |
+|---|---|
+| `ConversationMemory`（门面） | `append` / `load` / `clear` / `delete` |
+| `ConversationRecordStore`（记录层） | `append` / `readLatest` / `clear` / `delete` / `probe` |
+| `ConversationContextCache`（上下文层） | `get` / `append` / `replace` / `evict` / `probe` |
+
+**看起来乱，其实是四条判据的结果**：
+
+**① 读：按「给谁用 + 能不能失败」分名**
+
+| 方法 | 在哪层 | 参数 | 返回 | 语义 |
+|---|---|---|---|---|
+| `load` | 门面 | `TokenBudget` | 必定非 null，**已裁剪** | 给模型**这一次要用的那一份** |
+| `readLatest` | 记录层 | `int` 条数上限 | 非 null，**未裁剪** | 库里最近的 N 条（**存储视角**） |
+| `get` | 上下文层 | `int` 条数上限 | **可为 null** | 缓存里有没有（**缓存视角**） |
+
+★ **收 `TokenBudget` 的地方会裁剪，收 `int` 的地方不会** —— 参数类型本身就是给调用点的提示；
+而**只有缓存层能返回 `null`**，因为"未命中"是它的正常状态，不是异常。
+
+**② 写：三层同名 `append`**
+
+语义确实是同一个；差别在**失败强度**，由各层注释与门面的失败分级表达 ——
+记录层必须成功且整批原子，缓存层允许失败（下次可从记录层重建）。
+**名字表达"做什么"，强度另行表达。**
+
+**③ 删：按「是否承载会话身份」分名**
+
+- 记录层 `clear`（清空内容、会话还在）+ `delete`（整个会话删掉）—— 它**承载"会话"这个身份**，
+  而这两件事对用户是不同的语义（"换个话题" vs "删掉我的数据"）；
+- 缓存层只有一个 `evict` —— 它**不承载身份**，丢 key 就是丢 key。
+- ★ **这个不对称本身就是信息**：它告诉你"这一层不管会话身份"。
+
+**④ `replace` 只属于可丢的那一层**
+
+重建路径的语义是"本层现在应当等于记录层说的内容"，用 `append` 会把残留旧内容**叠加**上去；
+而记录层**故意没有** `replace` —— 整体替换权威对话记录**没有语义**（那就是数据丢失）。
+**它的缺席是特性，不是遗漏。**
+
+**★ 一处刻意的借鉴**：上下文层的 `get` / `evict` 直接对齐 Spring 的
+`org.springframework.cache.Cache`（`get` 未命中返回 null、`evict` 丢一个 key）。
+懂那套 API 的人一眼就懂语义 —— **能借用成熟惯例时不要发明新词**。
+
+**★ 这一节为什么值得写下来**：规则如果不写出来，下一个人（或下一轮）**必须再问一遍**，
+才能知道这些名字是有意的还是随手起的。本项目别处的设计理由都进了注释，命名不该是例外。
+
+### 主要新增/涉及文件
+
+| 类别 | 文件 | 作用 |
+|---|---|---|
+| 新增 | `memory/LayeredConversationMemory.java` | 门面实现：组合两层 + 时序 + 失败分级 |
+| 新增 | `memory/FailureCircuit.java` | 短熔断窗口（两个使用者，故抽出） |
+| 新增 | `memory/record/ConversationRecordStore.java` | 记录层接口 |
+| 新增 | `memory/record/MysqlConversationRecordStore.java` | ★ 本阶段主体 |
+| 新增 | `memory/context/ConversationContextCache.java` | 上下文层接口 |
+| 新增 | `memory/context/NoOpContextCache.java` | `context-cache: none` |
+| 新增 | `resources/db/chat_message.sql` | DDL 唯一出处（手动执行一次） |
+| 改造 | `FileConversationMemory` → `FileConversationRecordStore` | 转为记录层实现 |
+| 改造 | `RedisConversationMemory` → `RedisConversationContextCache` | 转为上下文层实现 |
+| 修改 | `ConversationMemory` / `MemoryProperties` / `MemoryConfig` / `MemoryConfigValidator` / `ChatMemoryAdapter` / `application.yml` / `HealthAppService` | — |
+| 删除 | `memory/InMemoryConversationMemory.java` | **死代码**：无 Bean、无配置入口、无任何测试引用 |
+| 测试 | 契约测试抽象类 + 3 个组合子类 + MySQL 专项集成测试 | 见下 |
+
+### 踩坑记录（只记有可迁移认知的）
+
+**坑 12 ★★★ 业务主库的数据源从来就不存在 —— 而它被写进了三处注释**
+
+阶段 7 第一次真正访问 MySQL 时，启动直接失败：
+
+```text
+DataSourceAutoConfiguration.PooledDataSourceConfiguration:
+  Did not match:
+  - @ConditionalOnMissingBean (types: javax.sql.DataSource, javax.sql.XADataSource)
+    found beans of type 'javax.sql.DataSource' pgVectorDataSource     ← 自动配置被顶掉
+```
+
+**根因**：`VectorStoreConfig` 为了让 `PgVectorStore` 不抢到 MySQL 连接，
+声明了 `pgVectorDataSource`。而**用户配置先于自动配置注册**，
+`DataSourceAutoConfiguration` 的 `@ConditionalOnMissingBean(DataSource.class)` 于是不满足 →
+**它退避了，业务主库的数据源根本不存在**。
+
+★★ **后果**：`application-local.yml` 里那一整段 `spring.datasource.*`
+（url / 账号 / Hikari 池参数）**一直被静默忽略**。而三处注释都写着
+"本项目的全局 DataSource 是业务主库 MySQL"——**那句是 false**。
+
+**为什么长期没暴露**：阶段 7 之前**没有任何代码使用业务主库**。没有消费方，就没有症状。
+
+> ★ 这正是本项目第 7 条一直在防的那类问题：
+> **不是写错了代码，而是没意识到这段配置根本没有被使用。**
+> 也说明"修 A 引出的 B"可能安静地潜伏很久 —— 因为 B 还没有消费者。
+
+**处置**：新增 `config/BusinessDataSourceConfig` 显式声明业务主库数据源并标 `@Primary`。
+两个数据源的失败策略保持相反（MySQL fail-fast、pgvector 放开），这是有意的。
+
+- **收获 1**：**当应用里出现第二个数据源时，"默认的那个"会消失，而且不报错。**
+  全靠自动装配的配置，在引入第二个同类 Bean 的那一刻就可能失效。
+- **收获 2**：**"某段配置一直在生效"是需要证据的断言。**
+  条件评估报告（`--debug` 或失败时的 condition report）能直接给出"匹配/未匹配 + 原因"，
+  比读代码猜快得多。
+
+**坑 13 ★★★ `@Primary` 压过"按参数名匹配" —— 症状指向完全错误的方向**
+
+给业务主库加上 `@Primary` 之后，向量库立刻启动失败：
+
+```text
+Creating bean 'vectorStore': bad SQL grammar [CREATE EXTENSION IF NOT EXISTS vector]
+  → You have an error in your SQL syntax ... near 'EXTENSION IF NOT EXISTS vector'
+     for the right syntax to match your MySQL server version
+```
+
+**误导性**：这句话读起来像"PostgreSQL 版本太老，不支持 `CREATE EXTENSION`"。
+
+**真相**：`PgVectorStore` 拿到的 `JdbcTemplate` **连着 MySQL**。链路是：
+
+```text
+VectorStoreConfig.pgVectorJdbcTemplate(DataSource pgVectorDataSource)
+     ↑ 参数名叫 pgVectorDataSource，看起来万无一失
+但按类型解析时有两个候选，而业务主库标了 @Primary
+     → 实际注入的是【MySQL 数据源】
+     → 于是这个"pgvector 专用"的 JdbcTemplate 其实连着 MySQL
+```
+
+★★ **规则：`@Primary` 的优先级高于参数名匹配。** 参数名只在"没有 primary"时用来打破平局。
+本项目此前多处依赖"参数名恰好对"这个隐式约定，它们一直是脆的。
+
+**处置**：所有 pgvector 注入点（`VectorStoreConfig` 三个 Bean、`DocumentIngestService`、
+三个集成测试的字段）全部改成 `@Qualifier` 按名取；
+并新增 `MemoryWiringTest` 断言"两个数据源各指各的库、`pgVectorJdbcTemplate` 指向 PostgreSQL"
+——把这条规则钉成**回归防线**，而不是留在注释里。
+
+- **收获**：**有歧义的地方按名取，让"用哪个"在代码上看得见。**
+  一个"猜错的注入"与"猜对的注入"在代码上一模一样，只有运行时才分得开。
+
+**坑 14 ★★★ 为一个没人消费的属性，付了锁与死锁的代价**
+
+表最初多一列 `seq`（会话内序号，从 1 开始、无洞）+ 唯一键 `uk_conv_seq`，
+理由是"排序与分页都靠它，唯一键还能挡住序号撞车"。追加流程是"读 `MAX(seq)` → 插入"。
+
+**实测把两条修法都否掉了** —— 而且是被测试逼出来的，不是推演出来的：
+
+| 修法 | 结果 |
+|---|---|
+| 普通读 + 撞车重试 | ★ **重试被耗尽**：REPEATABLE READ 下普通读是*一致性读、不加锁*，并发事务必然读到同一个 MAX。实测 2 线程各追加 3 次就让 3 次重试全部用光，报"本轮未落库" |
+| 锁定读 `FOR UPDATE` | ★ **死锁**：空区间上取*间隙锁*，而 INSERT 又要申请插入意向锁 → `CannotAcquireLockException` |
+
+★★ **关键一问：`seq` 提供的属性，到底谁消费？**
+
+| 用途 | 答案 |
+|---|---|
+| 排序 | `id`（自增主键）天然提供，且无竞态 |
+| 分页游标 | `id` 更好 —— keyset（`AND id < ?`）比 seq 偏移更稳 |
+| "会话内第 N 条" | ★ **没有任何消费者** |
+
+**⇒ 为一个没人要的属性，付出了额外的锁、两种失败模式，以及"耗尽重试就丢一轮对话"。删掉。**
+
+**处置**：表改为 `PRIMARY KEY (id)` + `KEY idx_conv_id (conversation_id)`；
+应用层不再有 MAX 查询、不再有重试循环。读路径 `WHERE conversation_id=? ORDER BY id DESC LIMIT n`
+正好是 `idx_conv_id` 的反向扫描（InnoDB 二级索引自动附加主键，实际按 `(conversation_id, id)` 有序）。
+
+- **收获 1**：**引入一个"更规整"的属性（无洞序号、有序编号…）之前，先问谁消费它。**
+  如果答案是"排序能用上"，那通常已经有更好的东西在提供它了。
+- **收获 2**：**代价要算全。** "无洞"这两个字听起来是质量，实际成本是锁、死锁与丢数据风险 ——
+  而收益是零。
+
+**坑 15 ★★ 并发用例是"设计缺陷探测器"，不是"稳定性负担"**
+
+那条并发用例最初写成 2 线程 × 3 次，第一次跑就失败了 —— **它抓到的不是测试问题，是设计问题**。
+
+★ 值得记的是**当时最容易做错的反应**：看到失败，最容易的处置是
+"把并发度调低"或"删掉这条 flaky 用例"。那样缺陷会留给生产，
+而且生产上的表现是"偶尔丢一轮对话、没有任何报错"。
+
+**处置**：不降并发度，**升到 4 线程 × 5 次**（比原来更狠），然后去修设计。
+修完连跑两遍，稳定通过。
+
+- **收获**：**一个刚写出来就失败的测试，先假设"它是对的、代码是错的"。**
+  尤其是并发用例 —— 它失败时说的话，往往比它通过时更有价值。
+
+**坑 16 ★★ 同一个引号坑踩了两次 —— 于是把它机制化**
+
+想在容器里跑一条 SQL，最自然的写法是：
+
+```powershell
+docker exec hagent-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SELECT 1"'
+#                                                                        ^^^^^^^^^^^
+```
+
+★ PowerShell 5.1 传参时会**吃掉内嵌的双引号** → 容器里的 `sh` 收到**空参数** →
+mysql 报 `ERROR 1064 (42000) at line 1: ... near '' at line 1`。
+
+**这个报错极具误导性**：它读起来像"SQL 写错了"或"MySQL 没起来"，
+而真实原因是**参数根本没传到**。本项目因此误判过**两次**：
+
+- **第一次**：以为命令写错，反复调引号，最后改成"文件 + 容器内重定向"才通；
+- **第二次**（本阶段）：拿它做"容器是否就绪"的探针，得出 **"MySQL 60 秒内未就绪"的错误结论** ——
+  而同一时刻容器日志里明明写着 `ready for connections`。
+  ★ 这次的代价是：**我向本人报了一个错误的诊断**，本人还要反过来纠正我。
+
+⇒ **已机制化（协议第 6 条）**：新增 `tools/sql.ps1`，提供
+`查依赖`（三个容器在不在）/ `查MySQL` / `查PG`，
+统一走"写**无 BOM** 的 `.sql` → `docker cp` → **容器内重定向**"这条路径 ——
+**PowerShell 完全不参与文本编码，也没有引号会被吞**。
+
+- **收获 1**：**一个"看起来像 A 但其实不是 A"的报错，值得花时间把它变成"看起来就是 A"。**
+  这条坑修的不是 SQL，修的是**报错的可解释性**。
+- **收获 2**：★★ **同一个操作性错误第二次出现时，不要只是"这次注意"。**
+  第一次我把它写进了文档（`STAGE7-VERIFICATION.md` §1.2 明确警告过这个写法），
+  **然后我自己又踩了一次** —— 说明"写进文档"对操作者不构成约束。
+  **只有把它变成工具，才算真的修掉。** 这是协议第 6 条的一次实证。
+
+### 阶段结果
+
+**测试：239 个用例全绿**（`mvnw.cmd -B -ntp clean test`），本阶段从 189 增至 239（**+50**）：
+
+| 测试类 | 用例 | 覆盖什么 |
+|---|---|---|
+| `ConversationMemoryContractTest`（抽象） | — | 契约：10 条对外语义断言 |
+| `FileNoOpContractTest` / `MysqlNoOpContractTest` / `MysqlRedisContractTest` | 10 / 10 / 12 | ★ 三种层组合跑**同一套**契约；最后一个额外验"清空 Redis 后仍能重建" |
+| `MysqlConversationRecordStoreTest` | 6 | 索引与字符集自检、**并发不丢**、id 顺序、原子批写、extra 保 NULL |
+| `FileConversationRecordStoreTest` | 11 | 文件记录层：原子写、跨实例重读、隔离、clear/delete |
+| `MemoryWiringTest` | 4 | ★ 装配断言：两个数据源各指各的库、`pgVectorJdbcTemplate` 必须是 PostgreSQL |
+| `MemoryConfigValidatorTest` | 6 | 两个开关的取值校验、旧 `type` 键必须明确报错 |
+| `FailureCircuit` 相关 | — | 经门面行为覆盖（熔断窗口在测试中设为 0） |
+
+**代码**：新增 7 个类 / 改造 2 个 / 删除 3 个旧实现；`application.yml` 的配置键由 1 个变 2 个。
+
+### 验证证据
+
+**① 装配（`MemoryWiringTest` 的实测输出，来自 surefire 报告）**：
+
+```text
+[装配证据] DataSource dataSource         -> jdbc:mysql://localhost:3307/hagent?...
+[装配证据] DataSource pgVectorDataSource -> jdbc:postgresql://localhost:5432/hagent
+[装配证据] JdbcTemplate pgVectorJdbcTemplate -> jdbc:postgresql://localhost:5432/hagent
+```
+
+★ 这三行同时证明了坑 12 与坑 13 已修复：业务主库真的存在了，且向量库的
+`JdbcTemplate` 不再被 `@Primary` 劫持。**在此之前，第一行根本不存在。**
+
+**② 并发用例真的逼出了设计缺陷**：
+
+```text
+（改之前，2 线程 × 3 次）
+MysqlConversationRecordStoreTest.concurrentAppendsProduceContiguousSeq
+  ? Execution java.lang.IllegalStateException: 会话 ... 连续 3 次 seq 撞车，本轮未落库
+
+（改成锁定读之后）
+  ? Execution org.springframework.dao.CannotAcquireLockException:
+      PreparedStatementCallback; SQL [INSERT INTO chat_mess...
+```
+
+两条失败各否定了一种方案，最终导出"删掉 seq、用 id 排序"。
+**修改后（4 线程 × 5 次，加压）连跑两遍：`Tests run: 48, Failures: 0, Errors: 0`。**
+
+**③ utf8mb4 实测（建表后直插 emoji 与生僻字再读回）**：
+
+```text
+content: 😀𠮷 中文测试
+HEX    : F09F9880 F0A0AEB7 20 E4B8AD E69687 E6B58B E8AF95
+         └─4字节─┘ └─4字节─┘    └───── 中文测试 各 3 字节 ─────┘
+```
+
+**④ 表结构自检（应用启动时核对的三件事）**：
+
+```text
+[记忆-记录-mysql] 启动自检通过：表=chat_message content 字符集=utf8mb4 索引=idx_conv_id
+```
+
+
+---
+
 ## 待推进
 
-- RAG 企业知识库：文档加载 / frontmatter 打标签 / 幂等入库 / 检索 / prompt 注入，并在其上抽象可替换的向量存储
-  - **同时要提供会话记忆的 MySQL 实现**（`hagent.memory.chat.type: mysql` 目前会启动失败，
-    因为 `MemoryConfigValidator` 的 `IMPLEMENTED` 集合里还没有它）；
-    届时语义要调整为"**MySQL = 权威存储，Redis = 缓存（Cache-Aside）**"
-  - 表名已预留：`hagent.memory.chat.mysql-table-name: chat_message`
 - 工具调用与多步 Agent：反射注册工具、工具分组（最小权限）、状态机 + 循环 + 中断续跑
   - ⚠️ **不要再做"前置意图提取层"** —— 该设计已撤回，理由见 [5.3](#53-一个被撤回的坑前置意图提取层)。
     工具选择交给模型的原生工具调用能力（框架的 `ToolCallingAdvisor` 已自带循环）

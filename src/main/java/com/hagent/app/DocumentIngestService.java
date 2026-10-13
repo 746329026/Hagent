@@ -20,6 +20,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -100,7 +101,10 @@ public class DocumentIngestService {
     public DocumentIngestService(SourceLoader sourceLoader,
                                  ChunkingDispatch chunkingDispatch,
                                  VectorStore vectorStore,
-                                 JdbcTemplate pgVectorJdbcTemplate,
+                                 // ★ 必须按名取：容器里有两个 JdbcTemplate（本项目的 MySQL 与 pgvector），
+                                 //   按类型注入会拿到 @Primary 的那个（MySQL）——见 VectorStoreConfig
+                                 //   的 PG_VECTOR_JDBC_TEMPLATE_BEAN 注释里那段实测踩坑
+                                 @Qualifier("pgVectorJdbcTemplate") JdbcTemplate pgVectorJdbcTemplate,
                                  IngestProperties ingestProperties,
                                  ChunkingProperties chunkingProperties,
                                  VectorStoreProperties vectorStoreProperties) {

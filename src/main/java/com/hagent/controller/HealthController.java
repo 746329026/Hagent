@@ -40,10 +40,15 @@ public class HealthController {
     }
 
     /**
-     * 详细检查：把启动探针的真实结论暴露出来。
+     * 详细检查：把启动探针的真实结论 + 各依赖此刻是否可达暴露出来。
      *
      * <p>为什么要暴露而不是只看日志：演示与排障时需要一个"可被程序消费"的结论，
      * 而不是让人去日志里翻。
+     *
+     * <p>★ <b>依赖探测只在这里做，不在上面的存活检查里</b>：
+     * {@code probe()} 会真连 MySQL / Redis，把它放进存活检查会让
+     * "依赖抖动"被判定成"进程死了"，进而被编排系统反复重启 ——
+     * 把小故障放大成雪崩。存活与就绪必须分开。
      *
      * @param refresh 是否强制重跑探针。默认 false —— 重跑会真实调用模型，
      *                因此不设为默认行为，避免健康检查被轮询时持续产生费用。
@@ -56,6 +61,9 @@ public class HealthController {
         }
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("allPassed", startupProbe.allPassed());
+        // 依赖此刻的真实状态（会真连 MySQL / Redis）
+        data.put("memoryLayers", healthAppService.memoryLayers());
+        data.put("memoryReady", healthAppService.memoryReady());
         data.put("probe", startupProbe.snapshot());
         return BaseResponse.success(data);
     }

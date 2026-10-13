@@ -85,10 +85,17 @@ Get-NetTCPConnection -LocalPort 8123 -State Listen -ErrorAction SilentlyContinue
 
 ## 二、怎么发请求（中文不要用裸 `Invoke-WebRequest`）
 
-**★ 已知坑**：PowerShell 5.1 的 `Invoke-WebRequest -Body '<字符串>'` **会把中文变成 `????`**
-（不带 charset 时用 ISO-8859-1 编码，逐字符替换成 `?`）。症状极具误导性：**服务端全绿、只有内容是错的**。
+**★ 已知坑（两个方向，都会让中文出错）**：
 
-**用项目自带的工具**（它显式传 UTF-8 字节）：
+| 方向 | 现象 | 原因 |
+|---|---|---|
+| **发送** | 服务端收到 `????` | `Invoke-WebRequest -Body '<字符串>'` **按 ISO-8859-1 编码**，中文逐字符变成 `?` |
+| **接收** | 你看到的回复是 `æ ¹æ®...` | 响应头 `application/json` **不带 charset**，`$resp.Content` **按 ISO-8859-1 解码响应体** |
+
+**两个坑的症状一样有误导性：服务端全绿、只有内容是错的。** 详细的实测证据与正确读法见
+`WORKING-AGREEMENT.md` §9.2.1。
+
+**用项目自带的工具**（发送与接收都已处理）：
 
 ```powershell
 . "C:\Users\Rong\Desktop\实习准备\Hagent\tools\hagent-test.ps1"
@@ -97,16 +104,24 @@ Get-NetTCPConnection -LocalPort 8123 -State Listen -ErrorAction SilentlyContinue
 问 -Message "年假要提前几天申请"
 ```
 
-**要带身份头**（看 INTERNAL 内容必须带）—— 工具脚本不直接支持自定义头，用下面这段：
+**要带身份头**（看 INTERNAL 内容必须带）—— 工具脚本的 `问` 不支持自定义头，
+用下面这段（它复用了脚本里的 `读响应体`，所以**必须先加载上面的脚本**）：
 
 ```powershell
-function 问带身份([string]$msg, [string]$token) {
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"message":"' + $msg + '"}')
+function 问身份([string]$Message, [string]$Token, [string]$ConversationId) {
+  $payload = @{ message = $Message }
+  if ($ConversationId) { $payload.conversationId = $ConversationId }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress))
   $h = @{}
-  if ($token) { $h['X-Hagent-Token'] = $token }
-  Invoke-WebRequest -Uri 'http://localhost:8123/api/chat' -Method POST -Body $bytes `
-    -ContentType 'application/json; charset=utf-8' -Headers $h -UseBasicParsing |
-    Select-Object -ExpandProperty Content
+  if ($Token) { $h['X-Hagent-Token'] = $Token }
+  try {
+    $resp = Invoke-WebRequest -Uri "$Global:HagentBaseUrl/chat" -Method POST -Body $bytes `
+      -ContentType 'application/json; charset=utf-8' -Headers $h -UseBasicParsing -TimeoutSec 120
+    # ★ 关键：不用 $resp.Content（会乱码），走脚本里的按字节读
+    (读响应体 -Response $resp | ConvertFrom-Json).data.reply
+  } catch {
+    Write-Host "HTTP $([int]$_.Exception.Response.StatusCode)  $(读错误响应体 -Response $_.Exception.Response)" -ForegroundColor Yellow
+  }
 }
 ```
 
@@ -129,41 +144,34 @@ function 问带身份([string]$msg, [string]$token) {
 **为什么要单独验**：能证明"记忆能装配、能落盘"，**不能证明"注入后模型真的用上了"**。
 写入成功但注入失败时，文件看起来完全正常 —— 只有这一项能发现。
 
-### 2.1 第一轮：自我介绍
+### 2.1 两轮对话（一次跑完，★ 关键）
+
+**★ 全程不手工复制 UUID** —— 手工复制过一次，结果前 8 位丢了，
+服务端读到的是另一个会话，表现成"记忆没生效"：
 
 ```powershell
-$r1 = 问带身份 "我叫张三，在一家做企业服务的公司上班" "zhangsan:EMPLOYEE"
-$r1
+$r1 = 问 -Message "我叫张三，在一家做企业服务的公司上班"
+$cid = [string]$r1.会话ID                 # ★ 强制转字符串：PowerShell 7 的 .Headers[...] 返回的是集合
+"会话ID = [$cid]  长度=$($cid.Length)"    # 正常应当是 36
+
+$r2 = 问 -Message "我叫什么？我公司在哪个行业？" -ConversationId $cid
+$r2.回复
 ```
 
-**记下响应头里的会话 ID**（`X-Conversation-Id`）—— 下一轮要带上同一个。
-
-### 2.2 第二轮：问它记不记得（★ 关键）
-
-```powershell
-问带请求体（同一个 conversationId）"我叫什么？我公司在哪个行业？"
-```
-
-用 curl 或构造请求体带 `conversationId`：
-
-```powershell
-$body = '{"message":"我叫什么？我公司在哪个行业？","conversationId":"<上一轮的 UUID>"}'
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-Invoke-WebRequest -Uri 'http://localhost:8123/api/chat' -Method POST -Body $bytes `
-  -ContentType 'application/json; charset=utf-8' `
-  -Headers @{ 'X-Hagent-Token' = 'zhangsan:EMPLOYEE' } -UseBasicParsing |
-  Select-Object -ExpandProperty Content
-```
-
-- **判定标准**：回复里出现 **「张三」** 和 **「企业服务」**（或同义表达）
+- **判定标准**：`$r2.回复` 里出现 **「张三」** 和 **「企业服务」**（或同义表达）
 - 实际结果：____________________
 
 **要同时在启动日志里确认这两行**（证明链路确实注入/写回了）：
 
 ```text
-[记忆-读] 会话 <UUID> 模式=CONVERSATION 注入历史 2 条（预算 5000 token / 30 条）   ← 第二轮应当 ≥2 条
-[记忆-写] 会话 <UUID> 已写回 2 条（问 + 答）                                        ← 第一轮结束后
+[记忆-读] 会话 <UUID> 模式=CONVERSATION 注入历史 0 条   ← 第一轮（新会话）
+[记忆-读] 会话 <UUID> 模式=CONVERSATION 注入历史 2 条   ← ★ 第二轮应当是 2 条
+[PromptAssemblyAdvisor] … 消息数=4（system=1 历史=2 未知=0 用户=1）  ← ★ 结构证据
+[记忆-写] 会话 <UUID> 已写回 2 条（问 + 答）
 ```
+
+> ★ **判断"历史注入了没有"只看 `[PromptAssemblyAdvisor]` 那行** ——
+> `[PromptTraceAdvisor]` 永远显示 `消息数=1`，它在最外层、看不到内层的注入（切面链单向转发）。
 
 > 若 `注入历史 0 条` 但文件存在 → **写入端与读取端的 UUID 不是同一个**。
 > 对比日志里的 UUID 与响应头里的 UUID。

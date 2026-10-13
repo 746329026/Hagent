@@ -25,12 +25,66 @@ import java.util.List;
  * 所以这里定义带预算的接口，再由
  * {@link ChatMemoryAdapter} 适配到框架的 {@code ChatMemory} 上。
  *
- * <p><b>实现体</b>（靠配置 {@code hagent.memory.chat.type} 切换）：
- * <ul>
- *   <li>{@code file} —— 文件（零基础设施、人可读）</li>
- *   <li>{@code redis} —— 缓存（带 TTL，承担"活跃会话加速"角色）</li>
- *   <li>{@code mysql} —— 阶段 7 提供（它才是本项目的<b>权威</b>会话存储，Redis 是它的缓存）</li>
- * </ul>
+ * <p><b>★ 阶段 7 起：它是"门面"，背后是两层，不是三种可切换的实现</b>
+ * （阶段 5 的"一个 type 三选一"已被取代，见 {@link MemoryProperties} 的类注释）：
+ * <pre>
+ *   ConversationMemory（本接口 —— 切面唯一依赖的抽象，形状不变）
+ *        └── {@link LayeredConversationMemory}（唯一实现：组合两层 + 时序 + 失败分级 + 熔断）
+ *                ├── {@link com.hagent.memory.record.ConversationRecordStore}
+ *                │      【记录层】用户可见的对话记录：权威·完整·永久（mysql | file）
+ *                └── {@link com.hagent.memory.context.ConversationContextCache}
+ *                       【上下文层】模型这一次要用的上下文：有损·TTL·可重建（redis | none）
+ * </pre>
+ *
+ * <p><b>为什么必须是两层而不是二选一</b>：这两个角色的需求正好相反 ——
+ * 记录层<b>一轮都不能少</b>（丢了就是数据丢失事故），上下文层<b>可以有损</b>
+ * （丢了只是模型少看几轮，且能从记录层重建）。
+ * 把它们做成"同一份数据的两种存法"，会导出一个<b>命中率≈0</b>的无意义策略：
+ * 会话历史是 1 读 : 1 写、且写的正是读的那份，"写库后删缓存"会让每轮读都 miss。
+ *
+ * <p><b>为什么接口形状不变</b>：切面（`MemoryReadAdvisor` / `MemoryWritebackAdvisor`）
+ * 与 {@link ChatMemoryAdapter} 依赖的都是本接口，因此这次结构改动对它们<b>零影响</b>。
+ *
+ * <h2>★ 命名约定（三个接口一起看才完整）</h2>
+ *
+ * <p>记忆有三个接口：本接口（门面）、
+ * {@link com.hagent.memory.record.ConversationRecordStore}（记录层）、
+ * {@link com.hagent.memory.context.ConversationContextCache}（上下文层）。
+ * 它们的方法名<b>不是同一个模子刻的</b> —— 差别是刻意的，四条判据如下。
+ *
+ * <p><b>① 读为什么有三个名字</b>：
+ *
+ * <table border="1">
+ *   <caption>三个读方法的契约差异</caption>
+ *   <tr><th>方法</th><th>在哪层</th><th>参数</th><th>返回</th><th>语义</th></tr>
+ *   <tr><td>{@code load}</td><td>门面</td><td>{@link TokenBudget}</td>
+ *       <td>必定非 null，<b>已按预算裁剪</b></td><td>给模型<b>这一次要用的那一份</b></td></tr>
+ *   <tr><td>{@code readLatest}</td><td>记录层</td><td>{@code int} 条数上限</td>
+ *       <td>非 null，<b>未裁剪</b></td><td>库里最近的 N 条（<b>存储视角</b>）</td></tr>
+ *   <tr><td>{@code get}</td><td>上下文层</td><td>{@code int} 条数上限</td>
+ *       <td><b>可为 null</b></td><td>缓存里有没有（<b>缓存视角</b>）</td></tr>
+ * </table>
+ *
+ * <p>判据是「<b>给谁用 + 能不能失败</b>」：
+ * <b>收 {@code TokenBudget} 的地方会裁剪，收 {@code int} 的地方不会</b> ——
+ * 参数类型本身就是给调用点的提示；而<b>只有缓存层能返回 {@code null}</b>，
+ * 因为"未命中"是它的正常状态，不是异常。
+ *
+ * <p><b>② 写为什么三层同名 {@code append}</b>：语义确实是同一个（"把这次新增的消息加进去"），
+ * 但<b>失败强度不同</b>且各自写明 ——
+ * 记录层必须成功、且整批原子（不能只写"问"不写"答"）；缓存层允许失败（下次可从记录层重建）。
+ * <b>名字表达"做什么"，强度由各层注释与门面的失败分级表达。</b>
+ *
+ * <p><b>③ 删为什么要分两种名</b>：判据是「<b>是否承载会话身份</b>」——
+ * 记录层用 {@code clear}（清空内容、会话还在）与 {@code delete}（整个会话删掉），
+ * 因为它<b>承载"会话"这个身份</b>，且这两件事对用户是不同的语义（"换个话题" vs "删掉我的数据"）；
+ * 缓存层只有一个 {@code evict}，因为它<b>不承载身份</b> —— 丢 key 就是丢 key。
+ * ★ <b>这个不对称本身就是信息</b>：它告诉你"这一层不管会话身份"。
+ *
+ * <p><b>④ {@code replace} 为什么只属于可丢的那一层</b>：
+ * 重建路径的语义是"本层现在应当等于记录层说的内容"，用 {@code append} 会把残留旧内容<b>叠加</b>上去；
+ * 而记录层<b>故意没有</b> {@code replace} —— 整体替换权威对话记录<b>没有语义</b>（那就是数据丢失）。
+ * <b>它的缺席是特性，不是遗漏。</b>
  */
 public interface ConversationMemory {
 
