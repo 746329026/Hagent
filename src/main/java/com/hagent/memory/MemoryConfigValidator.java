@@ -13,22 +13,29 @@ import java.util.Set;
  *
  * <h2>★ 为什么必须是 EnvironmentPostProcessor（一段真实的踩坑）</h2>
  *
- * <p>这个校验被实现过两次，前两次都<b>没能生效</b>，值得完整记录：
+ * <p>这个校验被实现过三次，前两次都<b>没能生效</b>，值得完整记录：
  *
  * <p><b>第一次</b>：写在 {@code MemoryProperties.afterPropertiesSet()} 里。
  * 结果没执行 —— 因为配置不合法时，所有实现的 {@code @ConditionalOnProperty} 都不匹配，
- * 容器里没有 {@code ConversationMemory}，而 {@code AiConfig.chatClient} 依赖它，
+ * 容器里没有 {@code ConversationMemory}，而 {@code AgentPipeline} 的构造器依赖它，
  * 在更早的阶段就创建失败了。
  *
- * <p><b>第二次</b>：把它做成一个 Bean，并让 {@code chatClient} 依赖它，
+ * <p><b>第二次</b>：把它做成一个 Bean，并让 {@code AgentPipeline} 依赖它，
  * 想用"依赖关系"保证它先执行。结果<b>仍然没执行</b> ——
- * 因为 {@code chatClient} 的构造器参数里<b>同时</b>需要
- * {@code ConversationMemory}，Spring 解析参数时第一个就发现"这个 Bean 不存在"，
- * <b>直接抛错返回，不会再去创建其它参数</b>。
+ * 因为 {@code AgentPipeline} 的构造器参数里<b>同时</b>需要
+ * {@code ConversationMemory}，Spring 解析参数时一旦走到那一个，
+ * 发现"这个 Bean 不存在"就<b>直接抛错返回，不会再去创建别的参数</b>。
+ *
+ * <p>两次的教训是同一条，值得单独记住：<b>"用依赖关系保证执行顺序"只在那个依赖
+ * 真能被解析到时才成立</b>。而这里要校验的恰恰是"记忆 Bean 到底造不造得出来" ——
+ * 把校验挂在记忆 Bean 的消费者身上，顺序保证就建立在一个可能根本不存在的前提上：
+ * 校验还没轮到执行，容器已经先因为缺 Bean 失败了。
  *
  * <p><b>第三次（本类）</b>：改用 {@link EnvironmentPostProcessor} ——
  * 它在 {@code Environment} 准备完成后、**任何 Bean 创建之前**运行。
- * 这是 Spring Boot 提供的、真正意义上"最早的机会"。
+ * 这是 Spring Boot 提供的、真正意义上"最早的机会"，
+ * 也正因为如此，它<b>不依赖任何 Bean</b>：{@code AgentPipeline} /
+ * {@code ConversationMemory} 能不能创建出来，与本类无关。
  *
  * <h2>★ 第四次修正：接口在 Spring Boot 4.0 换了包</h2>
  *

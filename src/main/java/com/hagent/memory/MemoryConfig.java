@@ -25,7 +25,7 @@ import javax.sql.DataSource;
  *
  * <p>结构是固定的三层：
  * <pre>
- *   ConversationMemory（切面依赖的抽象）
+ *   ConversationMemory（{@code AgentPipeline} 依赖的抽象）
  *        └── LayeredConversationMemory（门面：组合 + 时序 + 失败分级 + 熔断）
  *                ├── ConversationRecordStore   ← 记录层：mysql | file
  *                └── ConversationContextCache  ← 上下文层：redis | none
@@ -137,7 +137,7 @@ public class MemoryConfig {
     // ========================================================================
 
     /**
-     * 门面 —— 切面唯一依赖的 {@link ConversationMemory}。
+     * 门面 —— {@code AgentPipeline} 唯一依赖的记忆抽象（{@link ConversationMemory}）。
      *
      * <p>它的构造参数就是两类能力，因此 Spring 会先创建两条链路再创建它 ——
      * "缺一层"这件事在启动期就会暴露，不会等到第一次对话。

@@ -1,6 +1,7 @@
 package com.hagent.observability;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -8,6 +9,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -71,11 +73,79 @@ public class StartupProbe {
     public StartupProbe(ChatModel chatModel,
                         EmbeddingModel embeddingModel,
                         StringRedisTemplate redisTemplate,
+                        ObjectProvider<ChatMemory> frameworkChatMemory,
                         ApplicationContext applicationContext) {
         this.chatModel = chatModel;
         this.embeddingModel = embeddingModel;
         this.redisTemplate = redisTemplate;
         this.applicationContext = applicationContext;
+        assertNoFrameworkChatMemory(frameworkChatMemory);
+    }
+
+    /**
+     * 启动自检：<b>框架的 {@code ChatMemory} 不得进入容器</b>。
+     *
+     * <h3>★ 这条检查是"一个失败的方案"换来的（值得完整读一遍）</h3>
+     *
+     * <p>阶段 8 删除了 {@code ChatMemoryAdapter} —— 它原先是一个<b>占位 Bean</b>，
+     * 靠"占着这个类型"来阻止框架的默认实现进来。当时的想法是：
+     * <b>删掉它 + 加一条"出现即失败"的启动自检</b>。
+     *
+     * <p><b>实测证明那个想法不成立</b>：Spring AI 2.0.1 的
+     * {@code ChatMemoryAutoConfiguration} 只带 {@code @ConditionalOnClass}
+     * 与两个 {@code @ConditionalOnMissingBean}，
+     * <b>没有任何 {@code enabled} 开关</b>（javap 实测）。
+     * 也就是说：我们的 Bean 一删，框架<b>必然</b>装上
+     * {@code InMemoryChatMemoryRepository} + {@code MessageWindowChatMemory}，
+     * 于是那条"出现即失败"的自检<b>永远通不过</b> —— 首次跑测试就全红，
+     * 65 个 {@code @SpringBootTest} 全部上下文加载失败。
+     *
+     * <p><b>正解</b>：在配置层把该自动配置排除掉
+     * （{@code spring.autoconfigure.exclude}，见 {@code application.yml}），
+     * 而本检查<b>反向确认排除仍然生效</b>：
+     * <ul>
+     *   <li>Bean 不在 → 正常（排除生效）；</li>
+     *   <li>Bean 在 → 说明有人删了那行配置，或框架改了自动配置类名/条件 → <b>启动失败</b>。</li>
+     * </ul>
+     *
+     * <p>这个转换的意义：原来靠"占坑"（一个没人调用的类）守，现在靠
+     * "<b>配置 + 一条会报错的检查</b>"守 —— 前者是隐式的，后者出错时会说话。
+     *
+     * <h3>★ 为什么检查放在构造期，而不是做成探针的一条</h3>
+     *
+     * <p>探针的其它条目失败<b>只影响 {@code allPassed}</b>（仅被 {@code /health/detail} 读取），
+     * 不会阻止启动。而这条属于"装配错误 → 启动失败"，与
+     * {@code MemoryConfigValidator}、{@code ragAnswerPromptResource} 同一立场。
+     *
+     * <h3>怎么修</h3>
+     *
+     * <p>看到这条异常时，先看 {@code application.yml} 的
+     * {@code spring.autoconfigure.exclude} 是否还在、类名是否仍与框架一致。
+     */
+    private void assertNoFrameworkChatMemory(ObjectProvider<ChatMemory> frameworkChatMemory) {
+        if (frameworkChatMemory.getIfAvailable() == null) {
+            log.info("[自检] 框架 ChatMemory 未进入容器（符合预期）—— "
+                    + "spring.autoconfigure.exclude 生效，本项目记忆只走 ConversationMemory + AgentPipeline");
+            return;
+        }
+        throw new IllegalStateException("""
+                检测到容器中存在框架的 ChatMemory（Spring AI 自动装配的 \
+                InMemoryChatMemoryRepository + MessageWindowChatMemory）。
+                它是【纯堆内存 + 无 token 预算】的实现：重启即丢，且不会报错。
+
+                【最可能的原因】application.yml 里的这一项被删掉或失效了：
+                    spring.autoconfigure.exclude:
+                      - org.springframework.ai.model.chat.memory.autoconfigure.ChatMemoryAutoConfiguration
+
+                【为什么必须排除而不是留着不用】本项目的会话记忆有明确的两层设计
+                （记录层 MySQL/file 为权威、上下文层 Redis 为可重建缓存），由
+                ConversationMemory 统一承载、由 AgentPipeline 读写。让框架那个
+                无预算的内存实现同时存在，会让"历史悄悄进堆内存"变成一个
+                只有重启后才被发现的问题。
+
+                【另一个可能】框架升级后自动配置类被改名/改了条件 ——
+                那就同步更新上面那一行的类名。
+                """);
     }
 
     /** 应用就绪后自动执行一次（此时所有 Bean 已完成注入，是探测的最佳时机）。 */

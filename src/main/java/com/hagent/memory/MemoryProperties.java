@@ -144,6 +144,16 @@ public class MemoryProperties implements InitializingBean {
      * <p>为什么必须拦：若放过它，Spring 会因缺少实现而抛出难以理解的
      * "找不到 Bean"，或者更糟 —— 静默用了别的实现，
      * <b>你以为在用 MySQL 存，实际历史在别处（甚至重启就丢），且不报错</b>。
+     *
+     * <p><b>★ 阶段 8 补注：这条失败模式的守卫换人了</b>。
+     * 原先挡在框架 {@code ChatMemory} 前面的，是一个<b>占位 Bean</b> ——
+     * {@code ChatMemoryAdapter} 占着那个类型，让 Spring AI 的
+     * {@code @ConditionalOnMissingBean} 自动配置退避。阶段 8 删掉那个占位之后，
+     * 改由一条<b>启动自检</b>守住：容器里一旦出现框架的 {@code ChatMemory}
+     * （{@code InMemoryChatMemoryRepository} + {@code MessageWindowChatMemory} ——
+     * 纯堆内存、无 token 预算），{@code StartupProbe} 就<b>直接让启动失败</b>，
+     * 而不是等人重启之后才发现历史没了。
+     * 也就是说："历史悄悄进堆内存"这条风险由自检而不是占位 Bean 守着。
      */
     @Override
     public void afterPropertiesSet() {

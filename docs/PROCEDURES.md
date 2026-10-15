@@ -2660,16 +2660,338 @@ HEX    : F09F9880 F0A0AEB7 20 E4B8AD E69687 E6B58B E8AF95
 
 ---
 
+## 8. 结构重构：advisor 链 → AgentPipeline
+
+> **本阶段是一场纯粹的结构重构**：把"5 个自定义切面 + 框架切面链"换成一条**直连 `ChatModel` 的显式管线**。
+> 工具调用顺延阶段 9 —— 因为切面的遗留问题必须先还掉，否则阶段 9 会盖在旧结构上。
+
+### 8.1 本阶段要解决的问题
+
+**真正被换掉的不是"切面"这个形态，而是"切面之间用字符串 key 传数据的约定"。**
+
+阶段 6 后半定型的那套结构里，`MemoryReadAdvisor` 往 `ChatClientRequest.context()` 里放历史、
+`PromptAssemblyAdvisor` 再从同一个 key 取出来拼进 prompt。这条传递链有一个必须正视的弱点：
+
+```text
+   MemoryReadAdvisor    : context.put("hagent_prompt_memory_messages", history)
+   PromptAssemblyAdvisor: context.get("hagent_prompt_memory_messages")   ← 拼错一个字母
+   → 编译通过、运行不报错、注入的历史永远为空
+```
+
+它属于 `WORKING-AGREEMENT` 第 7 条警戒信号里"**靠两个组件约定不互相干涉**维持隔离"的那一类。
+阶段 8 把它换成**方法参数**，于是"历史和片段从哪来"变成编译期保证。
+
+```mermaid
+flowchart LR
+    subgraph before["阶段 8 之前"]
+        A1["ChatAppService"] --> A2["ChatClient"]
+        A2 --> A3["PromptTraceAdvisor<br/>MIN+100"]
+        A3 --> A4["MemoryWritebackAdvisor<br/>MIN+150"]
+        A4 --> A5["MemoryReadAdvisor<br/>MIN+200"]
+        A5 --> A6["RagRetrievalAdvisor<br/>MIN+220"]
+        A6 --> A7["PromptAssemblyAdvisor<br/>MIN+250"]
+        A7 --> A8["ToolCallingAdvisor（框架）<br/>MIN+300"]
+        A8 --> A9["ChatModelCallAdvisor<br/>MAX"]
+        A9 --> A10["ChatModel"]
+        A5 -. "context 字符串 key" .-> A7
+        A6 -. "context 字符串 key" .-> A7
+    end
+    subgraph after["阶段 8 之后"]
+        B1["ChatAppService"] --> B2["AgentPipeline"]
+        B2 --> B3["② 读历史"]
+        B3 --> B4["③ 检索"]
+        B4 --> B5["④ PromptBuilder 拼装"]
+        B5 --> B6["⑤ ChatModel.stream(prompt)"]
+        B6 --> B7["⑥ 逐片累积 + 过滤空片"]
+        B7 --> B8["⑦ 写回记忆 → Final"]
+        B2 --> B9["ConversationMemory"]
+        B2 --> B10["KnowledgeRetrievalService"]
+        B3 -. "方法参数" .-> B5
+        B4 -. "方法参数" .-> B5
+    end
+```
+
+**思维导图：本阶段的核心对象与职责**
+
+```mermaid
+mindmap
+  root(("阶段 8<br/>结构重构"))
+    契约层
+      PipelineEvent sealed
+        Retrieved
+          我们的检索产物
+          与模型产出平级
+        ModelOutput sealed
+          Reasoning
+            DeepSeek reasoningContent
+            可能整体缺失
+          Token
+            回答增量
+          Final
+            拼接后的全文
+            含 reasoning 供 /chat 回看
+      为什么分层
+        前端只有一条 SSE 连接
+        所以 Retrieved 不能搬走
+        但要与模型产出区分来源
+    编排层
+      AgentPipeline
+        唯一编排者
+        7 步顺序=代码行序
+        直连 ChatModel
+        不传 ChatOptions
+        累积器建在 defer 内
+        写回在 Final 之前
+      PromptBuilder
+        唯一重建消息列表者
+        合并全部 system
+        保留未知消息
+        用引用而非 equals
+      预算
+        budgetOf 穷尽 switch
+        新增模式编译失败
+    装配层
+      AiConfig 几乎空了
+      @SpringBootApplication exclude
+        排除框架 ChatMemoryAutoConfiguration
+      StartupProbe 构造期自检
+        反向确认 exclude 生效
+      TraceProperties
+        原 AdvisorProperties 改名
+    测试
+      AgentPipelineTest
+        累积而非取末片
+        空片过滤
+        写回一次且在 Final 前
+      PromptBuilderTest
+        14 条由旧切面测试迁移
+      ChatBudgetTest
+        由 MemoryBudgetsTest 重建
+        改为与期望值比较
+```
+
+### 8.2 主要新增 / 修改 / 删除
+
+| 类型 | 内容 |
+|---|---|
+| **新增（5）** | `app/PipelineEvent`（sealed 契约）/ `app/AgentPipeline`（唯一编排者）/ `app/PromptBuilder`（唯一拼装者）/ `app/PromptLogFormat`（从 `advisor/` 搬来并提升可见性）/ `config/TraceProperties`（改名） |
+| **删除（11 类）** | `advisor/` 全部 8 个 + `memory/ChatMemoryAdapter` + `memory/MemoryBudgets` + `config/AdvisorProperties`（改名） |
+| **删除（端点）** | 方式一 `/stream`（POST + GET）与方式二 `/stream-flux` 共 3 个端点 + 3 个 service 方法 + `sendEvent(SseEmitter, ServerSentEvent)` 重载 + `streamFailureCount` |
+| **修改（17）** | `AiConfig`（195 行 → 整篇重写）/ `ChatAppService`（431 → 两条入口）/ `ChatController`（5 → 3 端点）/ `ChatResponse`（+`reasoning`）/ `HagentApplication`（+`exclude`）/ `StartupProbe`（+构造期自检）/ `TokenBudget`（−2 个零调用方工厂）/ `StreamEventType`（+`REASONING`）/ `application.yml` + 10 个文件的悬空注释 |
+
+**保留两条入口**：`POST /chat`（阻塞，带思考）与 `POST|GET /stream-sse`（流式）。
+方式一/二是"流式机制对照实验"，其产出早已记录在本文档里 ——
+**代码不承载历史，文档承载**（与 `/chat/intent` 那次同一个理由）。
+
+### 8.3 坑 32：删掉一个"占位 Bean"之后，框架会立刻补位 —— 而我加的自检永远通不过
+
+**这是本阶段最有价值的一条，因为它证伪了我自己的方案。**
+
+**背景**：`ChatMemoryAdapter` 是一个"零调用方但绝不能删"的占位 Bean（决策 34）：
+它在容器里占着 `ChatMemory` 这个类型，让 Spring AI 的
+`ChatMemoryAutoConfiguration`（两个 `@ConditionalOnMissingBean`）退避。
+
+阶段 8 之后框架边界整个不存在了（没人走 `ChatClient`、没人挂框架记忆切面），
+所以决定**删掉它，改由一条启动自检守住**：容器里一旦出现框架 `ChatMemory` 就直接失败。
+
+**第一版实现**：`StartupProbe` 构造器里 `ObjectProvider<ChatMemory>` 取不到就通过、取到就抛异常。
+
+**实测结果**：`Tests run: 229, Failures: 0, Errors: 65` —— 65 个 `@SpringBootTest` 全部上下文加载失败，
+根因是那条自检本身：
+
+```text
+Error creating bean with name 'startupProbe': Constructor threw exception
+Caused by: java.lang.IllegalStateException:
+    检测到容器中存在框架的 ChatMemory（InMemoryChatMemoryRepository + MessageWindowChatMemory）
+```
+
+**根因（javap 实测）**：`ChatMemoryAutoConfiguration` 只带
+
+```text
+  @ConditionalOnClass({ChatMemory.class, ChatMemoryRepository.class})
+  @ConditionalOnMissingBean   ← 只有这一个"让位"条件
+```
+
+**没有任何 `enabled` 开关**（我在报告里曾断言"存在开关"，那是一个未验证的猜测）。
+也就是说：我们的 Bean 一删，框架**必然**装配它 —— 于是"出现即失败"的自检**永远通不过**。
+
+**正解**：只能在**代码层排除**该自动配置
+
+```java
+@SpringBootApplication(exclude = ChatMemoryAutoConfiguration.class)
+```
+
+而自检保留，语义**反过来**：Bean 不在 = 排除生效（正常）；Bean 在 = 有人删了 exclude，
+或框架改名/改条件 → 启动失败并指出该改哪里。
+
+**★ 为什么用代码层 `exclude` 而不是 `spring.autoconfigure.exclude`**：
+这里是**编译期检查** —— 类名写错或框架改名会直接编译失败；
+而配置里的字符串拼错只会**静默失效**。这一条不是理论：
+
+> 我第一版正是用 `spring.autoconfigure.exclude` 写的，**而且把缩进插错了位置** ——
+> 两空格缩进让它落进了 `spring.ai:` 之内，成了无效键 `spring.ai.autoconfigure`；
+> 更糟的是 `spring.ai:` 在 yml 里出现两次，**后者覆盖前者**，
+> 于是第 28 行那段（含 `model.chat=deepseek` 这条关键配置）被整段盖掉。
+> 而报错只说"自检失败"，**没有一个字提到 yml 写错了**。
+
+**可迁移的认知**：
+
+| # | 认知 |
+|---|---|
+| 1 | **"删掉一个占位 Bean"不是删除，是把占位权交给框架**。删之前必须先确认"没有它会发生什么"（决策 26 的判据），并确认那个后果**能被拦住** |
+| 2 | **拦不住的检查不要写成"出现即失败"** —— 要先确认"正常状态下它确实不会出现"，否则它会把正常状态判成故障。★ 我漏掉的正是这一步：自检上线前**没有先问"框架到底会不会装它"** |
+| 3 | **框架的"可关闭性"要读字节码/元数据确认，不能凭印象**。`@ConditionalOnMissingBean` 是"让位"语义，**不是开关** |
+| 4 | **配置层的字符串生效与否不会报错**（YAML 缩进插错、键放错层级、重复键覆盖）→ 能用编译期的就用编译期 |
+
+### 8.4 坑 33：`Prompt.getSystemMessage()` 只返回【第一条】—— 第二条会被静默降级
+
+`PromptAssemblyAdvisor` 原先用 `original.getSystemMessage()` 取原有 system。
+字节码实测：
+
+```text
+  public SystemMessage getSystemMessage();
+     遍历 messages，遇到第一个 SystemMessage 就 areturn   ← ★ 只取第一条
+  public UserMessage getUserMessage();
+     从最后一条往前找，返回最后一个 UserMessage
+```
+
+所以当 prompt 里有 **2 条** system 时（阶段 9 会加"工具说明""人格设定"）：
+
+```text
+   输入 [system A, system B, user]
+     旧行为：SystemMessage = A + 约束 + 片段；B 掉进"未知消息"，被原样放到历史之后
+             ⇒ 后来加的那条 system 被【静默挤到 prompt 中段】，失去 system 的地位
+     新行为：SystemMessage = A + B + 约束 + 片段
+```
+
+`PromptBuilder` 因此改为**收集全部 system 并合并**。这条修正必须在"加第二条 system"之前做掉，
+否则将来会表现为"我明明配置了工具说明，模型却像没看到" —— 而**没有任何报错**。
+
+### 8.5 坑 34：我自己在实现里加的字段，同样要过"三问"
+
+写 `PromptBuilder` 时我在日志里加了一个"估算 token≈N"字段，为此让它依赖 `MemoryTrimmer`。
+写完自查时发现：**旧实现并没有这个字段，它是我加的，而且没有消费者** ——
+正是协议第 7 条警戒信号。于是撤掉，日志字段回到"总条数 / system / 历史条数 / 片段条数"。
+
+同时撤掉了两处**自己制造的**无调用方代码：
+
+- `ChatController.currentMode()` —— 一个没有任何调用方的私有方法（我本想"为阶段 9 预留"）；
+- `TokenBudget` 的两个静态工厂 `conversation(...)` / `workflow(...)` —— 全仓零调用方，
+  且方法名把 `conversation` 写死，与 `MemoryMode` 的取值术语构成一对需要手工同步的字典。
+
+### 8.6 本阶段产出的一项机制：穷尽 switch 取代"共用一张表"
+
+`MemoryBudgets` 被删除，它原来的"模式 → 预算"映射挪进 `AgentPipeline#budgetOf`：
+
+```java
+private TokenBudget budgetOf(MemoryMode mode) {
+    return switch (mode) {
+        case CONVERSATION -> new TokenBudget(...conversationMax...);
+        case WORKFLOW     -> new TokenBudget(...workflowMax...);
+    };   // ★ 刻意不写 default
+}
+```
+
+**为什么删**：该类的存在理由是"主链路与框架边界两个调用点必须共用同一份"（决策 35）。
+阶段 8 删掉框架边界后**只剩一个调用点**，那个理由不成立 ——
+而它提供的真正价值（**新增模式会编译失败**）**移到这里反而更强**。
+删掉的只是"一个没有第二使用者的抽象"（协议第 7 条警戒信号）。
+
+**回归防线的重建**：`MemoryBudgetsTest` 的核心断言是
+"两条路径拿到同一份预算"，而两个比较对象同时被删 —— 继续比较等于
+**拿一个没坏的东西跟坏掉的东西比**（两处都坏时永远相等）。
+新测试 `ChatBudgetTest` 改为**与期望值比较**，因此它比原断言更强：
+不但能发现"两处不一致"，还能发现"两处一致地错"（例如两个模式都读了同一项配置）。
+
+### 8.7 阶段结果与验证证据
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | `.\mvnw.cmd -B -ntp clean test` → **`Tests run: 234, Failures: 0, Errors: 0, Skipped: 2`** |
+| 用例账目 | 239 − 12（删除）+ 7（新增）= 234。2 个跳过是 `ModelOutputProbeTest` 的 `assumeTrue` 守门 |
+| 删除的 12 个用例 | `AdvisorOrderTest` 6 + `AdvisorChainMessageSemanticsTest` 4（纯框架切面行为）+ `PromptAssemblyAdvisorTest` 2（context 类型检查、getOrder）+ `ChatEndpointIdentityTest` 1（两个常量必须相等） |
+| 启动自检 | 启动日志出现 `[自检] 框架 ChatMemory 未进入容器（符合预期）` |
+
+**★ 删掉的用例里有 3 个是"因为问题被结构性消灭"而失去意义的**，这比"测试变少"更值得记录：
+
+| 被删用例 | 为什么不再需要 |
+|---|---|
+| "context 里的记忆 key 类型不对 → 告警并当空" | 历史现在是 `List<Message>` **方法参数**，类型由编译期保证 |
+| "`REQUEST_ATTRIBUTE` 与 `CONTEXT_KEY` 必须相等" | `CONTEXT_KEY` 已删，"两处需要同步"这个问题**结构性消失** |
+| "`getOrder()` == PROMPT_ASSEMBLY 且 < TOOL_CALLING" | `PromptBuilder` 没有 order 概念 |
+
+### 8.8 实测证据：模型输出的形状（动手前先测，不是猜）
+
+阶段 8 动手前写了一个一次性探针 `ModelOutputProbeTest`（`HAGENT_LIVE_PROBE=1` 才跑，默认跳过），
+用**真实 API** 回答四个问题。结论直接决定了管线怎么写：
+
+| # | 问题 | 实测答案 |
+|---|---|---|
+| 1 | 流式每片是增量还是累计 | ★ **增量**。184 片中**最后一片 text 长度 = 0**，全片拼接才是 159 字的完整回答 |
+| 2 | 思考出现在哪些片 | ★ **严格两段式**：片 1–89 只有 reasoning，片 90–182 只有 text |
+| 3 | 两段是否互斥 | ★ **完全互斥**（思考段 text 恒为 null，回答段 reasoning 恒为 null） |
+| 4 | 阻塞式有没有思考 | ✅ **有**（87 字）→ 所以 `/chat` 也能回显思考 |
+
+**三条硬约束因此写进了代码**：① `Final.text` 必须自己拼接（取末片会得到空串）；
+② 空片必须过滤（首片就是 `text=null, reasoning=空串`）；③ 写回必须在模型成功之后。
+
+**`ChatOptions` 那一条是用字节码解决的，省了一次真实调用**：
+
+```text
+  DeepSeekChatModel.buildRequestPrompt(Prompt):
+      if (prompt.getOptions() == null) {
+          return prompt.mutate().chatOptions(this.getOptions()).build();   ← 填入配置的 options
+      }
+      return prompt;                                                       ← 显式传了就原样返回
+```
+
+而 `Prompt(List)` 的构造器把 options 置为 `null`。
+⇒ **`new Prompt(messages)` 会自动带上配置里的 `reasoning-effort` / 模型名；显式传反而覆盖配置。**
+
+### 8.9 一条待澄清项（不阻塞，留档）
+
+`SseSupport.shouldBypassWrapping` 的三条 `true` 分支**在生产路径上从未被执行**：
+按 Spring Framework 7.0.9 的字节码，
+`ResponseBodyEmitterReturnValueHandler`（处理 `SseEmitter`）与 `ReactiveTypeHandler`（处理 `Flux`）
+**完全不引用 `ResponseBodyAdvice`**，因此这些端点根本不进 `beforeBodyWrite`。
+
+**本阶段不动它**（改动属于另一个议题，混进来会让"出问题时分不清是新结构还是这个改动引起的"），
+但它带来一个**与本项目一处旧记录不一致**的点：
+
+> 踩坑 #9 记录的现象是"`emitter.send(ServerSentEvent)` 一个事件都发不出去"，
+> 而 `GlobalResponseBodyAdvice` 的注释把它解释为"统一响应包装破坏了流"。
+> 若 `beforeBodyWrite` 从不经过 SSE 路径，则那个症状**不可能由包装造成** ——
+> 真实原因就是踩坑 #9 自己写的另一半：**`SseEmitter` 不认识 `ServerSentEvent`**。
+> 两种解释指向同一现象，而其中一种与路由事实不符。**记为待澄清，不擅自改写历史。**
+
+### 8.10 本阶段顺带解决的历史待办
+
+- **`UserContext` 的传递方式**（原 HANDOFF 优先级 2 第 1 条）：自动解决 ——
+  管线没有 context，身份走方法参数，"最后一段字符串 key"消失；
+- **方式一/二的记忆语义**（原第 4 条）：问题不存在（端点已删）；
+- **协议第 10 条的失效**：产生它的机制（order 常量 + context 键）本阶段拆除，
+  阶段 9 无需再处理。
+
+---
+
 ## 待推进
 
-- 工具调用与多步 Agent：反射注册工具、工具分组（最小权限）、状态机 + 循环 + 中断续跑
+- **阶段 9：工具调用与多步 Agent** —— 反射注册工具、工具分组（最小权限）、状态机 + 循环 + 中断续跑
+  - ★ **工具循环由谁驱动已经定下：`AgentPipeline` 自己驱动**
+    （阶段 8 起管线直连 `ChatModel`，框架的 `ToolCallingAdvisor` 不再参与，
+    所以"要不要关掉框架自动注册"这个问题在本项目不存在）
+  - ★ **阶段 9 第一件事：读参考实现里 `.toolcall()` 的真实签名**（协议第 3 条：不凭记忆写）
   - ⚠️ **不要再做"前置意图提取层"** —— 该设计已撤回，理由见 [5.3](#53-一个被撤回的坑前置意图提取层)。
-    工具选择交给模型的原生工具调用能力（框架的 `ToolCallingAdvisor` 已自带循环）
+    工具选择交给模型的原生工具调用能力
   - **"不可逆操作需要确认"要做在工具执行层**（代码级强制），而不是靠模型自述"我需不需要确认"
+  - `ModelOutput` 是 sealed：加 `ToolCall` / `ToolResult` 是**新增变体、不改已有代码**
 - 双层记忆的长期记忆部分：`.md` 文件 + 索引（会话记忆部分已在阶段 5 完成）
 - 前端极简页面：用 `EventSource` 真实消费 SSE，验证过程可视化
-- 可观测性：关键路径耗时 / 成功率 / 工具调用计数；顺带处理流式失败时日志刷屏的问题
-- **流式端点的记忆覆盖**：目前只有方式三（`/stream-sse`）带记忆。
-  方式一/二刻意不带（它们是流式机制的对照实验），但如果后续把某一条提升为产品路径，需要重新评估
+  - ★ 事件名已就位：`reasoning`（思考）/ `message`（回答）/ `done` / `error`
+  - ★ 已知契约限制：`Retrieved` 事件的 `level` / `band` 按**枚举 name** 序列化
+    （`HIGH`/`MEDIUM`/`LOW`），中文档位（"高/中/低"）需前端自己映射
+- 可观测性：关键路径耗时 / 成功率 / 工具调用计数
+  - ⚠️ **流式路径的 token 用量实测未观察到**（`Final.usage` 可能拿到 `EmptyUsage`）——
+    做成本统计前必须先确认这条，见坑 32 的方法论：**先测，别假设**
 - **一个待补的验证**（不是新功能，是欠的证据）：`docs/STAGE5-VERIFICATION.md` 里的"下一轮能否答出名字"
   至今未跑 —— 目前只能证明记忆能装配、能落盘，**不能证明注入后模型真的用上了**

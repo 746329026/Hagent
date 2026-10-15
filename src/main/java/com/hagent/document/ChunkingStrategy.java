@@ -9,7 +9,7 @@ package com.hagent.document;
  * 两者分开的理由是：<b>不同种类可能共用同一种策略</b>
  * （{@code POLICY} / {@code FAQ} / {@code PRODUCT_DOC} 都用"按标题切"）。
  * 若把策略直接写成各 {@code DocumentKind} 自己的实现方法，
- * 共同逻辑会被复制多份 —— 而"三个实现各抄一份"正是本项目
+ * 共同逻辑会被复制多份 —— 而"多个实现各抄一份"正是本项目
  * 在 {@code MessageCodec} / {@code MemoryTrimmer} 上明确避免过的做法。
  *
  * <p>所以这里保持"种类 → 策略"的映射（在 {@link DocumentKind} 里声明），

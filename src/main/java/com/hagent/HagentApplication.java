@@ -1,5 +1,6 @@
 package com.hagent;
 
+import org.springframework.ai.model.chat.memory.autoconfigure.ChatMemoryAutoConfiguration;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -45,8 +46,40 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * 未配置 DeepSeek API Key 时会报
  * "Failed to instantiate [DeepSeekChatModel]: DeepSeek API key must be set"。
  * 这解释了"为什么密钥是启动前置条件，而不是用到时才需要"。
+ *
+ * <h2>★★ 为什么这里排除了 {@code ChatMemoryAutoConfiguration}（阶段 8）</h2>
+ *
+ * <p>阶段 8 删除了本项目自己的 {@code ChatMemoryAdapter} —— 它原先是一个
+ * <b>占位 Bean</b>，靠"占着 {@code ChatMemory} 这个类型"来阻止框架的默认实现进来。
+ * 它一删，Spring AI 的 {@code ChatMemoryAutoConfiguration} 就会补位，装上：
+ *
+ * <pre>
+ *   InMemoryChatMemoryRepository   —— 堆内存，重启即丢
+ *   MessageWindowChatMemory        —— 只有条数窗口，【没有任何 token 预算】
+ * </pre>
+ *
+ * <p><b>实测关键事实</b>：该自动配置只带
+ * {@code @ConditionalOnClass} 与两个 {@code @ConditionalOnMissingBean}，
+ * <b>没有任何 {@code enabled} 开关</b>（javap 核对 2.0.1）——
+ * 所以它<b>必然</b>装配，无法靠配置属性关掉，只能在这里排除。
+ *
+ * <p><b>为什么必须排除而不是"留着它但不用"</b>：它是一个
+ * "看起来能用、实际不能用"的 Bean —— 一旦将来有人接回 {@code ChatClient}
+ * 或挂上框架自带的记忆切面，会话历史会悄悄进堆内存、
+ * <b>重启就丢、且不报错</b>。这正是决策 8（不静默降级）要防的失败模式。
+ *
+ * <p><b>★ 为什么用 {@code exclude} 而不是 {@code spring.autoconfigure.exclude}</b>：
+ * <ul>
+ *   <li>这里是<b>编译期检查</b> —— 类名写错或框架改名会直接编译失败，
+ *       而配置里的字符串拼错只会<b>静默失效</b>（本项目刚在这上面栽过一次：
+ *       YAML 缩进插错位置成了无效键，导致自检失败、65 个集成测试全红）；</li>
+ *   <li>排除的原因与代码强相关，写在代码旁边比放在几百行外的 yml 里更不容易被误删。</li>
+ * </ul>
+ *
+ * <p><b>反向确认</b>：{@code StartupProbe} 在构造期检查"框架 {@code ChatMemory}
+ * 确实不在容器里"，若将来这个 exclude 被移除，启动期会直接失败并指出这里。
  */
-@SpringBootApplication
+@SpringBootApplication(exclude = ChatMemoryAutoConfiguration.class)
 public class HagentApplication {
 
     public static void main(String[] args) {

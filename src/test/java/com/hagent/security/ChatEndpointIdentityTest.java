@@ -185,11 +185,18 @@ class ChatEndpointIdentityTest {
                 .isEqualTo(new UserContext("zhangsan", Role.EMPLOYEE));
     }
 
-    @Test
-    @DisplayName("★ 请求属性名与 context key 是同一个常量 —— Controller 与切面不会各写一份")
-    void requestAttributeAndContextKeyAreSameConstant() {
-        // 一个是 HTTP 层的名字，一个是切面层的名字，它们是同一个概念。
-        // 若各写一份裸字符串，改一处忘一处不会报错，只会让身份"偶尔变成匿名"。
-        assertThat(UserContext.REQUEST_ATTRIBUTE).isEqualTo(UserContext.CONTEXT_KEY);
-    }
+    // ========================================================================
+    // ★ 阶段 8 删除了一个用例：requestAttributeAndContextKeyAreSameConstant
+    //
+    //   它断言 UserContext.REQUEST_ATTRIBUTE == UserContext.CONTEXT_KEY，
+    //   存在的【唯一理由】是"两个常量取值必须一致，改一处忘一处不会报错"。
+    //
+    //   阶段 8 删掉了 CONTEXT_KEY（身份不再经 ChatClientRequest.context 传递，
+    //   改为方法参数），于是"两处需要同步"这个问题被【结构性消灭】——
+    //   只剩一个常量，无从不同步。断言因此失去存在意义，而不是"需要迁移"。
+    //
+    //   ★ 这正是一次重构在测试上的体现：一条防"两处不同步"的断言，
+    //     随"第二处"一起消失。REQUEST_ATTRIBUTE 保留 —— 它仍是拦截器写、
+    //     Controller 读的真实名字，是唯一出处。
+    // ========================================================================
 }

@@ -3,8 +3,9 @@
 > **用途**：新开对话时先读本文件，即可在**不重读历史对话**的前提下继续推进。
 > 本文件是"当前状态 + 已定决策 + 全部待办 + 踩坑红线"的**唯一权威快照**。
 >
-> **最后更新**：阶段 7 **已提交**（`468413e` —— 会话记忆双层重构 + 修两个数据源装配缺陷，**239 用例全绿**）；
-> ★ **阶段 8 的设计已拍板、尚未动代码** —— 新对话请从 §七 优先级 1 开始。
+> **最后更新**：阶段 8 已完成（advisor 链 → `AgentPipeline`，**234 用例全绿**），
+> **文档已同步**（`PROCEDURES.md` 第 8 节含两张图 + 坑 32/33/34），待提交。
+> ★ **下一步是阶段 9** —— 见 §七 优先级 1。
 
 ---
 
@@ -27,10 +28,10 @@
 | 5 | 会话记忆（memory 抽象 + 切面）+ 上游失败分类 + 撤回意图层 | ✅ 已提交（`6e5600e`） |
 | **6** | **RAG 企业知识库**（入库链路 + 检索链路 + 权限过滤 + 切面拆分） | ✅ 已提交（`0338493`） |
 | **7** | **会话记忆双层重构**（MySQL 记录层 + Redis 上下文层）<br>★ 顺带修掉两个潜伏的数据源装配缺陷 | ✅ 已提交（`468413e`） |
-| **8** | **结构重构：advisor 链 → pipeline**（工具调用顺延阶段 9）<br>★ **设计已拍板、尚未动代码** | 📐 设计完成 —— 见 §七 优先级 1 |
-| 9 起 | 工具调用与多步 Agent；见 `docs/PROCEDURES.md` 的「待推进」 | ❌ 未开始 |
+| **8** | **结构重构：advisor 链 → `AgentPipeline`**（工具调用顺延阶段 9） | ✅ **已完成，234 用例全绿**（见 `PROCEDURES.md` 第 8 节） |
+| **9** | **工具调用与多步 Agent** —— ★ **第一件事：读参考实现 `.toolcall()` 的真实签名** | ❌ 未开始 |
 
-**当前测试状态**：`239 个用例全绿`（`mvnw.cmd -B -ntp clean test`）
+**当前测试状态**：`234 个用例全绿`（`mvnw.cmd -B -ntp clean test`）
 
 > ⚠️ **跑测试前必须设 `DEEPSEEK_API_KEY`**（任意非空值即可，测试不调真模型 ——
 > 启动期只做 `Assert.hasText` 校验）。本轮的跑法：
@@ -42,7 +43,7 @@
 
 ---
 
-## 二、工作协议（`docs/WORKING-AGREEMENT.md`，11 条）—— 最重要的部分
+## 二、工作协议（`docs/WORKING-AGREEMENT.md`，**12 条**）—— 最重要的部分
 
 **违反这些协议比写错代码更严重。** 逐条摘要：
 
@@ -478,7 +479,7 @@ $h = "C:\Users\Rong\Desktop\实习准备\Hagent"
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 Set-Location $h
 
-# 全量测试（239 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
+# 全量测试（234 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
 .\mvnw.cmd -B -ntp clean test
 
 # 启动（需要 DEEPSEEK_API_KEY；IDEA 运行配置里已配好）
@@ -531,93 +532,110 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 ## 七、待办（按优先级，新对话从这里开始）
 
-### ★ 优先级 1：开始阶段 8（**设计已拍板、尚未动代码**）
+### ✅ 优先级 1：阶段 8 已完成（advisor 链 → `AgentPipeline`）
 
-**阶段 8 = 一次纯粹的结构重构**：把 advisor 链换成 pipeline。
-工具调用**顺延到阶段 9** —— 因为 advisor 的遗留问题必须先还掉，否则阶段 9 会盖在旧结构上。
+**结果**：`234 用例全绿`；详细记录见 `docs/PROCEDURES.md` 第 8 节（含两张 Mermaid 图 + 坑 32/33/34）。
 
-#### 已拍板的范围（本人明确）
+#### 实际做出来的形状（与原计划的差异）
 
-| # | 决定 |
-|---|---|
-| 1 | **工具调用顺延阶段 9**；阶段 8 不含工具 → pipeline 在阶段 8 是**直线**（不是循环） |
-| 2 | **只保留两条入口**：`/chat`（call）与 `/stream-sse`（stream with SSE）。★ **方式一 `/stream` 与方式二 `/stream-flux` 直接删除、不再维护** |
-| 3 | **删除 `ChatMemoryAdapter`** |
-| 4 | 阶段 8 **要为工具调用准备接口，但只留最小形态**：`AgentEvent` 用 `sealed`，阶段 9 加 `ToolCall`/`ToolResult` 是**新增变体**，不改已有代码 |
-| 5 | 阶段 9 **第一件事**：读参考实现里 `.toolcall()` 的**真实签名**（协议第 3 条：不凭记忆写） |
-| 6 | ★ **不再为每个阶段写验收清单文档**（协议第 5 条）—— 清单在对话里给，**待跑项进本文件** |
+| | 原计划 | 实际 |
+|---|---|---|
+| 契约名 | `AgentEvent` / `AgentOutput` | ★ **`PipelineEvent`** —— 因为你指出 "agent = harness + model"，**不该有"agent 模式"**，模型产出叫 `ModelOutput` 而非 `AgentOutput` |
+| 事件种类 | `Retrieved` / `Token` / `Final` | ★ **4 种**：`Retrieved` ⊥ `ModelOutput`{`Reasoning`/`Token`/`Final`} —— 因为要展示**思考过程**，而 `reasoningContent` 是**独立字段**（不在 `getText()` 里） |
+| `/chat` 响应体 | 只有 `reply` | ★ **加 `reasoning`** —— 否则刷新页面后思考永久丢失（记忆只存"问+最终答"） |
+| `ChatMemoryAdapter` | 删 + 启动自检 | ★ **第一版方案是错的**：框架 `ChatMemoryAutoConfiguration` **没有 enabled 开关**，删了必然补位 → 自检永远通不过（65 个集成测试全红）。正解是 `@SpringBootApplication(exclude=...)` + 自检**反向确认** |
+| `MemoryBudgets` | 保留（选项 A） | ★ **删除** —— 你指出"它只是声明，唯一消费者是 trimmer"；框架边界消失后它只剩一个调用点，映射挪进 `AgentPipeline#budgetOf`（穷尽 switch，编译期保证保留） |
+| `PromptLogFormat` | 列在"删除" | **保留**并换包（原清单自相矛盾：它有两个消费者） |
+| `AdvisorProperties` | 列在"删除" | ★ **改名 `TraceProperties`**（原清单写错：它装的是日志开关） |
+| 测试用例 | 删 4 个 | ★ **删 12 个**（原清单少算；其中 3 个是"问题被结构性消灭"而失去意义） |
+| 新增测试 | `AgentPipelineTest` | 另加 **`PromptBuilderTest`**（14 条由 `PromptAssemblyAdvisorTest` 迁移）+ **`ChatBudgetTest`**（由 `MemoryBudgetsTest` 重建，改为与**期望值**比较） |
 
-#### 改动的形状（别误读成"给链再加一层"）
+#### 三条本阶段换来的可迁移认知
+
+1. **"删掉一个占位 Bean"不是删除，是把占位权交给框架** —— 删之前必须确认"没有它会怎样"，
+   **并确认那个后果能被拦住**。我漏掉的正是后半句（自检上线前没先问"框架到底会不会装它"）。
+2. **框架的"可关闭性"要读字节码/元数据确认**：`@ConditionalOnMissingBean` 是"让位"语义，**不是开关**。
+3. **配置层的字符串生效与否不会报错** —— 我把 `spring.autoconfigure.exclude` 缩进插错层级
+   （落进 `spring.ai:` 之内），且 `spring.ai:` 出现两次导致**后者覆盖前者**（`model.chat=deepseek` 被盖掉），
+   而报错只说"自检失败"，**一个字都没提 yml 写错了** ⇒ **能用编译期的就用编译期**。
+
+#### 阶段 9 的第一件事（已写进 §七）
+
+★ **读参考实现 `.toolcall()` 的真实签名**（协议第 3 条：不凭记忆写）。
+
+#### ★★★ 阶段 8 动手前的全量复核（已做完，**上面那份清单已被本节的修正取代**）
+
+复发指令：本人要求"重新读 `src` 下所有代码，没问题就动手，有问题再讨论"。
+复核方式：**我逐行读** + **4 个只读子代理独立复核全部 5 个包**（未修改任何文件）。
+结论：**有问题，原清单低估约 3 倍**。以下为修正后的账目。
+
+##### 一、阻塞性问题（改设计 / 改工作量量级）
+
+| # | 问题 | 修正后的做法 |
+|---|---|---|
+| 1 | ★ `MemoryBudgetsTest#advisorAndAdapterAgreeOnTheSameBudget` 的**回归防线失效** —— 它比较的正是 `ChatMemoryAdapter` 与 `MemoryReadAdvisor`，**两个都要删**。类注释 28–43 行把"两条路径"写成该类存在的理由 | 断言搬进 `AgentPipelineTest`，比较对象从"另一条路径"换成**期望值**（`MemoryBudgets.forMode(mode)`） |
+| 2 | ★ `PromptAssemblyAdvisorTest` 的 17 个用例**不能"复用"** —— 全部建立在 `ChatClientRequest` + `DefaultAroundAdvisorChain` 上（第 87–97 行是统一装配辅助）。**外壳全部重写**，其中 **2 条应直接删除**（"context 类型不符告警"= 被方法参数编译期保证取代；"getOrder()"= 无 order），1 条保留语义，**14 条迁移** | 量级修正：不是"断言基本可复用"，而是**重写外壳 + 删 2 条** |
+
+★ 深层影响：`MemoryBudgets` 的"两处共用"理由**随框架边界一起消失**。但仍应保留 ——
+理由换成**它真正保住的那条性质**：`budgetOf` 是穷尽 `switch` → **新增 `MemoryMode` 会编译失败**。
+理由一换，类注释 / `MemoryProperties` 引用 / 测试注释都要改。
+
+##### 二、我原清单里的 4 处错误（已更正）
+
+1. ★ **`PromptLogFormat` 被自相矛盾地列进"删除"**，而 pipeline 日志要复用它 —— 它**保留**，
+   但从 `advisor/` 换包（它是**包私有** `final class`，换包必须改可见性）；
+2. ★ **`AdvisorProperties` 不能删**（原文写错）—— 它装的是日志开关与截断长度，**改名** `TraceProperties` + `hagent.trace` 继续用；
+3. ★ **`AiConfig` 是整篇重写**，不是"删几个 Bean"：第 22–194 行几乎全在讲 ChatClient / 切面链 / 顺序约束。
+   真正值得保留的只有 **86–93 行**那段"两个 starter 会各建一个 `ChatModel` Bean"（讲的是 `ChatModel`，**要搬家**）；
+4. ★ **测试数少算 5 个**：待删 12（不是 4），待改写 1。
+
+##### 三、悬空引用清单（协议第 12 条规则 1）：**19 个文件**
 
 ```
-现在：ChatAppService → ChatClient（+5 个自定义 advisor + 框架工具循环）→ ChatModel
-之后：ChatAppService → AgentPipeline（显式顺序）→ ChatModel
+main(13)  ConversationMemory(26,45,46)  MemoryBudgets(12,13,46-51)  MemoryMode(11,12,67,94,98)
+          MemoryConfig(28,140)  MemoryConfigValidator(18-27 整段论证)  KnowledgeRetrievalService(21,22,35,49)
+          UserContext(11,22,27-40)  UserContextInterceptor(28,42-43)  LayeredConversationMemory(16,24)
+          WebConfig(97,116)  RagConfig(14,33,64)  StreamProperties(11)  AiConfig(整篇)
+          ChatAppService(90,141,142,152)
+config(2) RetrievalProperties(53)  application.yml(156)      ← ★ 配置文件的注释最隐蔽
+既有陈旧(3) MemoryTrimmer(13,17)  MessageCodec(16,20)  ChunkingStrategy(12)   ← "三个实现"是阶段 5 旧措辞
+已修(1)   PromptProperties（javadoc 写着"放在 prompt 包"，而那个包不存在）✅
 ```
 
-★ pipeline **直接对 `ChatModel` 说话、不经 `ChatClient`** →
-整条切面链（含框架的 `ToolCallingAdvisor`）**根本不参与**，于是"怎么关掉自动注册"这个问题不存在。
+##### 四、会**编译失败**的文件（只有这些）
 
-★ 已核实：`ChatModel` 是现成 Bean；`StartupProbe` 本来就直连它（`chatModel.call(new Prompt("ping"))`）
-→ **它一行都不用改**。
+`config/AiConfig`（29 处）；`test/memory/MemoryBudgetsTest`；`test/advisor/` 三个测试类。
+★ **其余悬空引用全部只在注释/javadoc 里** —— 因为 `pom.xml` **没有 `maven-javadoc-plugin`、没有 `-Xdoclint`**，
+所以 `mvn compile/test/package` **全部通过**，只有 IDEA 会标红、`mvn javadoc:javadoc` 会失败。
+⇒ **"编译通过"不能用来检查"注释有没有撒谎"，必须靠清单逐条改。**
 
-#### 文件清单（执行摘要）
+##### 五、复核新发现的 3 条技术事实（都改变了设计）
 
-- **新增（3）**：`app/AgentPipeline`（直线管道，对外只暴露**一个事件流**）/
-  `app/AgentEvent`（`Retrieved` / `Token` / `Final`，**sealed**）/
-  `app/PromptBuilder`（从 `PromptAssemblyAdvisor` 搬出的"唯一拼装者"）
-  - ★ **刻意不新增**：`AgentProperties`（`max-steps` 现在**没有消费者**，协议第 7 条）、
-    `ToolRegistry`、工具类 —— 全部阶段 9
-- **迁移（4 个切面的逻辑换位置，逻辑不丢）**：`PromptTrace` → pipeline 内联日志（保留）/
-  `MemoryWriteback` → 模型调用**成功后** / `MemoryRead` → 调用**前** /
-  `RagRetrieval` → 调用**前**（★ 它那句"幂等检查"直接不要了）/ `PromptAssembly` → `PromptBuilder`
-- **删除（10 个类）**：`advisor/` 下 8 个（`AdvisorOrders`、`PromptTraceAdvisor`、`MemoryWritebackAdvisor`、
-  `MemoryReadAdvisor`、`RagRetrievalAdvisor`、`PromptAssemblyAdvisor`、`PromptFragmentKeys`、`PromptLogFormat`）、
-  `config/AdvisorProperties`、`memory/ChatMemoryAdapter`
-- **删除方式一/二（3 个端点方法 + 3 个 service 方法 + 1 个页面）**：
-  `ChatController.stream` / `streamGet` / `streamFlux`；
-  `ChatAppService.stream` / `streamAsFlux`；★ `sendEvent(SseEmitter, ServerSentEvent)` 重载
-  （注释里自己写着"只用于 `streamAsFlux` 那条路"）；`static/stream-demo.html` 改成只展示 `/chat/stream-sse`
-- **修改**：`AiConfig`（删 `ChatClient` + 5 个 advisor + `chatMemory` Bean）/
-  `ChatAppService`（只剩 2 条入口）/ `ChatController`（删两个端点）/
-  `UserContext`（删 context key）/ `MemoryMode`（删 `CONTEXT_KEY`）/ `PromptProperties`（**保留**）
-- **测试**：删 `AdvisorOrderTest` / `AdvisorChainMessageSemanticsTest`；
-  ★ **迁移 `PromptAssemblyAdvisorTest`（17 用例）→ `PromptBuilderTest`**（断言基本可复用 ——
-  这是删切面时**最不该丢**的东西）；新增 `AgentPipelineTest`；`ChatEndpointIdentityTest` 保留
+| # | 事实 | 对设计的影响 |
+|---|---|---|
+| 1 | ★★ `new Prompt(messages)` **会自动带上配置的 options**（`DeepSeekChatModel.buildRequestPrompt` 字节码：`if (prompt.getOptions() == null) → prompt.mutate().chatOptions(this.getOptions())`；而 `Prompt(List)` 把 options 置 null）。**显式传 options 反而覆盖配置** | 原"⓪ 先写探针验证 options 保持"这一步**取消**（已用字节码解决，省一次真实调用）。pipeline 必须写 `new Prompt(messages)`，**不传 options** |
+| 2 | ★★ `SseSupport` 的三条 true 分支**在生产路径上从未被执行**：Spring 7.0.9 里 `ResponseBodyEmitterReturnValueHandler` 与 `ReactiveTypeHandler` **完全不引用 `ResponseBodyAdvice`**（javap 核实），SSE 端点根本不进 `beforeBodyWrite` | `SseSupport` **保留不动**，但**保留理由要换**：不是"修 bug"，而是"**防框架路由变化 + 防未来误用**"。★ 分支 3（`text/event-stream`）恰恰是唯一能兜住前两种失效的一条。另记一条**待澄清项**：若 `beforeBodyWrite` 从不经过 SSE 路径，则踩坑 #9 的症状**不可能由统一响应包装造成**（真实原因就是它自己写的"`SseEmitter` 不认识 `ServerSentEvent`"）—— 记为待澄清，**不擅自改写历史** |
+| 3 | ★ `LayeredConversationMemory.append` **返回 void 且 `catch (Exception)` 吞掉一切**（记录层写失败**只打 ERROR、不抛异常**）；`load` **永不返回 null、永不抛异常**（失败降级 `List.of()`） | pipeline **不可能**从返回值判断写回成败 ⇒ `Final` 事件**不得**带"写回成功与否"之类字段（那是编造）。写回成败的唯一可观测渠道是**日志**（与决策 40 一致） |
 
-#### 动手顺序（★ 先立后破）
+##### 六、本次复核**新增的 3 个待拍板项**
 
-```
-① 核实三件（不写代码）：
-     a. 删 ChatMemoryAdapter 的副作用（框架会装什么、谁会去读）
-     b. 方式一/二的引用是否已列全
-     c. SseSupport 的 Publisher 分支去留
-② AgentEvent + AgentPipeline（直线）+ PromptBuilder —— 先让 /chat 与现状【等价】
-③ /stream-sse 改为消费事件流
-④ 删方式一/二（端点 + service 方法 + HTML 瘦身 + 文档注记）
-⑤ 删切面那一套（10 个类）—— ★ 在 ②③④ 跑通【之后】才删
-⑥ 删 ChatMemoryAdapter + AiConfig 瘦身
-⑦ 全量测试 + 文档 + 人工验收
-```
+| # | 问题 | 建议 |
+|---|---|---|
+| 1 | `MemoryBudgets` 处置 | **A 保留类 + 重写注释与测试**（理由换成"穷尽 switch 保证新增模式编译失败"） |
+| 2 | `RagConfig.ragAnswerPromptResource` Bean 存废（它**唯一消费者**是 `AiConfig`，将消失） | **保留**，消费者换成 `PromptBuilder`（保住"启动期校验资源存在"） |
+| 3 | `MemoryConfigValidator` 的定位 | **保留**，但注释里"`chatClient` 依赖它"必须改成"`AgentPipeline` 依赖它"（否则第 18–27 行整段论证指向不存在的装配链） |
 
-★ 顺序上刻意把"删"放在"新路径跑通"之后：**先立后破** —— 任何一步出问题都能退回上一个可工作状态，
-而不是先拆掉、再在废墟上重建。
+##### 七、`StartupProbe` **零必改**（复核确认）
 
-#### ★ 一处待本人定的小事
+它早已是 `chatModel.call(new Prompt("ping"))` —— **不传 options、不依赖 `ChatClient`、不碰 context**。
+⇒ **阶段 8 要迁往的那条裸 `ChatModel` 路径，启动探针已经跑了很久**，这是对上面事实 1 的独立佐证。
 
-`SseSupport` 的 `Publisher` 分支**留不留**？（方式二删掉后它就没有生产者了）
-倾向**留**：它是"若响应体是 `Publisher` 就不能包 `BaseResponse`"的 3 行护栏。
-与 `ChatMemoryAdapter` 不同 —— 那个是**有实际作用的占位**，这个是**防误用的护栏**。
+##### 八、前端契约的一条已知限制（留给前端阶段）
 
-#### ★★ 两个待拍板项将被阶段 8 自动解决
-
-- 原 #1「`UserContext` 的传递方式」—— pipeline 没有 context，"最后一段字符串 key"消失
-- 原 #4「方式一/二的记忆语义」—— 端点删了，问题不存在
-
-#### 另外：协议第 10 条的失效**触发点在阶段 9**
-
-有循环才谈得上"内层被重复调用"。但**产生它的机制（order 常量 / context 键）本阶段就拆掉了**，
-所以阶段 9 无需再处理它。
-★ 这条要写进决策表作为**对决策 24、25 的修订**，附理由：它们的前提是"循环属于框架"，B 拿掉了这个前提。
+`RetrievedChunk` 是 record、**无 null 校验**，且 `AccessLevel` / `RelevanceBand` 会被 Jackson 按
+**枚举 name**（`HIGH`/`MEDIUM`/`LOW`）序列化，而 `RelevanceBand.displayName()` 的中文"高/中/低"
+**不是属性** ⇒ 前端要显示中文档位得自己映射。**本阶段不加 `displayName` 字段**
+（协议第 7 条：还没有消费者时不加）。
 
 #### ★ 顺带：阶段 7 的 4 项人工验收**还没跑**（不阻塞阶段 8，但别丢）
 
@@ -715,10 +733,13 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 
 ### 后续阶段（`docs/PROCEDURES.md` 的「待推进」）
 
-- 工具调用与多步 Agent（阶段 8）：反射注册工具、工具分组（最小权限）、状态机 + 循环 + 中断续跑
-  - ★ **动手前必须先定"工具循环由谁驱动"**（框架的 `ToolCallingAdvisor` 自动循环 / 自己写）。
-    这个决定了本轮的切面次序是否还成立，详见 `PROCEDURES.md` 本阶段"需要本人决策的事"
-- 会话记忆的 MySQL 实现（表名已预留 `chat_message`）+ 语义调整为 Cache-Aside
+- **阶段 9：工具调用与多步 Agent** —— 反射注册工具、工具分组（最小权限）、状态机 + 循环 + 中断续跑
+  - ★ **工具循环由谁驱动已定：`AgentPipeline` 自己驱动**
+    （阶段 8 起管线直连 `ChatModel`，框架的 `ToolCallingAdvisor` 不再参与，
+    所以"要不要关掉框架自动注册"这个问题在本项目不存在）
+  - ★ **动手前必须先读参考实现里 `.toolcall()` 的真实签名**（协议第 3 条：不凭记忆写）
+- **会话记忆的 MySQL 实现**：✅ 已在阶段 7 完成（`chat_message` 两层结构）
+- **长期记忆（`.md` + 索引）**（阶段 12）
 - 长期记忆（`.md` + 索引）（阶段 12）
 - 前端极简页面（`EventSource` 真实消费 SSE）
 - 可观测性（耗时/成功率/工具调用计数）—— ★ 本轮已发现**切面自带 observation**，
@@ -731,8 +752,8 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 ```
 Hagent/
 ├── docs/
-│   ├── WORKING-AGREEMENT.md        ← 11 条协作协议（最重要）
-│   ├── PROCEDURES.md               ← 按阶段的完整记录（~90 KB，含数据流向图与踩坑）
+│   ├── WORKING-AGREEMENT.md        ← 12 条协作协议（最重要）
+│   ├── PROCEDURES.md               ← 按阶段的完整记录（~150 KB，含数据流向图与踩坑）
 │   ├── STAGE5-VERIFICATION.md      ← 阶段 5 验收清单（第 2.4 步未跑）
 │   ├── KNOWLEDGE-SAMPLE-DATA.md    ← 示例数据的说明与 frontmatter 规则
 │   └── HANDOFF.md                  ← 本文件
@@ -743,33 +764,35 @@ Hagent/
 │   └── 办公设备管理.txt              POLICY      678 字 无 frontmatter → 段落切
 ├── tools/hagent-test.ps1           ← UTF-8 安全测试工具（★ 必须带 BOM）
 ├── src/main/java/com/hagent/
+│   ├── HagentApplication.java     ← ★ 含 exclude = ChatMemoryAutoConfiguration（阶段 8）
 │   ├── common/       BaseResponse / ErrorCode / GlobalResponseBodyAdvice
 │   ├── exception/    AgentException / GlobalExceptionHandler / FailureMapper / FailureMapping
-│   ├── config/       AiConfig / WebConfig / StreamProperties / VectorStoreConfig /
+│   ├── config/       AiConfig（阶段 8 起几乎空）/ WebConfig / StreamProperties /
+│   │                 TraceProperties（原 AdvisorProperties）/ VectorStoreConfig /
 │   │                 VectorStoreProperties / VectorStoreDataSourceProperties /
-│   │                 ChunkingProperties / IngestProperties / RagConfig / AdvisorProperties
-│   ├── controller/   ChatController / HealthController
-│   ├── dto/          ChatRequest / ChatResponse
-│   ├── advisor/      AdvisorOrders（顺序唯一出处）/ PromptTraceAdvisor / PromptLogFormat /
-│   │                 MemoryReadAdvisor / MemoryWritebackAdvisor /
-│   │                 RagRetrievalAdvisor / PromptAssemblyAdvisor /
-│   │                 PromptFragmentKeys（context key，与使用者同包）
-│   ├── security/     Role / UserContext / UserTokenResolver / UserContextInterceptor   ← 本轮新增
-│   ├── retrieval/    检索侧领域：RetrievedChunk / RelevanceBand / RetrievalFilterBuilder ← 本轮新增
+│   │                 ChunkingProperties / IngestProperties / RagConfig / PromptProperties
+│   ├── controller/   ChatController（3 个端点）/ HealthController
+│   ├── dto/          ChatRequest / ChatResponse（含 reasoning）
+│   ├── security/     Role / UserContext / UserTokenResolver / UserContextInterceptor
+│   ├── retrieval/    检索侧领域：RetrievedChunk / RelevanceBand / RetrievalFilterBuilder
 │   ├── memory/       ConversationMemory 门面 + LayeredConversationMemory（组合两层）
 │   │                 ├── record/   记录层（权威·完整）：ConversationRecordStore + Mysql/File 实现
 │   │                 └── context/  上下文层（有损·可重建）：ConversationContextCache + Redis/NoOp 实现
-│   │                 共用：MemoryTrimmer / MessageCodec / TokenBudget / MemoryBudgets /
+│   │                 共用：MemoryTrimmer / MessageCodec / TokenBudget /
 │   │                       FailureCircuit / LayerStatus / 装配与守卫
+│   │                 ★ 阶段 8 删除：ChatMemoryAdapter、MemoryBudgets
 │   ├── document/     入库领域模型（AccessLevel / DocumentKind / DocumentMetadata /
 │   │                 SourceLoader / HashingSupport / IngestOutcome 等 9 个）
 │   ├── document/chunking/  TextChunker + 三策略 + ChunkingSupport + ChunkingDispatch
-│   ├── app/          ChatAppService / KnowledgeRetrievalService / DocumentIngestService /
-│   │                 BatchIngestReport
-│   ├── stream/       StreamEventType / SseSupport
-│   └── observability/ StartupProbe
+│   ├── app/          ★ AgentPipeline（唯一编排者）/ PromptBuilder（唯一拼装者）/
+│   │                 PipelineEvent（sealed 契约）/ PromptLogFormat /
+│   │                 ChatAppService（两条入口）/ KnowledgeRetrievalService /
+│   │                 DocumentIngestService / BatchIngestReport
+│   │                 ★ 阶段 8 删除：整个 advisor/ 包（8 个类）
+│   ├── stream/       StreamEventType（含 REASONING）/ SseSupport
+│   └── observability/ StartupProbe（含框架 ChatMemory 启动自检）
 ├── src/main/resources/prompts/rag-answer-prompt.md   ← 5 条回答约束（缺失即启动失败）
-└── src/test/java/com/hagent/       ← 239 个用例，26 个测试类
+└── src/test/java/com/hagent/       ← 234 个用例，25 个测试类
                                        （另有 1 个抽象契约类 ConversationMemoryContractTest，
                                          由 3 个组合子类继承，本身不出现在报告里）
 ```
@@ -831,12 +854,19 @@ Hagent/
 ```
 读 docs/HANDOFF.md 和 docs/WORKING-AGREEMENT.md。
 
-当前状态：阶段 7 已提交（468413e，239 用例全绿）；
-★ 阶段 8 的设计已拍板、尚未动代码 —— 请从 §七 优先级 1【阶段 8 启动包】开始。
+当前状态：阶段 8 已完成（advisor 链 → AgentPipeline，234 用例全绿，已提交）；
+★ 下一步是**阶段 9：工具调用与多步 Agent**。
 
-先做那里的三步核实（① a/b/c，不写代码），再按顺序 ②→⑦ 动手（先立后破：新路径跑通之后才删旧的）。
+阶段 9 的第一件事（已写进 §七 优先级 1）：
+  ★ 读参考实现里 .toolcall() 的【真实签名】—— 协议第 3 条：不凭记忆写。
 
-另：§七 优先级 1 末尾有【阶段 7 的 4 项人工验收】还没跑 —— 不阻塞阶段 8，但别丢。
+已定的前提（不要再重新论证）：
+  · 工具循环由 AgentPipeline 自己驱动（阶段 8 起管线直连 ChatModel，
+    框架 ToolCallingAdvisor 不再参与 → "怎么关掉框架自动注册"这个问题不存在）
+  · ModelOutput 是 sealed：加 ToolCall / ToolResult 是【新增变体、不改已有代码】
+  · "不可逆操作需要确认"做在【工具执行层】（代码级强制），不靠模型自述
+
+另：§七 优先级 1 末尾有【阶段 7 的 4 项人工验收】还没跑 —— 不阻塞阶段 9，但别丢。
 ```
 
 **记住三件最容易被违反的事**：

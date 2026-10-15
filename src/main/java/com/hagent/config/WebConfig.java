@@ -94,7 +94,17 @@ public class WebConfig implements WebMvcConfigurer {
      * 身份解析拦截器 Bean。
      *
      * <p>声明成 Bean（而不是在 {@link #addInterceptors} 里内联 new）是为了
-     * 可以在别处按类型引用它 —— 与 {@code AiConfig} 把切面声明成 Bean 的理由一致。
+     * 可以在别处按类型引用它（比如在测试里直接拿到同一个实例）。
+     *
+     * <p><b>★ 它与 {@code AgentPipeline} 不在同一层，不要互相替代</b>：
+     * <ul>
+     *   <li>身份解析属于 <b>HTTP 层</b>：每个请求进来解析一次，
+     *       与"这次要不要调模型"完全无关；</li>
+     *   <li>{@code AgentPipeline} 属于<b>模型调用层</b>：它管的是"一次对话怎么编排"，
+     *       只在真正走到对话链路时才被调用。</li>
+     * </ul>
+     * 两者的粒度不同（一个是<b>请求级</b>，一个是<b>对话级</b>），
+     * 所以既不能用拦截器代替管线里的步骤，也不能指望管线去承担所有 HTTP 请求的身份解析。
      */
     @Bean
     public UserContextInterceptor identityInterceptor() {
@@ -112,8 +122,14 @@ public class WebConfig implements WebMvcConfigurer {
      *
      * <p>按 URL 模式注册的好处正在于此：将来新增 {@code /knowledge/**}、
      * {@code /workflow/**} 时，<b>只需在这里加一条 pattern</b>，
-     * 解析逻辑与 Controller 一行都不改。这也是"身份解析该留在 HTTP 层"
-     * 相对于"做成切面"的一个具体优势 —— 切面只能覆盖走 ChatClient 的路径。
+     * 解析逻辑与 Controller 一行都不改。这也是"身份解析该留在 HTTP 层"的具体优势：
+     * <b>拦截器覆盖所有注册过的 HTTP 请求</b>（含将来新增的端点），
+     * 而 {@code AgentPipeline} <b>只在对话链路里被调用</b> ——
+     * 它只认"有人要来对话"，不认"请求打到了哪个 URL"。
+     *
+     * <p><b>★ 顺序上的一条硬要求</b>：身份解析失败必须在<b>进入管线之前</b>发生。
+     * 若把这件事推给管线，就变成"HTTP 层的鉴权问题被塞进模型调用层"，
+     * 而且<b>只有走对话链路的端点才会被检查到</b> —— 将来新增的端点会悄悄绕过它。
      *
      * <h3>★ 这里不做"未认证就拒绝"</h3>
      *

@@ -37,13 +37,15 @@ public record TokenBudget(int maxTokens, int maxMessages) {
         }
     }
 
-    /** 会话模式：短、交互频繁，预算小。 */
-    public static TokenBudget conversation(int maxTokens, int maxMessages) {
-        return new TokenBudget(maxTokens, maxMessages);
-    }
-
-    /** 工作流 / Agent 模式：长、多步，预算大。 */
-    public static TokenBudget workflow(int maxTokens, int maxMessages) {
-        return new TokenBudget(maxTokens, maxMessages);
-    }
+    // ========================================================================
+    // ⚠️ 阶段 8 删除了两个静态工厂：conversation(...) 与 workflow(...)
+    //
+    //   删除理由（协议第 7 条）：全仓【零调用方】—— 生产代码与测试都直接用
+    //   new TokenBudget(...)。而且它们的名字把 conversation / workflow
+    //   写死成方法名，与 MemoryMode 的取值术语构成一对需要手工同步的字典
+    //   （协议第 12 条规则 2：同一概念只允许一个名字）。
+    //
+    //   "预算来自哪个模式"这件事的唯一出处是 AgentPipeline#budgetOf 的穷尽 switch ——
+    //   那里新增模式会【编译失败】，而工厂方法做不到这一点。
+    // ========================================================================
 }

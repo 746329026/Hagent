@@ -1,15 +1,34 @@
 package com.hagent.memory;
 
-import org.springframework.ai.chat.memory.ChatMemory;
-
 /**
  * 记忆的<b>使用模式</b> —— 决定"本次调用愿意为历史付出多少预算"。
+ *
+ * <h2>★ 只有两种模式，且"agent"不是其中一种（命名约定）</h2>
+ *
+ * <pre>
+ *   CHAT      一次问答：交互频繁、用户在意响应速度、历史通常很短
+ *   WORKFLOW  多步循环：每一步的工具返回（可能是一整篇文档）都会成为下一轮输入
+ * </pre>
+ *
+ * <p>★ <b>"agent"不是一个模式</b>：agent = harness + model ——
+ * 本项目后端是 harness，DeepSeek 是 model，两者合起来才叫 agent。
+ * 所以模式只有 chat 与 workflow 两种，没有"agent 模式"
+ * （见 {@code WORKING-AGREEMENT} 第 12 条的术语表）。
+ *
+ * <p>⚠️ <b>待办</b>：枚举值 {@code CONVERSATION} 与配置键里的 {@code chat} 用词不一致
+ * （配置前缀已是 {@code hagent.memory.chat.*}，枚举值却叫 {@code CONVERSATION}）。
+ * 本人已同意<b>单独做这笔改名</b>，不混进阶段 8 的结构重构 ——
+ * 因为阶段 8 本身已有大量变更，再混入配置键改名，出问题时
+ * <b>分不清是新结构还是改名引起的</b>。改的时候必须同步四处：
+ * 枚举值 + {@code MemoryProperties} 的 {@code conversationMax*} 字段 +
+ * {@code application.yml} 的 {@code conversation-max-*} 两个键 +
+ * {@code AgentPipeline#budgetOf} 的穷尽 switch。
  *
  * <h2>★ 为什么需要这个枚举（一段设计修正的记录）</h2>
  *
  * <p>最初 {@code MemoryProperties} 里有两套预算（会话 5000 / 工作流 50000），
  * 但当时那个记忆切面（{@code ConversationMemoryAdvisor}，<b>已在阶段 6 后半拆成
- * {@code MemoryReadAdvisor} + {@code MemoryWritebackAdvisor}</b>）里的预算选择方法是这么写的：
+ * 读 / 写两个切面，又在阶段 8 整体并入 {@code AgentPipeline}</b>）里的预算选择方法是这么写的：
  * <pre>
  *   private TokenBudget budgetFor(Prompt prompt) {
  *       return conversationBudget;   // ← 永远返回会话预算
@@ -21,25 +40,25 @@ import org.springframework.ai.chat.memory.ChatMemory;
  * 等于把"我描述了它"当成了"我做了它"。这正是本项目反复在防的那类问题。
  *
  * <p><b>本枚举就是那个缺失的机制</b>：模式不再是"靠猜"或"埋在实现里"，
- * 而是<b>调用方显式声明、经 context 传递</b>的一个有类型的概念。
+ * 而是<b>调用方显式声明、经方法参数传递</b>的一个有类型的概念。
  *
- * <h2>为什么模式属于"记忆"这个包，而不是"app"或"advisor"包</h2>
+ * <h2>为什么模式属于"记忆"这个包</h2>
  *
- * <p>因为它的唯一作用是<b>选择记忆预算</b>。放在 app 包会让 app 层依赖 advisor 的细节；
- * 放在 advisor 包会让 app 层依赖切面。放在 memory 包 ——
+ * <p>因为它的唯一作用是<b>选择记忆预算</b>。放在 app 包会让 app 层依赖记忆的细节；
+ * 放在别的领域包会让调用方绕远路。放在 memory 包 ——
  * 它和 {@link TokenBudget}、{@link ConversationMemory} 在一起，
  * 是"记忆"这件事的一部分，谁都能引用而不产生循环依赖。
  *
  * <h2>当前实现状态（诚实声明）</h2>
  *
- * <p>阶段 6 只有 {@link #CONVERSATION} 被真正使用 ——
- * {@link #WORKFLOW} 的常量、默认值与整条传参通道都已就位，
+ * <p>阶段 8 仍然只有 {@link #CONVERSATION} 被真正使用（{@code ChatController} 显式传它）——
+ * {@link #WORKFLOW} 的常量与整条传参通道都已就位，
  * 但<b>工作流引擎尚未实现</b>（阶段 9），所以暂时没有任何调用方会传它。
  *
  * <p>这与"配了没人读"有本质区别，但<b>也还没到"已验证"</b>：
  * <pre>
  *   修正前：workflowBudget 字段被赋值 → 无任何代码读它    → 配置无效（真 bug）
- *   修正后：传参通道打通、有默认值、有类型校验与告警      → 通道可用，但【尚无真实调用方】
+ *   修正后：传参通道打通、有默认值、有编译期穷尽检查      → 通道可用，但【尚无真实调用方】
  *   待办  ：阶段 9 工作流引擎落地后，用一个真实调用把它跑通
  * </pre>
  * 也就是说，{@link #WORKFLOW} 目前是一个<b>已接好线、但还没通电的开关</b>。
@@ -47,27 +66,17 @@ import org.springframework.ai.chat.memory.ChatMemory;
  *
  * <h2>阶段 9 要做的标记（留给后续接手）</h2>
  *
- * <p>届时需要改的地方<b>只有 app 层一处</b>：
+ * <p>届时需要改的地方<b>只有 Controller 两处</b>：
  * <pre>
- *   // ChatAppService（同步路径）与 streamWithServerSentEvent（主力流式路径）
- *   .advisors(a -&gt; a.param(MemoryMode.CONTEXT_KEY, MemoryMode.WORKFLOW))
- *                                         ^^^^^^^^^^^^^^^^^^^^^^^ 改这里
+ *   chatAppService.stream(..., MemoryMode.WORKFLOW, ...)
+ *   chatAppService.chat(..., MemoryMode.WORKFLOW, ...)   ← 或新增的工作流入口
  * </pre>
- * <b>切面、适配器、三个存储实现都不需要改</b> —— 它们只认
- * {@link #CONTEXT_KEY} 与预算表，不关心谁在调用。
+ * <b>{@code AgentPipeline}、记忆三层、三个存储实现都不需要改</b> ——
+ * 它们只认 {@code MemoryMode} 与预算表，不关心谁在调用。
  *
  * <p>另外阶段 9 要一并确认：工作流模式下<b>预算取 50000 token 是否够</b>
  * （多步循环里每一轮的工具返回都可能是一整篇文档）；
- * 若不够，改的是 {@code application.yml} 里的 {@code workflow-max-tokens}，
- * <b>不是代码</b>。
- *
- * <h2>★ 上下文 key 的命名</h2>
- *
- * <p>{@link #CONTEXT_KEY} 的取值刻意模仿框架常量
- * {@link ChatMemory#CONVERSATION_ID}（{@code "chat_memory_conversation_id"}）的风格：
- * 全小写 + 下划线 + 带 {@code hagent_} 前缀。
- * 加前缀是为了<b>避免与框架将来新增的 key 撞名</b>——
- * context 是一个扁平的 {@code Map<String,Object>}，撞名会导致<b>静默覆盖</b>。
+ * 若不够，改的是 {@code application.yml} 里的 {@code workflow-max-tokens}，<b>不是代码</b>。
  */
 public enum MemoryMode {
 
@@ -80,31 +89,38 @@ public enum MemoryMode {
     CONVERSATION,
 
     /**
-     * 工作流 / Agent 模式 —— 多步循环。
+     * 工作流模式 —— 多步循环。
      *
      * <p>特征：每一步的工具返回（可能是一整篇文档）都会成为下一轮输入，
      * 所以预算要比会话模式大一个数量级。
      * 预算取值见 {@code hagent.memory.chat.workflow-max-*}。
      *
-     * <p>⚠️ 阶段 6 尚未有调用方传这个值（工作流引擎在阶段 9）。
+     * <p>⚠️ 阶段 8 尚未有调用方传这个值（工作流引擎在阶段 9）。
      */
     WORKFLOW;
-
-    /**
-     * 放进 {@code ChatClientRequest.context()} 的 key。
-     *
-     * <p>用法：{@code .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.WORKFLOW))}
-     *
-     * <p>取值不带默认值语义 —— 取不到时由 {@code MemoryReadAdvisor}
-     * 落到 {@link #CONVERSATION}（更保守、更省成本）。
-     */
-    public static final String CONTEXT_KEY = "hagent_memory_mode";
 
     /**
      * 取不到模式标记时使用的默认值。
      *
      * <p>为什么默认会话模式而不是工作流：两者预算差 10 倍，
      * 猜错的方向必须是"更省"的那一边 —— 猜大了会白烧 token，猜小了只是历史短一点。
+     *
+     * <p>阶段 8 起它的使用者是 {@code AgentPipeline#run}（参数为 null 时兜底）。
      */
     public static final MemoryMode DEFAULT = CONVERSATION;
+
+    // ========================================================================
+    // ⚠️ 阶段 8 删除了 CONTEXT_KEY（原值 "hagent_memory_mode"）
+    //
+    //   它曾是"模式经 ChatClientRequest.context 传递"这个机制的 key。
+    //   pipeline 没有 context，模式改为 run(..., mode, ...) 的【方法参数】——
+    //   于是这个 key 失去了传递通道，且"拼错 key 不报错"这个风险也一起消失。
+    //
+    //   留下的教训（值得记住）：它当时模仿框架常量 ChatMemory.CONVERSATION_ID
+    //   的命名风格（全小写 + 下划线 + hagent_ 前缀），理由是"避免与框架 key 撞名"。
+    //   那条理由只在"必须往一个扁平 Map 里塞东西"时成立 ——
+    //   换成方法参数后，"撞名"这个问题根本不存在。
+    //   ⇒ 为绕开某个机制的限制而做的命名/结构妥协，会随那个机制一起消失，
+    //     所以别把它当成永久约定传下去。
+    // ========================================================================
 }

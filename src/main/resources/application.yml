@@ -153,7 +153,7 @@ hagent:
 
     # ---------- 检索链路（阶段6 后半）----------
     retrieval:
-      # 关掉后 RagRetrievalAdvisor 不产片段，链路其余部分照常工作。
+      # 关掉后 AgentPipeline 的第 ③ 步不产片段，链路其余部分照常工作。
       # 用途：排查"回答质量问题是检索的锅还是模型的锅"时，把检索整段摘掉做对照。
       enabled: true
 
@@ -211,16 +211,18 @@ hagent:
       thread-name-prefix: "hagent-agent-"
       await-termination-seconds: 30
 
-  advisor:
-    trace:
-      # 调用链日志切面。关掉可让日志安静（排查特定问题时有用）
-      enabled: true
-      # 单条日志的文本上限。为什么必须截断：一次 RAG 调用可能带几千字检索结果，
-      # 全量打进 INFO 会让日志暴涨，并把用户输入与内部文档内容写进日志（隐私风险）。
-      # 500 够看清 prompt 拼得对不对，又不至于让单条日志过长。
-      max-log-length: 500
-      # 需要看全文时临时改 true（属排查手段，不是常态）
-      log-full-content: false
+  # 调用链日志（阶段 8 起前缀由 hagent.advisor.trace 改为 hagent.trace）。
+  # 改名的理由：advisor 链已换成 AgentPipeline，"advisor"这个词在项目里不再存在 ——
+  # 配置键指向一个已删除的概念，会让后来者去搜 Advisor 类、然后搜不到（协议第 12 条规则 1）。
+  trace:
+    # 调用链日志开关。关掉可让日志安静（排查特定问题时有用）
+    enabled: true
+    # 单条日志的文本上限。为什么必须截断：一次 RAG 调用可能带几千字检索结果，
+    # 全量打进 INFO 会让日志暴涨，并把用户输入与内部文档内容写进日志（隐私风险）。
+    # 500 够看清 prompt 拼得对不对，又不至于让单条日志过长。
+    max-log-length: 500
+    # 需要看全文时临时改 true（属排查手段，不是常态）
+    log-full-content: false
 
   stream:
     # SSE 连接的服务端超时。SseEmitter 默认 30 秒，而多步 Agent / RAG 检索会远超它，

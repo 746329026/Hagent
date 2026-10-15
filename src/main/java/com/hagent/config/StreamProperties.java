@@ -8,7 +8,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 流式（SSE）相关配置项，绑定 {@code hagent.stream.*}。
  *
  * <p>为什么单独建一个类而不是塞进其它 Properties：这些参数服务的是"流式通道本身"
- * （超时、重连间隔、心跳），与切面、Web、模型都无关。
+ * （超时、重连间隔、心跳），与管线（{@code AgentPipeline}）、Web 层、模型都无关。
  * 按职责归位，避免出现"某个参数放在一个语义不相关的地方"这种隐性混乱。
  */
 @Getter

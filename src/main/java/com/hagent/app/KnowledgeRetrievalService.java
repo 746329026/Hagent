@@ -18,10 +18,13 @@ import java.util.List;
  *
  * <h2>★ 它产出什么、谁消费（协议第 7 条要求的答案）</h2>
  *
- * <p>产出 {@code List<RetrievedChunk>}；消费者是 {@code RagRetrievalAdvisor}，
- * 它把结果放进 {@code request.context()}，再由 {@code PromptAssemblyAdvisor}
- * 拼进 prompt。<b>本类不接触 prompt、不接触 request context</b> ——
- * 它是纯函数式的一步："检索"，不含编排。
+ * <p>产出 {@code List<RetrievedChunk>}；消费者是 {@code AgentPipeline} 的第③步，
+ * 它把结果交给 {@code PromptBuilder} 拼进 prompt。
+ * <b>注意这三者的分工</b>：{@code AgentPipeline} 本身<b>不接触 prompt</b>
+ * （它只按固定顺序调度，"重建消息列表"这件事全在 {@code PromptBuilder} 里；
+ * 片段是作为方法参数传过去的，不再经过任何 {@code context}）——
+ * 而<b>本类不接触 prompt、不参与编排</b>，
+ * 它是纯函数式的一步："检索"。
  *
  * <h2>★ 检索失败为什么降级而不是抛出</h2>
  *
@@ -32,7 +35,9 @@ import java.util.List;
  * "知识库中没有相关内容时明确说未找到"。
  *
  * <p>但<b>必须记 ERROR</b>：否则就是"静默地没有知识库"，
- * 用户无感、运维也查不到。这一点与 {@code MemoryWritebackAdvisor} 的容错处理一致。
+ * 用户无感、运维也查不到。这一点与 {@code AgentPipeline#writeBack} 的容错处理一致 ——
+ * 写回失败同样是"降级但不静默"：只记 ERROR、不向上抛（失败分级在
+ * {@code LayeredConversationMemory} 里，见该类的说明）。
  *
  * <h2>★ "检索失败"与"检索没命中"必须能区分</h2>
  *
@@ -45,11 +50,16 @@ import java.util.List;
  *
  * <h2>★ 单次调用，不含幂等</h2>
  *
- * <p>本类<b>没有</b>做"重复调用时跳过"的处理 —— 因为按当前切面顺序，
- * {@code RagRetrievalAdvisor} 位于 {@code ToolCallingAdvisor}（{@code MIN+300}）
- * 的<b>外侧</b>，一次请求只会进到这里一次。幂等的那道保险在 advisor 里
- * （靠 context 中的片段键判断），见该切面注释中的说明。
+ * <p>阶段 8 之后管道是一条<b>直线</b>（顺序就是 {@code AgentPipeline#run} 的代码行序），
+ * 检索是其中的第③步：一次请求只执行一次，物理上不可能重复。
+ * 所以本类<b>不做</b>"重复调用时跳过"的处理 ——
  * 把幂等做在服务里会掩盖"调用位置错了"这件事。
+ *
+ * <p>原先 advisor 里那道"context 中已有片段就跳过"的检查，
+ * 已随 {@code ChatClientRequest.context()} 这套机制一起删除：
+ * 它防的前提是"切面会被框架的工具循环跑 N 次"，而直连 {@code ChatModel} 之后
+ * 这个前提<b>失去了对象</b>（工具循环将来由管道自己驱动，
+ * 那时的重复调用会是我们显式写出来的，不再需要一个防御性检查去兜）。
  */
 @Slf4j
 @Service

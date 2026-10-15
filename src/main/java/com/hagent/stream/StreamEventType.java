@@ -28,8 +28,25 @@ package com.hagent.stream;
  */
 public final class StreamEventType {
 
-    /** 模型逐片输出的文字。 */
+    /** 模型逐片输出的文字（回答正文）。 */
     public static final String MESSAGE = "message";
+
+    /**
+     * 模型的<b>思考过程</b>逐片输出（阶段 8 新增，DeepSeek 的 {@code reasoningContent}）。
+     *
+     * <p><b>为什么它是独立的事件名而不是混进 {@code message}</b>：
+     * 前端要把"思考区"与"回答区"渲染成两块不同的内容，语义也不同 ——
+     * 思考是过程，回答是结果。混在一个事件里，前端只能靠内容猜边界。
+     *
+     * <p>实测模型的输出是<b>严格两段式</b>：先一串只有思考的片，再一串只有回答的片，
+     * 两段<b>完全互斥</b>（思考段正文恒为 null，回答段思考恒为 null）。
+     * 所以前端只要在收到第一个 {@code message} 时收起思考区即可。
+     *
+     * <p>⚠️ 它与 {@code message} 有一处<b>不对称</b>：思考内容<b>可能整体缺失</b>
+     * （它是模型提供方的独有字段，换掉 DeepSeek 就取不到），
+     * 而回答正文不会。前端不应假定一定会收到它。
+     */
+    public static final String REASONING = "reasoning";
 
     /** 正常结束信号。 */
     public static final String DONE = "done";

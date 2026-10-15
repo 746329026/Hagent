@@ -11,9 +11,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 这里的"环境差异"是真实存在的 —— 排查"回答质量问题是检索的锅还是提示词的锅"时，
  * 需要一个开关把约束整段换掉（或摘掉），而不是改代码重新编译。
  *
- * <p>放在 {@code prompt} 包而不是 {@code config} 包：与
- * {@code com.hagent.memory.MemoryProperties} 的做法一致 ——
- * 配置类跟着它所属的领域走，而不是全都堆在 config 包。
+ * <p>★ 包归属（原文写错了，本轮核对源码时发现并修正）：本类<b>在 {@code config} 包</b>。
+ * 原文写着"放在 {@code prompt} 包而不是 {@code config} 包"，而那个包<b>并不存在</b> ——
+ * 这正对应协议第 12 条规则 4（名字/注释不得撒谎）：注释描述了一个不存在的结构。
+ * 实际的判据是协议第 12 条规则 5：{@code *Properties} 这一类有既定归属 {@code config}
+ * （实测本项目 7/10 的 Properties 都在这里），所以跟种类走，不跟领域走。
  */
 @Getter
 @Setter

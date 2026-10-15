@@ -13,7 +13,8 @@ import java.util.List;
  * <ul>
  *   <li><b>不是长期记忆</b>。跨会话沉淀的事实与偏好属于长期记忆（阶段 12，
  *       用 `.md` + 索引，由<b>模型自主</b>决定写什么）。
- *       两者的区别是：会话记忆由框架自动存取，长期记忆由模型通过工具读写。</li>
+ *       两者的区别是：会话记忆由对话管线自动存取（每轮的②读 / ⑦写，
+ *       <b>模型不参与决定</b>），长期记忆由模型通过工具读写。</li>
  *   <li><b>不做摘要</b>。摘要是"有损派生数据"，会破坏可审计性；
  *       真要做，也应作为派生数据存在权威存储里（详见设计讨论），而不是在这里。</li>
  * </ul>
@@ -22,13 +23,20 @@ import java.util.List;
  * 框架的 {@code ChatMemory} 只有 {@code add / get / clear} 三个方法，
  * <b>没有预算概念、没有删除语义</b>。
  * 把预算藏在实现内部会让"这次带多少历史"在调用点不可见，成本也就不可控。
- * 所以这里定义带预算的接口，再由
- * {@link ChatMemoryAdapter} 适配到框架的 {@code ChatMemory} 上。
+ * 本接口因此承载"<b>带预算的读取</b>"这个设计：{@link #load(String, TokenBudget)}
+ * 收一个 {@link TokenBudget}，"这次愿意为历史付多少"在调用点就是显式的。
+ *
+ * <p><b>★ 框架的 {@code ChatMemory} 本项目不再使用</b>（阶段 8 起）：
+ * 管线直连 {@code ChatModel}，框架边界的适配路径（{@code ChatMemoryAdapter}）
+ * 已随之删除；同时 {@code StartupProbe} 有一条<b>启动自检</b> ——
+ * Bean 创建期发现容器里存在框架的 {@code ChatMemory}（纯堆内存、无 token 预算）
+ * 就直接失败。理由是那种实现"看起来能用、实际不能用"：
+ * 一旦有人接回框架记忆路径，历史会悄悄进堆内存，<b>重启即丢且不报错</b>。
  *
  * <p><b>★ 阶段 7 起：它是"门面"，背后是两层，不是三种可切换的实现</b>
  * （阶段 5 的"一个 type 三选一"已被取代，见 {@link MemoryProperties} 的类注释）：
  * <pre>
- *   ConversationMemory（本接口 —— 切面唯一依赖的抽象，形状不变）
+ *   ConversationMemory（本接口 —— {@code AgentPipeline} 唯一依赖的记忆抽象，形状不变）
  *        └── {@link LayeredConversationMemory}（唯一实现：组合两层 + 时序 + 失败分级 + 熔断）
  *                ├── {@link com.hagent.memory.record.ConversationRecordStore}
  *                │      【记录层】用户可见的对话记录：权威·完整·永久（mysql | file）
@@ -42,8 +50,11 @@ import java.util.List;
  * 把它们做成"同一份数据的两种存法"，会导出一个<b>命中率≈0</b>的无意义策略：
  * 会话历史是 1 读 : 1 写、且写的正是读的那份，"写库后删缓存"会让每轮读都 miss。
  *
- * <p><b>为什么接口形状不变</b>：切面（`MemoryReadAdvisor` / `MemoryWritebackAdvisor`）
- * 与 {@link ChatMemoryAdapter} 依赖的都是本接口，因此这次结构改动对它们<b>零影响</b>。
+ * <p><b>为什么接口形状不变</b>：{@code AgentPipeline} 依赖本接口 ——
+ * 读在第②步、写在第⑦步，且除此之外不碰任何一层实现，
+ * 因此记忆两层的实现可以自由替换而不影响管线：
+ * 换 mysql / file（记录层）或 redis / none（上下文层）只改配置，
+ * 管线里的调用一行都不用动。
  *
  * <h2>★ 命名约定（三个接口一起看才完整）</h2>
  *

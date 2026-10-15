@@ -30,7 +30,7 @@ import java.nio.charset.StandardCharsets;
  * <h2>★ 阶段 6 后半新增：回答约束资源 Bean</h2>
  *
  * <p>检索链路的组件（{@code KnowledgeRetrievalService}、{@code RetrievalFilterBuilder}、
- * 各切面）都是 {@code @Component} / {@code @Service}，由组件扫描发现。
+ * {@code AgentPipeline}）都是 {@code @Component} / {@code @Service}，由组件扫描发现。
  * 唯一需要在这里显式声明的是<b>回答约束提示词</b>——因为它来自类路径资源，
  * 需要一个"存在性检查"的落点。
  */
@@ -61,8 +61,12 @@ public class RagConfig {
      * <h3>★ 为什么读一次就够（内容在这里读进来之后就不再读盘）</h3>
      *
      * <p>本 Bean 只做"存在性 + UTF-8 可读性"的验证，并把<b>校验过的路径</b>
-     * 对应的 {@link Resource} 交给 {@code PromptAssemblyAdvisor}，
-     * 由后者在构造时读入正文。这里不缓存正文，避免"两份正文"。
+     * 对应的 {@link Resource} 交给 {@code PromptBuilder}，由<b>它</b>在构造时读入正文
+     * （接线方式：{@code AgentPipeline} 在自己的构造器里 new 出 {@code PromptBuilder}，
+     * 本 Bean 就是这个构造参数）。这里不缓存正文，避免"两份正文" ——
+     * 这个理由现在依然成立：一旦这里也留一份，"资源 Bean 里那份"与
+     * "PromptBuilder 里那份"就会各自演化，而<b>哪一份才是模型真正收到的</b>
+     * 将无法从代码上看出来。
      *
      * <h3>★ 为什么用注入的 {@link ResourceLoader} 而不是 {@code new DefaultResourceLoader()}</h3>
      *

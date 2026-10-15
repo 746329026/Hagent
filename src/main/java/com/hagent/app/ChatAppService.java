@@ -7,325 +7,248 @@ import com.hagent.security.UserContext;
 import com.hagent.stream.StreamEventType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 对话应用服务 —— app 层。
+ * 对话应用服务 —— app 层，<b>对外只有两条入口</b>。
  *
- * <p><b>它现在很薄，但它的存在已经有明确价值</b>：
- * Controller 依赖的是本类，而不是直接依赖 {@link ChatClient}。
- * 于是当阶段 9 把这里从"一次模型调用"升级成"多步 Agent 循环"时，
- * <b>Controller 一行都不用改</b>。
+ * <pre>
+ *   {@link #chat}    阻塞：/chat          —— 拿完整结果（带思考）
+ *   {@link #stream}  流式：/stream-sse     —— 逐事件推送（SSE）
+ * </pre>
  *
- * <p><b>同步与流式的关系</b>：本类同时提供 {@link #chat} 与 {@link #stream}，
- * 两者共享同一个 ChatClient，只是调用的方法不同（{@code .call()} vs {@code .stream()}）。
- * 这正好验证了之前的结论：同步与流式是"同一能力的不同返回方式"，
- * 差异只在返回路径，不在业务逻辑。
+ * <p><b>两条入口消费的是同一份事件流</b>（{@code AgentPipeline.run(...)}）——
+ * 这是把管道做成"一条事件流"而不是两个方法的直接收益：
+ * 读历史 / 检索 / 拼装 / 累积<b>只有一份实现</b>，不会各自演化出差异。
+ *
+ * <h2>★ 阶段 8 移除了什么（以及为什么不再需要）</h2>
+ *
+ * <p>原先有三条流式路径，用于对比三种流式机制：
+ * <pre>
+ *   方式一 /stream        手动驱动（我们 send / 我们 complete）
+ *   方式二 /stream-flux   框架驱动（返回 Flux，Spring 自己推）
+ *   方式三 /stream-sse    手动驱动 + 完整事件字段（id / retry）  ← 保留
+ * </pre>
+ * 方式一/二的定位是"<b>机制对照实验</b>"，而阶段 8 起只有一条产品路径需要维护。
+ * 保留对照实验的代价是：三条路径各自一套错误处理与生命周期管理，
+ * 而它们的差异早已被记录进文档（那才是对照实验的真正产出）。
+ * <b>代码不承载历史，文档承载。</b>
+ *
+ * <p>随之删除的还有 {@code streamFailureCount}：它的注释写着"因为流式出错时我们用
+ * {@code complete()} 正常收尾，框架会把失败当成正常结束，所以失败次数要自己记"——
+ * 那是方式二独有的问题。现在错误通过事件流的 {@code onError} 统一处理，不需要这个计数器。
+ *
+ * <h2>★ 错误为什么不能在流内"静默收尾"</h2>
+ *
+ * <p>{@code SseEmitter} 的错误处理有一条真实的坑：不能用
+ * {@code emitter.completeWithError(error)} —— 它会把异常抛给 Spring 的异步处理链路，
+ * 最终落到全局异常处理器，而处理器想返回 JSON，可响应的 Content-Type 早已被锁成
+ * {@code text/event-stream}，于是报
+ * {@code HttpMessageNotWritableException: No converter for [BaseResponse]}。
+ *
+ * <p>所以本类用三路并行把它补回来（见 {@link #handleStreamError}）：
+ * 推 error 事件给前端 + 记完整堆栈给运维 + {@code complete()} 给框架。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ChatAppService {
 
-    private final ChatClient chatClient;
+    /** 模型调用的编排者 —— 阶段 8 起不再注入 {@code ChatClient}（管道直连 {@code ChatModel}）。 */
+    private final AgentPipeline agentPipeline;
 
-    /**
-     * 流式相关参数（超时 / 重连间隔 / 心跳）。
-     * 通过构造器注入（`@RequiredArgsConstructor` 只收 final 字段）。
-     */
+    /** 流式相关参数（超时 / 重连间隔 / 心跳）。 */
     private final StreamProperties streamProperties;
 
-    /**
-     * 流式失败计数器。
-     *
-     * <p>为什么需要它：因为流式出错时我们用 {@code complete()} 正常收尾（而不是
-     * {@code completeWithError}），<b>框架会把这次失败当成"正常结束"</b>，
-     * 于是它自带的成功率统计不可信。所以失败次数必须自己显式记录。
-     *
-     * <p>后续接入可观测性（Micrometer）时，把这个 AtomicLong 换成 Counter 即可。
-     * 这是"用显式替代隐式"：既然框架不认，就自己记。
-     */
-    private final AtomicLong streamFailureCount = new AtomicLong();
+    // ========================================================================
+    // 入口一：阻塞式
+    // ========================================================================
 
     /**
-     * 同步对话：把用户消息发给模型，返回回复文本。
+     * 同步对话：把用户消息发给模型，返回<b>完整回复 + 思考过程</b>。
      *
-     * <p><b>★ 阶段 6 起带会话记忆</b>：{@code conversationId} 通过
-     * {@code advisors(...)} 放进<b>请求 context</b>（不是 prompt）——
-     * 会话记忆切面会从 context 取出它，加载历史并注入 prompt。
+     * <p><b>★ 阶段 8 起带思考</b>：流式路径可以把思考逐片推给前端，
+     * 但<b>刷新页面后思考就永久丢了</b> —— 会话记忆只存"问 + 最终答"（决策 32）。
+     * 阻塞路径带上它，前端回看历史时才能显示思考区。
      *
-     * <p>为什么会话 ID 不进 prompt：它是<b>系统元数据</b>，模型不需要它；
-     * 而且 prompt 文本会发给模型提供方，context 不会离开我们的进程。
+     * <h3>★ 三个"请求级参数"怎么走下去</h3>
      *
-     * <p><b>★ 为什么模式标记也在这里声明</b>：
-     * 只有 app 层知道"本次调用属于哪种场景"。切面（advisor）拿不到这个信息，
-     * 若让它去猜，猜错的后果是<b>静默地少给或多给 10 倍预算</b>。
-     * 所以模式与 {@code conversationId} 一样，走 context 显式传递，
-     * 由 {@link MemoryMode} 承载类型。
-     * 阶段 9 的工作流引擎在这里改传 {@link MemoryMode#WORKFLOW} 即可，切面无需改动。
+     * <p>会话 ID、记忆模式、身份<b>都是 {@code AgentPipeline.run(...)} 的方法参数</b>，
+     * 不再是塞进 {@code ChatClientRequest.context} 的字符串 key ——
+     * 那套 key 约定随切面链一起删除（阶段 8）：
      *
-     * <p><b>★ 身份（{@code userContext}）为什么用方法参数传进来，而不是从别处取</b>：
-     * 身份的来源是 {@code UserContextInterceptor}（HTTP 层），
-     * 它把结果挂在请求属性上，由 Controller 用 {@code @RequestAttribute} 取出后
-     * <b>作为参数传到这里</b>。
      * <ul>
-     *   <li>不用 {@code ThreadLocal} 直取：本项目的流式接口是
-     *       {@code SseEmitter} + {@code Flux.subscribe()}，后续推送发生在 Reactor 线程上，
-     *       ThreadLocal 在那里会静默拿到 null；</li>
-     *   <li>用方法参数的好处是<b>编译期检查</b>：谁改了签名，所有调用点立刻编译失败。
-     *       切面内部读 context 时是运行期检查（key 拼错不报错），
-     *       所以"能编译期保证的那一段"要尽量留在编译期。</li>
+     *   <li><b>模式</b>由本层显式声明：这里固定传 {@link MemoryMode#CONVERSATION}。
+     *       只有 app 层知道"本次调用属于哪种场景"，管线拿不到这个信息；
+     *       若让它去猜，猜错的后果是<b>静默地少给或多给 10 倍预算</b>。
+     *       阶段 9 的工作流引擎在这里改传 {@link MemoryMode#WORKFLOW} 即可，管线无需改动；</li>
+     *   <li><b>身份</b>（{@code userContext}）的来源是 HTTP 层的
+     *       {@code UserContextInterceptor}，由 Controller 用 {@code @RequestAttribute}
+     *       取出后<b>作为参数传到这里</b>。
+     *       用方法参数的好处是<b>编译期检查</b>：谁改了签名，所有调用点立刻编译失败
+     *       —— 而旧实现在切面里按字符串 key 读 context，拼错不报错。
+     *       它最终的消费者是检索：由检索把许可等级翻成 SQL 条件，
+     *       让无权内容留在数据库里；</li>
+     *   <li><b>会话 ID</b> 仍然<b>不进 prompt</b>：它是<b>系统元数据</b>，模型不需要它；
+     *       而 prompt 文本会发给模型提供方，会话 ID 没有必要跟着走出去。
+     *       它只作为参数交给管线，用来读写会话记忆。</li>
      * </ul>
      *
-     * <p>它最终的消费者是 {@code RagRetrievalAdvisor}：由它把许可等级
-     * 翻成检索的 SQL 条件，让无权内容留在数据库里。
+     * <p><b>为什么复用 {@code sse-timeout-ms} 作为阻塞上限</b>：两者表达的是同一件事
+     * ——"愿意为一次模型回答等待多久"。新增一个没被验证过的配置键属于画蛇添足。
      *
      * @param message        已经过参数校验的用户消息（非空）
-     * @param conversationId 会话标识（由 Controller 生成或透传）
+     * @param conversationId 会话标识（由 Controller 生成或透传；空则落到管线的兜底值）
      * @param userContext    调用方身份（未认证时为 {@link UserContext#ANONYMOUS}）
-     * @return 模型回复
+     * @return 模型的完整回复：正文 + 思考过程
      */
     public ChatResponse chat(String message, String conversationId, UserContext userContext) {
-        String reply = chatClient.prompt()
-                .user(message)
-                // key 用框架常量 ChatMemory.CONVERSATION_ID，保持单一出处
-                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
-                // ★ 记忆模式也由 app 层显式声明，切面不去猜（见 MemoryMode 的类注释）
-                .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.CONVERSATION))
-                // ★ 身份：切面只能通过 context 拿到请求级数据（见方法注释）
-                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
-                .call()
-                .content();
-        return new ChatResponse(reply);
+        // 流是冷的：collectList 订阅时才真正发出请求。逻辑上最后一个事件必然是 Final。
+        List<PipelineEvent> events = agentPipeline
+                .run(message, conversationId, MemoryMode.CONVERSATION, userContext)
+                .collectList()
+                .block(Duration.ofMillis(streamProperties.getSseTimeoutMs()));
+
+        PipelineEvent.ModelOutput.Final last = finalOf(events);
+        if (last == null) {
+            // 走到这里说明 pipeline 的行为与契约不符（它一定产出 Final）。
+            // 明确抛异常而不是返回空串 —— 否则前端看到的是"模型没回答"，
+            // 而真正的原因（契约被破坏）被静默吞掉。
+            throw new IllegalStateException(
+                    "AgentPipeline 未产出 Final 事件（事件数="
+                            + (events == null ? "null" : String.valueOf(events.size()))
+                            + "）。这是管道契约被破坏，【不是】模型的问题。");
+        }
+        return new ChatResponse(last.text(), last.reasoning());
     }
 
     /**
-     * 流式对话：把模型逐片输出以 SSE 事件的形式推给前端。
+     * 从事件流里取出最后一个 {@link PipelineEvent.ModelOutput.Final}。
      *
-     * <p><b>用 SseEmitter 而不是直接返回 Flux</b>（阶段 1 的刻意选择）：
-     * SseEmitter 是"手动"的 —— 每个事件都清楚自己在推什么、何时结束，
-     * 最适合先理解流式机制。返回 Flux 的"框架自动推进"留给阶段 3 对比。
-     *
-     * <p><b>事件的完整生命周期</b>（前端据此渲染）：
-     * <pre>
-     *   message  →  每一片文字（可能多次）
-     *   done     →  正常结束（恰好一次）
-     *   error    →  出错（异常时一次，替代 done）
-     * </pre>
-     *
-     * <p><b>这里返回的是 {@code Flux<String>}</b>：流式文字场景下够用。
-     * 但注意 —— 之前讨论过，{@code Flux<String>} 会丢掉工具调用信息。
-     * 阶段 1 还没有工具，所以无影响；<b>阶段 9 做多步 Agent 时，
-     * 这里要换成 {@code Flux<ChatResponse>} 以保留工具调用片</b>。
-     * 这是"什么时候该升级类型"的活例子：能力还没到，就不提前升级。
-     *
-     * <p><b>★ 本方法刻意不带会话记忆</b>（方式三是唯一带记忆的流式路径，理由见
-     * {@link #streamWithServerSentEvent}）。它不对应任何产品路径，
-     * 只用于展示"SseEmitter 手动驱动"这一种机制。
-     *
-     * <p>⚠️ <b>"不带记忆"的准确含义（阶段 6 后半核实后补充）</b>：
-     * 这里说的是<b>不传 {@code conversationId} 与身份</b>。
-     * 但记忆、检索、拼装都是挂在 ChatClient 上的 {@code defaultAdvisors}，
-     * 所以它们<b>依然会执行</b>，只是落到各自的兜底值：
-     * <pre>
-     *   会话 ID  → MemoryReadAdvisor 的 FALLBACK_CONVERSATION_ID（"default"）
-     *   身份     → RagRetrievalAdvisor 按【匿名】处理（仅可见 PUBLIC，并记 WARN）
-     * </pre>
-     * 也就是说：方式一/二<b>会与"所有未传会话 ID 的调用"共享同一个 default 会话</b>。
-     * 这一点在原实现中就存在（旧的 {@code ConversationMemoryAdvisor} 同样有兜底），
-     * 不是本轮引入的 —— 但它此前没有被写下来，属于"读代码看不出来"的行为。
-     * 是否要把这两条对照路径彻底摘出记忆/检索，是一个待定的设计问题
-     * （见 {@code docs/PROCEDURES.md} 的本阶段"需要本人决策的事"）。
-     *
-     * <p><b>★ 但身份是要传的</b>：身份是<b>HTTP 请求的属性</b>，不是某条路径的属性 ——
-     * 拦截器对所有 {@code /chat/**} 请求都已经解析好了，不传反而是白解析。
-     * 而且不传会让 {@code RagRetrievalAdvisor} 按匿名处理并<b>每次都打一条 WARN</b>，
-     * 把日志变成噪声。所以四条对话路径一律传身份，只有会话 ID 是方式三独有。
+     * <p>用"取最后一个"而不是"取第一个"：目前一条流只可能有一个，但阶段 9 的多步循环
+     * 可能产出多个 Final（每步一个）—— 那时"最后一个"才是本次的最终答复。
      */
-    public void stream(String message, UserContext userContext, SseEmitter emitter) {
-        // ChatClient.stream() 返回一个冷的 Flux：只有被订阅时才开始请求模型。
-        chatClient.prompt()
-                .user(message)
-                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
-                .stream()
-                .content()
-                .doOnNext(chunk -> sendEvent(emitter, StreamEventType.MESSAGE, chunk))
-                // 正常结束：先推 done 事件，再正常关闭流
-                .doOnComplete(() -> {
-                    sendEvent(emitter, StreamEventType.DONE, "[DONE]");
-                    completeQuietly(emitter);
-                })
-                // 出错：三路并行处理（详见 handleStreamError 的注释）
-                .doOnError(error -> handleStreamError(emitter, error))
-                .subscribe();
-        // 注意：subscribe() 是非阻塞的，它会立刻返回。
-        // Flux 的请求在 Reactor 的线程上异步推进，逐片触发 doOnNext。
+    private PipelineEvent.ModelOutput.Final finalOf(List<PipelineEvent> events) {
+        if (events == null || events.isEmpty()) {
+            return null;
+        }
+        PipelineEvent.ModelOutput.Final found = null;
+        for (PipelineEvent event : events) {
+            if (event instanceof PipelineEvent.ModelOutput.Final f) {
+                found = f;
+            }
+        }
+        return found;
     }
 
+    // ========================================================================
+    // 入口二：流式（SSE）
+    // ========================================================================
+
     /**
-     * 【方式二】把模型流直接映射成 {@code Flux<ServerSentEvent<String>>} 返回 —— 框架驱动。
+     * 流式对话：把事件流翻译成 SSE 帧推给前端。
      *
-     * <p><b>与 {@link #stream} 的关键差别（这是对比的核心）</b>：
+     * <p><b>模式由调用方传入</b>：{@code mode} 与 {@code conversationId} / {@code userContext}
+     * 一样，是 {@code AgentPipeline.run(...)} 的<b>方法参数</b> —— 谁调用谁声明本次属于哪种场景
+     * （Controller 目前两处都传 {@link MemoryMode#CONVERSATION}）。
+     * 旧实现把它塞进 {@code ChatClientRequest.context} 的字符串 key 里由切面去取 ——
+     * key 与值都是字符串，写错不报错；现在它是枚举实参，模式名写错编译不过。
+     *
+     * <p><b>事件映射</b>（{@link PipelineEvent} → {@link StreamEventType}）：
      * <pre>
-     *   方式一（stream）        : 我们订阅，我们 send，我们 complete   —— 全程手动
-     *   方式二（本方法）        : 我们只负责"把流映射成事件"，其余交给 Spring
+     *   Retrieved                     → 不外发（本阶段前端还不用它，理由见下）
+     *   ModelOutput.Reasoning(text)   → reasoning 帧  ← 思考区
+     *   ModelOutput.Token(text)       → message   帧  ← 回答区
+     *   ModelOutput.Final             → done      帧  ← 结束
      * </pre>
-     * 本方法里<b>没有一处 subscribe / send / complete</b>，Spring MVC 拿到返回值后
-     * 会自己订阅、自己写响应、结束时自己关闭连接。
      *
-     * <p><b>断连处理也不一样</b>：客户端断开时，Spring 会取消这个订阅，
-     * 上游 Flux 随之被取消 —— 模型请求自然停止，不会白烧 token。
-     * 方式一则需要我们自己在 send 失败时留意（见 {@link #sendEvent}）。
+     * <p><b>为什么 {@code Retrieved} 暂不外发</b>：它携带的是 {@code List<RetrievedChunk>}，
+     * 而前端还没有消费它的页面（前端在后续阶段）。现在就把它塞进 SSE 帧，
+     * 属于"为还没有消费者的数据定义契约"（协议第 7 条）。
+     * 管道已经在产出它，<b>接线是前端阶段一行的事</b>。
      *
-     * <p>事件里带上 {@code id}：前端断线重连时，可以凭最后收到的 id 判断续传位置
-     * （浏览器会自动在重连请求头 {@code Last-Event-ID} 里带上它）。
+     * <p><b>为什么 {@code id} / {@code retry} 要带</b>：浏览器断线重连时会自动带上
+     * {@code Last-Event-ID} 请求头，服务端可据此判断续传位置；{@code retry} 则告诉浏览器
+     * 断开后隔多久重连（只在下发一次即可，浏览器会记住）。
      *
-     * <p><b>★ 本方法刻意不带会话记忆</b>（方式三是唯一带记忆的流式路径，理由见
-     * {@link #streamWithServerSentEvent}）。它只用于展示"框架驱动"这一种机制。
-     */
-    public Flux<ServerSentEvent<String>> streamAsFlux(String message, UserContext userContext) {
-        // 用一个从 1 开始的自增序号作为事件 id
-        AtomicLong seq = new AtomicLong();
-        return chatClient.prompt()
-                .user(message)
-                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
-                .stream()
-                .content()
-                .map(chunk -> ServerSentEvent.<String>builder()
-                        .id(String.valueOf(seq.incrementAndGet()))
-                        .event(StreamEventType.MESSAGE)
-                        .data(chunk)
-                        .build())
-                // concatWith：在正文流之后接上 done 事件。
-                // 注意这里用 concatWith 而不是 concat，因为前者是"顺序拼接"的语义。
-                .concatWith(Mono.fromSupplier(() -> ServerSentEvent.<String>builder()
-                        .event(StreamEventType.DONE)
-                        .data("[DONE]")
-                        .build()))
-                // 出错时同样把错误变成流内的一个事件（而不是抛给框架）——
-                // 理由与方式一相同：流式接口的错误应该是"流的一部分"。
-                .onErrorResume(error -> {
-                    long count = streamFailureCount.incrementAndGet();
-                    log.error("[流式对话-flux] 失败（累计 {} 次）：{}", count, error.getMessage(), error);
-                    return Flux.just(ServerSentEvent.<String>builder()
-                            .event(StreamEventType.ERROR)
-                            .data(error.getMessage())
-                            .build());
-                });
-    }
-
-    /**
-     * 【方式三】SseEmitter + 带 {@code id} / {@code retry} 的完整事件 —— 手动驱动，字段最全。
-     *
-     * <p><b>与 {@link #stream} 的差别</b>：事件除了 {@code event} 与 {@code data}，
-     * 还带上 {@code id} 与 {@code retry}：
-     * <ul>
-     *   <li>{@code id}：给每个事件编号。浏览器断线重连时会自动带上
-     *       {@code Last-Event-ID} 请求头，服务端可据此判断从哪继续；</li>
-     *   <li>{@code retry}：告诉浏览器"断了之后隔多久重连"（只在下发一次即可，浏览器会记住）。</li>
-     * </ul>
-     *
-     * <p>这是后续多步 Agent 的<b>主力形态</b>：既要手动插入不同类型的事件
-     * （message / step / question / done），又要事件带 id 便于前端去重与续传。
-     *
-     * <h3>★ 这里踩过一个真实的坑（值得记牢）</h3>
-     *
-     * <p>我最初把事件构造成 {@code ServerSentEvent<String>} 对象再交给
-     * {@code emitter.send(...)}，结果<b>一个事件都发不出去</b>，客户端只看到"连上就断"，
+     * <p><b>★ 必须用 {@code SseEmitter.event()} 构建器</b>：{@code SseEmitter}
+     * <b>不认识</b> {@code ServerSentEvent}（那是给 WebFlux / 返回 Publisher 那条路用的），
+     * 交给它会被当成"要 JSON 序列化的普通对象"，结果是<b>一个事件都发不出去</b>，
      * 而服务端日志干干净净。
-     *
-     * <p><b>根因</b>：{@code SseEmitter} <b>不认识</b> {@code ServerSentEvent} 这个类型
-     * （用 javap 读它的字节码常量池可以证实：里面根本没有 ServerSentEvent 的引用）。
-     * {@code ServerSentEvent} 是给 <b>WebFlux / 返回 Publisher</b> 那条路用的，
-     * 由 {@code ServerSentEventHttpMessageWriter} 负责写帧。
-     * 而 {@code SseEmitter.send(Object)} 走的是 {@code ResponseBodyEmitter} 的普通序列化路径 ——
-     * 它会把这个对象当"要转成 JSON 的普通数据"，于是构造/序列化直接失败。
-     *
-     * <p><b>为什么这次失败特别隐蔽</b>：异常被 {@code sendEvent} 的 catch 吞成了 debug 日志，
-     * 客户端只看到连接断开。这也是为什么现在 {@code sendEvent} 会区分
-     * "客户端断开（debug）"与"其它异常（warn）"。
-     *
-     * <p><b>正解</b>：手写 {@code SseEmitter.event()} 构建器 —— 它才是 SseEmitter 认的"事件表达"。
-     * 两种写法的分野正对应三条流式路径：
-     * <pre>
-     *   SseEmitter 手动推送   -> 用 SseEmitter.event() 构建器
-     *   返回 Publisher/Flux   -> 用 ServerSentEvent（由框架的 writer 写帧）
-     * </pre>
-     *
-     * <h3>★ 阶段 6 起：本方法带会话记忆（只此一条流式路径）</h3>
-     *
-     * <p><b>只有方式三接入记忆，方式一（{@link #stream}）与方式二
-     * （{@link #streamAsFlux}）刻意不接</b> —— 这是主动决定，不是遗漏：
-     * <ul>
-     *   <li>方式一/二的定位是"<b>流式机制的对照实验</b>"：
-     *       它们的价值在于把"手动驱动 vs 框架驱动"的差异摆在一起对比。
-     *       给它们加记忆只会增加噪声，让对照变得不干净；</li>
-     *   <li>方式三是后续多步 Agent 的<b>主力形态</b>，真正的产品路径。
-     *       记忆属于产品路径，所以只加在这里。</li>
-     * </ul>
-     * 这也是"同一能力不要在多处重复实现"的应用：有记忆的流式只有一份实现。
-     *
-     * <p>记忆的接法与同步路径<b>完全一致</b>（同一套 context 机制）：
-     * 会话 ID、模式与身份都通过 {@code advisors(...)} 放进请求 context。
-     *
-     * @param conversationId 会话标识（由 Controller 生成或透传）
-     * @param userContext    调用方身份（未认证时为 {@link UserContext#ANONYMOUS}）
      */
-    public void streamWithServerSentEvent(String message, String conversationId,
-                                          UserContext userContext, SseEmitter emitter) {
+    public void stream(String message,
+                       String conversationId,
+                       MemoryMode mode,
+                       UserContext userContext,
+                       SseEmitter emitter) {
         AtomicLong seq = new AtomicLong();
-        long retryMs = streamProperties.getReconnectDelayMs();
-        boolean[] retrySent = {false};
+        AtomicBoolean retrySent = new AtomicBoolean(false);
 
-        chatClient.prompt()
-                .user(message)
-                // 与同步路径同一套机制：会话 ID + 模式 + 身份走 context，不进 prompt
-                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId))
-                .advisors(a -> a.param(MemoryMode.CONTEXT_KEY, MemoryMode.CONVERSATION))
-                .advisors(a -> a.param(UserContext.CONTEXT_KEY, userContext))
-                .stream()
-                .content()
-                .doOnNext(chunk -> {
-                    long id = seq.incrementAndGet();
-                    SseEmitter.SseEventBuilder builder = SseEmitter.event()
-                            .id(String.valueOf(id))
-                            .name(StreamEventType.MESSAGE)
-                            .data(chunk);
-                    // retry 只在第一个事件上下发一次（浏览器会记住该值）
-                    if (!retrySent[0]) {
-                        builder.reconnectTime(retryMs);
-                        retrySent[0] = true;
-                    }
-                    sendEvent(emitter, builder);
-                })
-                .doOnComplete(() -> {
-                    sendEvent(emitter, SseEmitter.event()
-                            .id(String.valueOf(seq.incrementAndGet()))
-                            .name(StreamEventType.DONE)
-                            .data("[DONE]"));
-                    completeQuietly(emitter);
-                })
-                .doOnError(error -> handleStreamError(emitter, error))
-                .subscribe();
+        agentPipeline.run(message, conversationId, mode, userContext)
+                .subscribe(event -> sendEvent(emitter, event, seq, retrySent),
+                        error -> handleStreamError(emitter, error),
+                        () -> {
+                            sendNamedEvent(emitter,
+                                    SseEmitter.event()
+                                            .id(String.valueOf(seq.incrementAndGet()))
+                                            .name(StreamEventType.DONE)
+                                            .data("[DONE]"));
+                            completeQuietly(emitter);
+                        });
+        // subscribe() 非阻塞：它会立刻返回，Flux 在 Reactor 线程上异步推进。
+    }
+
+    /** 把一个管道事件翻译成 SSE 帧并发送。 */
+    private void sendEvent(SseEmitter emitter,
+                           PipelineEvent event,
+                           AtomicLong seq,
+                           AtomicBoolean retrySent) {
+        if (event instanceof PipelineEvent.ModelOutput.Reasoning reasoning) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.REASONING, reasoning.text()));
+            return;
+        }
+        if (event instanceof PipelineEvent.ModelOutput.Token token) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.MESSAGE, token.text()));
+            return;
+        }
+        // Final 与 Retrieved 不在这里发：Final 由流的 onComplete 统一发 done，
+        // Retrieved 本阶段不外发（理由见 stream 方法注释）。
     }
 
     /**
-     * 发送一个由 {@code SseEmitter.event()} 构建器组装好的事件。
-     *
-     * <p>这是 SseEmitter 手动推送路径上唯一正确的发送方式（见
-     * {@link #streamWithServerSentEvent} 里记录的踩坑）。
+     * 组装一个 SSE 事件；{@code retry} 只在第一个事件上下发一次
+     * （它只下达一次即可，浏览器会记住该值）。
      */
-    private void sendEvent(SseEmitter emitter, SseEmitter.SseEventBuilder builder) {
+    private SseEmitter.SseEventBuilder frame(SseEmitter emitter,
+                                             AtomicLong seq,
+                                             AtomicBoolean retrySent,
+                                             String name,
+                                             Object data) {
+        SseEmitter.SseEventBuilder builder = SseEmitter.event()
+                .id(String.valueOf(seq.incrementAndGet()))
+                .name(name)
+                .data(data);
+        if (retrySent.compareAndSet(false, true)) {
+            builder.reconnectTime(streamProperties.getReconnectDelayMs());
+        }
+        return builder;
+    }
+
+    // ========================================================================
+    // 发送与错误处理
+    // ========================================================================
+
+    /** 发送一个由 {@code SseEmitter.event()} 构建器组装好的事件（手动推送路径上唯一正确的发送方式）。 */
+    private void sendNamedEvent(SseEmitter emitter, SseEmitter.SseEventBuilder builder) {
         try {
             emitter.send(builder);
         } catch (IOException e) {
@@ -340,36 +263,23 @@ public class ChatAppService {
     /**
      * 流式出错的统一处理 —— <b>三路并行，缺一不可</b>。
      *
-     * <p><b>为什么不用 {@code emitter.completeWithError(error)}</b>（实测踩过的坑）：
-     * 它会把异常<b>抛给 Spring 的异步处理链路</b>，最终落到全局异常处理器，
-     * 而全局异常处理器想返回 JSON —— 可这个响应的 Content-Type 早就被锁成
-     * {@code text/event-stream} 了。HTTP 不允许中途换格式，于是报：
-     * <pre>
-     *   HttpMessageNotWritableException:
-     *   No converter for [class com.hagent.common.BaseResponse]
-     *   with preset Content-Type 'text/event-stream'
-     * </pre>
-     * 即：<b>流式接口的错误，不能走"返回 JSON"那条路</b>。
-     *
-     * <p><b>但简单地换成 {@code complete()} 也有代价</b>，所以这里用三路把它补回来：
      * <ol>
      *   <li><b>前端</b>：推 {@code error} 事件 —— 用户能看到失败；</li>
      *   <li><b>服务端</b>：{@code log.error} 记录完整堆栈 —— 弥补被丢弃的根因
      *       （若只推事件而不记日志，而事件推送恰好也失败——比如客户端断开——
      *        错误就彻底消失，谁都不知道）；</li>
-     *   <li><b>框架</b>：{@code complete()} 正常收尾 —— 避免异常逃逸触发上面那个错误。</li>
+     *   <li><b>框架</b>：{@code complete()} 正常收尾 —— 避免异常逃逸触发
+     *       "No converter for [BaseResponse]" 那个坑（见类注释）。</li>
      * </ol>
-     *
-     * <p><b>诚实的遗留</b>：第 3 步让框架无法自动感知失败，因此<b>失败统计不能依赖框架</b>。
-     * 这里先用 {@link #streamFailureCount} 显式计数兜住，等做可观测性时换成正式指标。
      */
     private void handleStreamError(SseEmitter emitter, Throwable error) {
         // 第 1 路：前端 —— 推 error 事件（放在最前，保证用户先收到反馈）
-        sendEvent(emitter, StreamEventType.ERROR, error.getMessage());
+        sendNamedEvent(emitter, SseEmitter.event()
+                .name(StreamEventType.ERROR)
+                .data(error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()));
 
         // 第 2 路：服务端 —— 记录完整根因（含堆栈），这是 complete() 方案必须补上的一环
-        long count = streamFailureCount.incrementAndGet();
-        log.error("[流式对话] 失败（累计 {} 次）：{}", count, error.getMessage(), error);
+        log.error("[流式对话] 失败：{}", error.getMessage(), error);
 
         // 第 3 路：框架 —— 正常关闭，不抛异常
         completeQuietly(emitter);
@@ -380,52 +290,14 @@ public class ChatAppService {
      *
      * <p><b>为什么必须包 try-catch</b>：{@code complete()} 在"响应已提交"或
      * "连接已断开"时会抛 {@link IllegalStateException}。若让它逃逸，异常又会被
-     * Spring 交给全局异常处理器，于是<b>再次触发上面那个 "No converter" 问题</b>——
+     * Spring 交给全局异常处理器，于是<b>再次触发 "No converter" 问题</b>——
      * 我们刚绕开的坑会绕回来。
-     *
-     * <p>关闭失败本身通常不是故障（连接可能已由客户端断开），所以只记 debug。
      */
     private void completeQuietly(SseEmitter emitter) {
         try {
             emitter.complete();
         } catch (Exception e) {
             log.debug("[流式对话] 关闭流时异常（通常是客户端已断开）：{}", e.getMessage());
-        }
-    }
-
-    /**
-     * 发送一个 SSE 命名事件。所有 SSE 发送都收口到这里，
-     * 保证事件名只来自 StreamEventType（单一出处），且发送异常被统一处理。
-     */
-    private void sendEvent(SseEmitter emitter, String eventName, Object data) {
-        try {
-            emitter.send(SseEmitter.event().name(eventName).data(data));
-        } catch (IOException e) {
-            // 客户端断开（关页面/关标签）时 send 会抛 IOException。
-            // 这是用户正常操作导致的，不是故障；记录后不再尝试发送。
-            log.debug("[流式对话] 发送事件 {} 时客户端已断开：{}", eventName, e.getMessage());
-        }
-    }
-
-    /**
-     * 发送一个已经组装好的 {@link ServerSentEvent}。
-     *
-     * <p><b>★ 这个方法只用于 {@link #streamAsFlux} 那条路（返回 Publisher）。</b>
-     * 在 {@code SseEmitter} 手动推送的场景里<b>不能用它</b> ——
-     * {@code SseEmitter} 不认识 {@code ServerSentEvent}，会把它当成"要 JSON 序列化的普通对象"，
-     * 导致事件发不出去（详见 {@link #streamWithServerSentEvent} 里记录的踩坑）。
-     * 手动推送请用 {@code SseEmitter.event()} 构建器那个重载。
-     */
-    private void sendEvent(SseEmitter emitter, ServerSentEvent<String> event) {
-        try {
-            emitter.send(event);
-        } catch (IOException e) {
-            // 客户端断开（关页面/关标签）：用户正常操作，不是故障
-            log.debug("[流式对话] 发送 SSE 事件 {} 时客户端已断开：{}", event.event(), e.getMessage());
-        } catch (Exception e) {
-            // 非 IO 异常：多半是事件构造/序列化的问题，必须可见
-            log.warn("[流式对话] 发送 SSE 事件 {} 失败（事件构造或序列化问题）：{}",
-                    event.event(), e.toString());
         }
     }
 }

@@ -50,7 +50,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class RetrievalProperties implements InitializingBean {
 
     /**
-     * 是否启用检索。关掉后 {@code RagRetrievalAdvisor} 不产片段，
+     * 是否启用检索。关掉后 {@code AgentPipeline} 的第③步不产片段，
      * 链路其余部分照常工作（此时相当于"没有知识库的普通对话"）。
      *
      * <p>存在的理由：排查"回答质量问题到底来自检索还是来自模型"时，

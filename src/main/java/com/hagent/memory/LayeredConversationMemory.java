@@ -13,7 +13,7 @@ import java.util.function.Consumer;
  *
  * <h2>★ 为什么要有这一层</h2>
  *
- * <p>切面依赖 {@link ConversationMemory} 这一个抽象，而它背后是<b>两个角色</b>：
+ * <p>{@code AgentPipeline} 依赖 {@link ConversationMemory} 这一个抽象，而它背后是<b>两个角色</b>：
  * <ul>
  *   <li>{@link ConversationRecordStore} —— <b>对话记录</b>：权威、完整、永久（用户刷新页面要看）；</li>
  *   <li>{@link ConversationContextCache} —— <b>模型上下文</b>：有损、易失、可重建（模型这次要用的）。</li>
@@ -21,7 +21,7 @@ import java.util.function.Consumer;
  *
  * <p>两者的需求正好相反，所以<b>不能</b>做成"靠配置二选一的两种实现"——
  * 那是阶段 5 的抽象，装不下这两层。本类把"谁先谁后、失败怎么办"收在<b>一处</b>，
- * 于是切面零改动。
+ * 于是管线零改动。
  *
  * <h2>★ 三条本类负责守住的性质</h2>
  *
