@@ -17,6 +17,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.core.io.ByteArrayResource;
 import reactor.core.publisher.Flux;
 
@@ -90,31 +91,33 @@ class AgentPipelineTest {
     }
 
     /**
-     * 造一个 pipeline，模型的流式输出由 {@code chunks} 指定。
+     * 造一个 pipeline，模型的流式输出由 {@code chunks} 指定（<b>不带工具</b>）。
      *
-     * <p>{@code knowledgeRetrievalService} 默认返回空片段；
-     * 需要片段的用例用另一个重载。
+     * <p>★ 阶段 9 起本构造器需要 {@code chatModel.getOptions()} 是
+     * {@code DeepSeekChatOptions}（它要"克隆配置 + 挂工具"，见 AgentPipeline 的启动自检），
+     * 所以这里必须真的把它 stub 出来 —— 否则构造期就失败。
      */
-    private AgentPipeline pipeline(RecordingMemory memory,
-                                   KnowledgeRetrievalService retrieval,
-                                   List<ChatResponse> chunks) {
+    private AgentPipeline pipeline(RecordingMemory memory, List<ChatResponse> chunks) {
         ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
         when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.fromIterable(chunks));
 
         return new AgentPipeline(
                 chatModel,
                 memory,
-                retrieval,
+                TestToolCallbackProvider.none(),
+                TestAudit.disabled(),
                 new TraceProperties(),
                 new PromptProperties(),
                 memoryProperties(),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
     }
 
-    private AgentPipeline pipeline(RecordingMemory memory, List<ChatResponse> chunks) {
-        KnowledgeRetrievalService retrieval = mock(KnowledgeRetrievalService.class);
-        when(retrieval.retrieve(any(), any())).thenReturn(List.of());
-        return pipeline(memory, retrieval, chunks);
+    /** 模型"配置好的" options —— 必须是真的 DeepSeekChatOptions，否则管线启动自检会拒绝。 */
+    private static org.springframework.ai.deepseek.DeepSeekChatOptions deepSeekOptions() {
+        return org.springframework.ai.deepseek.DeepSeekChatOptions.builder()
+                .model("deepseek-flash")
+                .build();
     }
 
     /** 造一片只有思考的响应（模拟实测的"思考段"）。 */
@@ -210,10 +213,11 @@ class AgentPipelineTest {
         List<PipelineEvent> events = collect(pipeline(new RecordingMemory(), chunks));
 
         assertThat(events)
-                .as("事件 = 1 个 Retrieved + 1 个 Reasoning + 1 个 Token + 1 个 Final。"
+                .as("★ 阶段 9 起：管线不再发 Retrieved（检索已工具化），"
+                        + "所以事件 = 1 个 Reasoning + 1 个 Token + 1 个 Final。"
                         + "空片若未被过滤，这里会多出两个空事件（前端表现为收到空消息）")
-                .hasSize(4)
-                .hasAtLeastOneElementOfType(PipelineEvent.Retrieved.class)
+                .hasSize(3)
+                .noneMatch(PipelineEvent.Retrieved.class::isInstance)
                 .hasAtLeastOneElementOfType(PipelineEvent.ModelOutput.Final.class);
 
         List<PipelineEvent.ModelOutput> modelEvents = events.stream()
@@ -239,9 +243,13 @@ class AgentPipelineTest {
                 .map(PipelineEvent.ModelOutput.class::cast)
                 .toList();
 
+        // ★ 注意阶段 9 的语义：这三个 chunk 属于【同一次】模型调用（= 同一步循环），
+        //   所以事件是 思考、思考、回答、Final（Final 由这一步收尾时发出）。
+        assertThat(modelEvents).hasSize(4);
         assertThat(modelEvents.subList(0, 2))
                 .allMatch(e -> e instanceof PipelineEvent.ModelOutput.Reasoning);
         assertThat(modelEvents.get(2)).isInstanceOf(PipelineEvent.ModelOutput.Token.class);
+        assertThat(modelEvents.get(3)).isInstanceOf(PipelineEvent.ModelOutput.Final.class);
     }
 
     // ========================================================================
@@ -292,31 +300,28 @@ class AgentPipelineTest {
     // 四、检索事件
     // ========================================================================
 
-    @Test
-    @DisplayName("★ 检索结果作为第一个事件发出，且带本次查询文本")
-    void retrievedEventIsEmittedFirst() {
-        KnowledgeRetrievalService retrieval = mock(KnowledgeRetrievalService.class);
-        RetrievedChunk chunk = new RetrievedChunk("年假五天", "员工手册", "员工手册",
-                "假期管理", 0, com.hagent.document.AccessLevel.INTERNAL, 0.8,
-                com.hagent.retrieval.RelevanceBand.HIGH);
-        when(retrieval.retrieve(any(), any())).thenReturn(List.of(chunk));
-
-        List<PipelineEvent> events = collect(
-                pipeline(new RecordingMemory(), retrieval, List.of(textChunk("有五天"))));
-
-        assertThat(events.get(0)).isInstanceOf(PipelineEvent.Retrieved.class);
-        PipelineEvent.Retrieved retrieved = (PipelineEvent.Retrieved) events.get(0);
-        assertThat(retrieved.chunks()).containsExactly(chunk);
-        assertThat(retrieved.query()).isEqualTo("提问");
-    }
+    // ========================================================================
+    // ★ 阶段 9 删除了两个用例：retrievedEventIsEmittedFirst / retrievedEventIsEmittedEvenWhenEmpty
+    //
+    //   它们断言"管线把检索结果作为第一个事件发出"。阶段 9 把检索改成
+    //   retrieveKnowledge 工具之后，管线【不再自己做检索】，因此也不再发
+    //   PipelineEvent.Retrieved —— 这个事件改由【工具】发出（阶段 9.2 接线）。
+    //
+    //   ⇒ 对应断言会在工具侧重建（工具既能返回文本给模型，也能发出带结构化片段的
+    //     Retrieved 事件给前端）。这与 PromptBuilderTest 里那三条同一个道理：
+    //     测试跟着职责走。
+    // ========================================================================
 
     @Test
-    @DisplayName("★ 检索没命中（空列表）仍然发出 Retrieved 事件 —— 与【没做检索】必须可区分")
-    void retrievedEventIsEmittedEvenWhenEmpty() {
+    @DisplayName("★ 管线不再自己发 Retrieved（检索已工具化）")
+    void pipelineNoLongerEmitsRetrievedItself() {
         List<PipelineEvent> events = collect(pipeline(new RecordingMemory(), List.of(textChunk("答"))));
 
-        assertThat(events.get(0)).isInstanceOf(PipelineEvent.Retrieved.class);
-        assertThat(((PipelineEvent.Retrieved) events.get(0)).chunks()).isEmpty();
+        assertThat(events)
+                .as("管线现在只产模型相关事件；检索事件由工具发出。"
+                        + "若这里出现 Retrieved，说明有人把无条件检索加回来了")
+                .noneMatch(PipelineEvent.Retrieved.class::isInstance)
+                .isNotEmpty();
     }
 
     // ========================================================================

@@ -2974,24 +2974,230 @@ private TokenBudget budgetOf(MemoryMode mode) {
 
 ---
 
+## 9. 工具调用与多步 Agent
+
+> **本阶段把"一次问答"升级为"能自己决定调工具的循环"。**
+> ★ 关键认知转变：**RAG 从"每轮无条件检索"变成"模型决定要不要查"** —— 这是 agent 与固定 RAG 流程的实质差别。
+
+### 9.1 本阶段要解决的问题
+
+阶段 8 结束时，管线是**直线**：读历史 → 检索 → 拼装 → 调模型 → 收尾。
+其中"检索"是**无条件**的 —— 不管用户问"今天几号"还是"年假几天"，都会先跑一次 embedding + 向量查询，
+再把片段塞进 system prompt。
+
+这带来两个具体问题：
+
+1. **成本**：闲聊、算术、问时间都会白烧一次 embedding 与一次向量查询；
+2. **质量**：HANDOFF 3.5 已实测"阈值挡不住无关提问"，
+   无关片段一旦被塞进 system，**反而干扰模型**。
+
+⇒ 正解不是"调阈值"，而是**把检索的决定权交给模型**：给它一个 `retrieveKnowledge` 工具，
+用不用、查什么由它判断。
+
+```mermaid
+flowchart TD
+    subgraph s8["阶段 8（直线）"]
+        A1["用户提问"] --> A2["读历史"]
+        A2 --> A3["★ 无条件检索（每次必跑）"]
+        A3 --> A4["拼装：system = 约束 + 片段"]
+        A4 --> A5["调模型"]
+        A5 --> A6["Final"]
+    end
+    subgraph s9["阶段 9（工具循环）"]
+        B1["用户提问"] --> B2["读历史"]
+        B2 --> B3["拼装：system = 约束（不含片段）"]
+        B3 --> B4["调模型（带工具）"]
+        B4 --> B5{"模型请求工具?"}
+        B5 -->|"是"| B6["发 ToolCall 事件"]
+        B6 --> B7["executeToolCalls<br/>（模型可能自己决定调用 retrieveKnowledge）"]
+        B7 --> B8["发 Retrieved / ToolResult 事件<br/>写审计表"]
+        B8 --> B9["结果回灌 conversationHistory"]
+        B9 --> B4
+        B5 -->|"否 / 达 max-steps"| B10["写回记忆 + Final"]
+    end
+```
+
+**思维导图：本阶段的核心对象与职责**
+
+```mermaid
+mindmap
+  root(("阶段 9<br/>工具调用"))
+    工具层
+      com.hagent.tool
+        KnowledgeRetrievalTool
+          把 RAG 变成模型决定
+          返回已渲染文本（模型只读文本）
+          从 ToolContext 取身份做权限过滤
+          发出 Retrieved 事件
+        ToolRegistration
+          ★ 唯一的注册入口（可插拔）
+          retrieval.enabled=false → 0 个工具
+          toolCallbackProvider Bean
+        audit
+          ToolInvocationStore
+            与 ConversationMemory 分开
+          MysqlToolInvocationStore
+            显式 DDL + 启动自检
+            写入失败只记 ERROR
+    管线层
+      AgentPipeline
+        loop 递归（一步 = 一次模型调用）
+        克隆配置的 options + 挂工具
+        四条件终止
+          a 模型不再请求工具
+          b 工具 returnDirect
+          c max-steps
+          d 上游异常
+        事件：ToolCall → 执行 → Retrieved/ToolResult
+        写记忆只写问+答（工具活动不写）
+    契约层
+      PipelineEvent.ModelOutput
+        Reasoning / Token / Final（阶段 8）
+        ToolCall / ToolResult（阶段 9 新增）
+      不变量：sealed 只增不改
+      ToolEventSink
+        工具同步发事件的通道
+    前端契约
+      stream/StreamEventType
+        reasoning / message / done / error
+        tool_call / tool_result / retrieved
+      ChatAppService 显式收窄字段
+```
+
+### 9.2 主要新增 / 修改 / 删除
+
+| 类型 | 内容 |
+|---|---|
+| **新增（7）** | `tool/KnowledgeRetrievalTool` / `tool/ToolRegistration` / `tool/audit/ToolInvocationStore` / `tool/audit/MysqlToolInvocationStore` / `config/ToolAuditProperties` / `app/ToolEventSink` / `resources/db/chat_tool_invocation.sql` |
+| **修改（6）** | `app/AgentPipeline`（★ 直线 → 工具循环）/ `app/PipelineEvent`（+`ToolCall`/`ToolResult`）/ `app/PromptBuilder`（**删掉 fragments 参数与渲染**）/ `stream/StreamEventType`（+3 个事件名）/ `app/ChatAppService`（+3 条 SSE 映射）/ `memory/MemoryProperties`（+`max-steps`）/ `prompts/rag-answer-prompt.md`（+【工具】段）/ `application.yml` |
+| **未做（刻意）** | **9.4 工具分组（最小权限）** —— 当前只有 1 个工具，且它的权限过滤**已在 SQL 层**（那是更硬的防线）。给"一个已按数据过滤的工具"再加工具级分组，是**为假想需求付复杂度**（协议第 7 条）。位置已留好：`ToolRegistration` 是唯一注册入口 |
+
+### 9.3 坑 35：`then()` 会丢弃上游所有事件 —— 前端只能收到一个 `Final`
+
+**现象**：工具循环写完后，`AgentPipelineToolLoopTest` 报
+`Expected size: 3 but was: 1`，事件流里只有一个 `Final`。
+
+**根因**：我用了
+
+```java
+chatModel.stream(prompt)
+        .doOnNext(...)          // 累积
+        .flatMap(this::emit)    // ← 这里产出 Reasoning / Token 事件
+        .then(handleToolCalls(...));   // ★ then 会【丢弃上游所有元素】，只保留完成信号
+```
+
+`then(...)` 的语义是"等上游完成后，只订阅下游"—— **它把上游的元素全吃了**。
+而 `concatWith(...)` 是"先把上游的元素全部发出去，等它完成后再订阅下游"。
+
+**修法**：`.flatMap(this::emit).concatWith(Flux.defer(() -> handleToolCalls(...)))`
+
+**可迁移的认知**：
+
+| # | 认知 |
+|---|---|
+| 1 | **在响应式链里，"收到事件"与"执行副作用"要用不同的操作符**。`then` / `ignoreElements` 这类是"只要完成信号"，会把数据吃掉 |
+| 2 | **这类错误不会抛异常** —— 前端表现为"只有一条最终消息"，而日志全绿。★ 抓住它的正是那条"事件数量必须等于 3"的断言 |
+| 3 | 判断方法：**问"我需要上游的元素吗？"** 需要 → `concatWith` / `flatMap`；只要完成 → `then` |
+
+### 9.4 坑 36：`ToolCallbackProvider` 不会自动出现 —— 66 个集成测试全红
+
+**现象**：把 `AgentPipeline` 的依赖从 `ToolCallback[]` 改成 `ToolCallbackProvider`（框架接口形态）后，
+所有 `@SpringBootTest` 上下文加载失败：
+
+```
+No qualifying bean of type 'org.springframework.ai.tool.ToolCallbackProvider' available
+```
+
+**根因**：框架**不会**自动提供这个 Bean（除非 classpath 上有 MCP 客户端之类的模块）。
+我们只有一个 `ToolCallback[]` Bean，而"数组"与"provider"是两个类型。
+
+**修法**：在 `ToolRegistration` 里显式提供
+
+```java
+@Bean
+public ToolCallbackProvider toolCallbackProvider(ToolCallback[] allTools) {
+    return () -> allTools;
+}
+```
+
+**★ 为什么仍要用 `ToolCallbackProvider` 而不是直接注入数组**：
+数组表达的依赖是"**一堆工具**"，工具从哪来、怎么注册**不在依赖里**；
+provider 表达的依赖是"**能提供工具的东西**" —— 与"可插拔"语义天然对齐
+（将来按角色过滤时只换一个 provider 实现，管线一行不改）。
+
+**可迁移的认知**：**"我能构造出一个集合"不等于"容器里有那个类型的 Bean"**。
+改依赖类型时，要同时问"谁来提供它"。
+
+### 9.5 坑 37：`rag-answer-prompt.md` 不改，"检索看起来失效了"
+
+**背景**：提示词原文是"优先依据【知识库片段】回答"。
+但阶段 9 起，**片段不再进 system** —— 模型必须先调 `retrieveKnowledge` 才拿得到。
+
+**如果不改会怎样**：模型面对的是一句**指向不存在内容的约束**。
+它很可能直接回答"知识库中未找到相关内容"，而**没有任何报错**。
+
+**修法**：在提示词里加【工具】段，并把约束 1 改成"依据 `retrieveKnowledge` 返回的片段"。
+
+**★ 这正是 `PromptBuilder` 注释里早就警告过的那个坑**（"约束指向一个不存在的标记"）——
+**这次它真实发生了**。可迁移的认知：**改动"数据怎么到达模型"时，
+必须同步检查"提示词里对数据的引用是否仍成立"**。两者是分开维护的，编译器不会帮你。
+
+### 9.6 阶段结果与验证证据
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | `.\mvnw.cmd -B -ntp clean test` → **`Tests run: 251, Failures: 0, Errors: 0, Skipped: 2`** |
+| 用例账目 | 234 → 251（+10 工具、+8 循环/事件/审计，−3 迁走的片段用例，−1 旧语义用例） |
+| 循环验证 | 模型调用**恰好 2 次**（要工具一次、给答案一次）；工具**真被调用 1 次**；第 2 次提示词里**确有 `ToolResponseMessage`** |
+| 步数上限 | 模型一直请求工具时，调用次数**恰好等于 `max-steps`**（不是"大约"） |
+| 事件顺序 | `ToolCall` 在 `ToolResult` **之前**（断言下标比较） |
+| 审计 | 每次工具调用写一条（会话/步序/工具名/参数/结果）；关掉审计时**工具照常执行、对话照常完成** |
+| DDL 自检 | 建表**之前**跑测试 → 65 个集成测试全红，根因正是"表不存在"；建表后核对实际结构与自检条件**逐条相符** |
+
+### 9.7 一条刻意的"不画蛇添足"
+
+`ToolResult` **没有 `error` 字段**。
+
+直觉上应该有"成功/失败"标志。但实测：
+
+- 框架的 `DefaultToolExecutionExceptionProcessor` 把工具异常**转成一段纯文本**；
+- `ToolResponseMessage` **没有任何结构化的"是否出错"标记**。
+
+要填这个字段只能靠**匹配某段魔法字符串** —— 而那正是本项目反复在防的脆弱做法。
+⇒ **按协议第 7 条：没有可靠来源的字段，不加**。失败信息作为结果文本照常展示。
+若将来真需要精确判定，正解是让**工具自己**返回结构化结果，而不是在这一层猜。
+
+### 9.8 本阶段**没有**做成的事（诚实清单）
+
+| # | 没做 | 为什么 |
+|---|---|---|
+| 1 | 工具分组 / 最小权限 | 只有 1 个工具，且权限过滤已在 SQL 层（更硬的防线）。等出现"某些角色不该看到某个工具"的工具（发邮件、导出）时再做 |
+| 2 | 中断续跑（模型停下来问用户） | 参考实现用抛异常实现（`PendingUserQuestionException`），与我们的 Flux 事件流形态不一致。硬套会别扭，等有真实需求再设计 |
+| 3 | 工具清单的其余 3 个（`listKnowledgeSources` / `queryChatHistory` / `getCurrentTime`） | 本阶段先打通链路。**工具数量不是目标** |
+| 4 | `ToolResult.error` | 见 9.7（没有可靠来源） |
+| 5 | 工具消息进模型上下文（跨轮） | 已定 A：不注入。循环内必然可见（已实测），跨轮的信息已在最终答里 |
+
+---
+
 ## 待推进
 
-- **阶段 9：工具调用与多步 Agent** —— 反射注册工具、工具分组（最小权限）、状态机 + 循环 + 中断续跑
-  - ★ **工具循环由谁驱动已经定下：`AgentPipeline` 自己驱动**
-    （阶段 8 起管线直连 `ChatModel`，框架的 `ToolCallingAdvisor` 不再参与，
-    所以"要不要关掉框架自动注册"这个问题在本项目不存在）
-  - ★ **阶段 9 第一件事：读参考实现里 `.toolcall()` 的真实签名**（协议第 3 条：不凭记忆写）
-  - ⚠️ **不要再做"前置意图提取层"** —— 该设计已撤回，理由见 [5.3](#53-一个被撤回的坑前置意图提取层)。
-    工具选择交给模型的原生工具调用能力
-  - **"不可逆操作需要确认"要做在工具执行层**（代码级强制），而不是靠模型自述"我需不需要确认"
-  - `ModelOutput` 是 sealed：加 `ToolCall` / `ToolResult` 是**新增变体、不改已有代码**
-- 双层记忆的长期记忆部分：`.md` 文件 + 索引（会话记忆部分已在阶段 5 完成）
-- 前端极简页面：用 `EventSource` 真实消费 SSE，验证过程可视化
-  - ★ 事件名已就位：`reasoning`（思考）/ `message`（回答）/ `done` / `error`
-  - ★ 已知契约限制：`Retrieved` 事件的 `level` / `band` 按**枚举 name** 序列化
-    （`HIGH`/`MEDIUM`/`LOW`），中文档位（"高/中/低"）需前端自己映射
-- 可观测性：关键路径耗时 / 成功率 / 工具调用计数
+- **阶段 10：前端极简页面** —— 用 `EventSource` 真实消费 SSE，把"思考 / 工具调用 / 回答"可视化
+  - ★ 事件名已全部就位：`reasoning`（思考）/ `message`（回答）/ `tool_call` / `tool_result` /
+    `retrieved`（参考了哪几篇）/ `done` / `error`
+  - ★ 已知契约：`retrieved` 的字段已由后端**收窄为 `source` + `band`（中文档位）**，
+    前端无需再映射枚举
+  - ★ 还需设计的：**"第 N 步"的展示时机**（本阶段刻意没发 Step 事件 —— 那属于前端设计）
+- **阶段 11：长期记忆**（`.md` + 索引）
+  - 与会话记忆的分工：会话记忆由**管线自动**存取；长期记忆由**模型通过工具**自主读写
+  - ★ `.md` 读写必须显式 `UTF_8`（协议 §9.4 第 3 条）
+- **阶段 12：可观测性** —— 关键路径耗时 / 成功率 / 工具调用计数 / **token 用量**
   - ⚠️ **流式路径的 token 用量实测未观察到**（`Final.usage` 可能拿到 `EmptyUsage`）——
-    做成本统计前必须先确认这条，见坑 32 的方法论：**先测，别假设**
+    做成本统计前必须**先测**，别假设
+  - ★ 工具调用审计表已经落地，调用计数可以直接查库（见 `chat_tool_invocation`）
+- **工作流模式（`MemoryMode.WORKFLOW`）** —— 通道已通、尚无调用方
+  - 阶段 8 起它是 `AgentPipeline.run(..., mode, ...)` 的方法参数
+  - 预算 50000 token 是否够用，需要真实多步任务来验证
 - **一个待补的验证**（不是新功能，是欠的证据）：`docs/STAGE5-VERIFICATION.md` 里的"下一轮能否答出名字"
   至今未跑 —— 目前只能证明记忆能装配、能落盘，**不能证明注入后模型真的用上了**
+- **工具清单的其余 3 个**（`listKnowledgeSources` / `queryChatHistory` / `getCurrentTime`）——
+  三问的答案已在阶段 9 讨论中给出，见 `HANDOFF` 的工具清单小节

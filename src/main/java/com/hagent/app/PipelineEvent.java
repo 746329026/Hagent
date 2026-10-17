@@ -161,5 +161,54 @@ public sealed interface PipelineEvent {
                      String finishReason,
                      Usage usage) implements ModelOutput {
         }
+
+        /**
+         * 模型<b>请求调用某个工具</b>（阶段 9 新增）。
+         *
+         * <p><b>为什么要外发它</b>：这是 agent 与"纯对话"最直观的差别，也是前端
+         * "让用户看到模型在做什么"的关键一步 —— 不展示它，用户只能盯着屏幕等几十秒，
+         * 不知道模型是在查资料还是在卡住。
+         *
+         * <p><b>为什么不在 {@code ToolResult} 里带上调用信息就够了</b>：
+         * 调用与结果之间隔着一次真实的工具执行（可能很慢）。
+         * 先发 {@code ToolCall} 前端才能立刻显示"正在查询知识库…"，
+         * 否则"开始"与"结束"之间没有任何反馈。
+         *
+         * <p>★ <b>字段与框架 {@code AssistantMessage.ToolCall} 一一对应</b>
+         * （{@code id} / {@code name} / {@code arguments}）：
+         * {@code id} 是模型给的调用标识，把请求与结果配成一对；
+         * {@code type} 恒为 {@code "function"}，没有信息量，刻意不透出。
+         *
+         * @param id        模型给出的调用标识（用于与 {@link ToolResult} 配对）
+         * @param name      工具名
+         * @param arguments 参数（<b>JSON 字符串</b>，模型生成的原文）
+         */
+        record ToolCall(String id, String name, String arguments) implements ModelOutput {
+        }
+
+        /**
+         * <b>工具执行完成</b>（阶段 9 新增）。
+         *
+         * <h3>★ 为什么没有 {@code error} 字段（一个刻意的"不画蛇添足"）</h3>
+         *
+         * <p>直觉上应该有个"成功/失败"标志。但实测：框架的
+         * {@code DefaultToolExecutionExceptionProcessor} 把工具异常
+         * <b>转成一段纯文本</b>塞进结果里，而 {@code ToolResponseMessage}
+         * <b>没有任何结构化的"是否出错"标记</b>。
+         *
+         * <p>所以要填这个字段，只能靠"匹配某段魔法字符串"—— 而那正是本项目
+         * 反复在防的脆弱做法（改一处提示、另一处静默失效）。
+         *
+         * <p>⇒ <b>先不加</b>（协议第 7 条：为没有可靠来源的字段编造取值，比没有字段更糟）。
+         * 失败信息作为 {@link #result} 的文本照常展示给前端与用户。
+         * 若将来真需要精确判定，正解是让<b>工具自己</b>返回结构化结果，
+         * 而不是在这一层猜。
+         *
+         * @param id     对应的 {@link ToolCall#id()}（用于配对；取不到时为 null）
+         * @param name   工具名
+         * @param result 工具返回的文本（<b>模型看到的就是它</b>；失败时是框架生成的错误描述）
+         */
+        record ToolResult(String id, String name, String result) implements ModelOutput {
+        }
     }
 }

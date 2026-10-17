@@ -30,7 +30,6 @@ public final class StreamEventType {
 
     /** 模型逐片输出的文字（回答正文）。 */
     public static final String MESSAGE = "message";
-
     /**
      * 模型的<b>思考过程</b>逐片输出（阶段 8 新增，DeepSeek 的 {@code reasoningContent}）。
      *
@@ -53,6 +52,29 @@ public final class StreamEventType {
 
     /** 出错信号。 */
     public static final String ERROR = "error";
+
+    /**
+     * 模型<b>请求调用工具</b>（阶段 9 新增）。
+     *
+     * <p>数据是 JSON 字符串：{@code {"id":"…","name":"retrieveKnowledge","arguments":"{…}"}}。
+     *
+     * <p><b>为什么要单独一个事件名</b>：这是 agent 最直观的可视化点 ——
+     * 前端据此显示"正在查询知识库…"。它与 {@link #TOOL_RESULT} 之间有真实的执行耗时，
+     * 所以必须<b>先发这个</b>，否则用户在那段时间里看不到任何反馈。
+     */
+    public static final String TOOL_CALL = "tool_call";
+
+    /** 工具执行完成（阶段 9 新增）：{@code {"id":"…","name":"…","result":"…"}}。 */
+    public static final String TOOL_RESULT = "tool_result";
+
+    /**
+     * 知识库检索命中的片段（阶段 9 新增，由检索工具发出）。
+     *
+     * <p>数据是片段列表 —— 前端据此显示"参考了哪几篇"。
+     * ★ 它是<b>结构化数据</b>（含来源、相关度），刻意不从工具返回的文本里解析
+     * （那段文本是给模型看的，见 {@code ToolEventSink} 的注释）。
+     */
+    public static final String RETRIEVED = "retrieved";
 
     // ==========================================================================
     // 扩展位（未来阶段启用，当前不定义，见类注释）：

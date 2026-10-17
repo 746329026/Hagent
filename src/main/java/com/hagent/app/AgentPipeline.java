@@ -6,24 +6,34 @@ import com.hagent.memory.ConversationMemory;
 import com.hagent.memory.MemoryMode;
 import com.hagent.memory.MemoryProperties;
 import com.hagent.memory.TokenBudget;
-import com.hagent.retrieval.RetrievedChunk;
 import com.hagent.security.UserContext;
+import com.hagent.tool.KnowledgeRetrievalTool;
+import com.hagent.tool.audit.ToolInvocationStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
+import org.springframework.ai.deepseek.DeepSeekChatOptions;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.model.tool.ToolCallingManager;
+import org.springframework.ai.model.tool.ToolExecutionResult;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.ToolCallbackProvider;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Agent 管道 —— <b>本项目唯一的编排者</b>：把"一次对话"拆成固定的顺序步骤，直连 {@link ChatModel}。
@@ -119,25 +129,66 @@ public class AgentPipeline {
 
     private final ChatModel chatModel;
     private final ConversationMemory memory;
-    private final KnowledgeRetrievalService retrievalService;
     private final PromptBuilder promptBuilder;
     private final MemoryProperties memoryProperties;
 
+    /** 模型配置好的 options（系统提示词、模型名、reasoning-effort 等）。每步从它克隆再加工具。 */
+    private final ChatOptions baseOptions;
+
+    /** 模型可调用的工具。关掉检索时是空数组 —— 空数组是合法状态（退化成纯对话）。 */
+    private final ToolCallback[] toolCallbacks;
+
+    /** 执行工具并把结果拼进会话历史 —— 用框架实现，不自己写参数解析与异常处理。 */
+    private final ToolCallingManager toolCallingManager;
+
+    /**
+     * 工具调用审计存储。<b>可能为 null</b>（{@code hagent.tool.audit.enabled=false}）。
+     *
+     * <p>用 {@code ObjectProvider} 取而不是直接注入：审计是<b>可关闭的</b>，
+     * 而"关掉"在装配上的正确表现是"这个 Bean 不存在"（见 {@code ToolRegistration}）。
+     * 直接按类型注入会让"关掉审计"变成启动失败。
+     */
+    private final ToolInvocationStore auditStore;
+
     public AgentPipeline(ChatModel chatModel,
                          ConversationMemory memory,
-                         KnowledgeRetrievalService retrievalService,
+                         ToolCallbackProvider toolCallbackProvider,
+                         ObjectProvider<ToolInvocationStore> auditStoreProvider,
                          TraceProperties traceProperties,
                          PromptProperties promptProperties,
                          MemoryProperties memoryProperties,
                          Resource ragAnswerPromptResource) {
         this.chatModel = chatModel;
         this.memory = memory;
-        this.retrievalService = retrievalService;
         this.memoryProperties = memoryProperties;
         this.promptBuilder = new PromptBuilder(traceProperties, promptProperties, ragAnswerPromptResource);
+        this.toolCallbacks = toolCallbackProvider.getToolCallbacks();
+        this.toolCallingManager = ToolCallingManager.builder().build();
+        this.auditStore = auditStoreProvider.getIfAvailable();
 
-        log.info("[管道] AgentPipeline 已就绪：直连 {}（不经 ChatClient，无切面链）",
-                chatModel.getClass().getSimpleName());
+        // ★★ 启动自检：模型必须是 DeepSeek，否则"克隆配置 + 加工具"这条路走不通
+        //    （getOptions() 返回的不是 DeepSeekChatOptions 就无法 mutate 出带工具的 DeepSeek options）。
+        //    在这里失败，而不是等运行期发现 reasoning-effort 静默丢失。
+        ChatOptions options = chatModel.getOptions();
+        if (!(options instanceof DeepSeekChatOptions)) {
+            throw new IllegalStateException(String.format("""
+                    工具循环要求模型的 ChatOptions 是 DeepSeekChatOptions（实际是 %s）。
+                    【为什么这是硬要求】带工具就必须显式传 ChatOptions，而显式传会覆盖模型配置的
+                    默认值 —— 若新建一个裸 options，配置里的 reasoning-effort 与模型名会【静默丢失】，
+                    表现为"思考过程忽然没了"且没有任何报错。本管线的做法是
+                    从模型配置好的那份 options【克隆】再加工具，因此它必须是我们能 mutate 的类型。
+                    【怎么修】确认 spring.ai.model.chat=deepseek 且未替换 ChatModel 实现；
+                    若确实要换模型提供方，需要为它实现同样的"克隆 + 加工具"路径。
+                    """, options == null ? "null" : options.getClass().getName()));
+        }
+        this.baseOptions = options;
+
+        log.info("[管道] AgentPipeline 已就绪：直连 {}（不经 ChatClient）；已注册工具 {} 个：{}",
+                chatModel.getClass().getSimpleName(),
+                toolCallbacks.length,
+                java.util.Arrays.stream(toolCallbacks)
+                        .map(t -> t.getToolDefinition().name())
+                        .toList());
     }
 
     // ========================================================================
@@ -182,51 +233,297 @@ public class AgentPipeline {
                     LOG_TAG, cid, safeMode, history.size(),
                     budget.maxTokens(), budget.maxMessages());
 
-            // ---------- ③ 检索 ----------
-            List<RetrievedChunk> fragments = retrievalService.retrieve(message, user);
-            //   ★ 旧实现有一道"context 里已有片段就跳过"的幂等检查，本类【刻意不要】：
-            //     管道是直线，这里物理上只执行一次。留着它等于为一个不可能发生的场景写代码
-            //     （协议第 7 条），而且它防的正是"切面被工具循环跑 N 次"这个已消失的前提。
+            // ---------- ③ 暂无"无条件检索" ----------
+            //   ★ 阶段 9 的重要行为变更：检索【不再】在管线里无条件执行。
+            //     它现在是 retrieveKnowledge 工具，由【模型决定】何时调用。
+            //     见 KnowledgeRetrievalTool 的类注释（三问的答案在那里）。
+            //     于是"这次要不要查知识库"从代码决定变成了模型决定 ——
+            //     这正是 RAG 与 agent 的实质差别。
 
-            // ---------- ④ 拼装 ----------
-            Prompt assembled = promptBuilder.assemble(original, history, fragments);
+            // ---------- ④ 拼装（只剩 system + 历史 + 本次提问） ----------
+            Prompt assembled = promptBuilder.assemble(original, history);
 
-            // 检索结果先出去 —— 前端据此显示"参考了哪几篇"
-            return Flux.concat(
-                    Flux.just(new PipelineEvent.Retrieved(fragments, message)),
-                    streamModel(assembled, cid, startNanos));
+            // 本轮循环状态：从拼装好的 prompt 开始，随工具结果不断增长
+            LoopState state = new LoopState(new ArrayList<>(assembled.getInstructions()),
+                    original.getUserMessage());
+            return loop(state, cid, user, startNanos);
         });
     }
 
     // ========================================================================
-    // ⑤⑥⑦ 模型调用与逐片累积
+    // ⑤⑥⑦ 工具循环 —— 本阶段的核心
     // ========================================================================
 
-    private Flux<PipelineEvent> streamModel(Prompt assembled, String conversationId, long startNanos) {
-        return Flux.defer(() -> {
-            StringBuilder textAcc = new StringBuilder();
-            StringBuilder reasoningAcc = new StringBuilder();
-            AtomicReference<ChatResponse> lastChunk = new AtomicReference<>();
+    /**
+     * 工具循环的可变状态。
+     *
+     * <p><b>为什么单独一个类，而不是几个局部变量</b>：循环是<b>递归</b>的
+     * （每一步用 {@code concatWith(Flux.defer(...))} 接下一步），
+     * 而 Java 的 lambda 只能捕获 effectively-final 变量 ——
+     * 累积器必须"活"在 lambda 之外。放进一个对象比用一堆 {@code AtomicReference} 清楚得多。
+     *
+     * <p>★ 每订阅一次新建一个实例（在 {@code Flux.defer} 内部创建）——
+     * 否则并发调用两条流会往同一组累积器里写，表现为"回答互相串台"且极难复现。
+     */
+    private static final class LoopState {
+        /** 交给模型的完整消息列表：system + 历史 + 提问，之后不断追加 assistant / tool 消息。 */
+        private final List<Message> messages;
+        /** 整轮拼接后的回答（跨所有步骤）。 */
+        private final StringBuilder text = new StringBuilder();
+        /** 整轮拼接后的思考（跨所有步骤）。 */
+        private final StringBuilder reasoning = new StringBuilder();
+        /** 已执行的步数（= 已发生的模型调用次数）。 */
+        private int steps;
+        /** 最后一片响应 —— {@code Final} 的 finishReason / usage 取自它。 */
+        private ChatResponse lastChunk;
+        /** 本次的用户消息。<b>只有这一条会写进会话记忆</b>（工具活动不写）。 */
+        private final Message userMessage;
 
-            return chatModel.stream(assembled)
+        private LoopState(List<Message> messages, Message userMessage) {
+            this.messages = messages;
+            this.userMessage = userMessage;
+        }
+    }
+
+    /**
+     * 循环的每一步：调模型 → 有工具就执行并回灌 → 再走一步；没有工具就收尾。
+     *
+     * <h2>★ 终止条件（四条，缺一不可）</h2>
+     *
+     * <pre>
+     *   ① 模型不再请求工具              ← 正常出口（模型决定）
+     *   ② 工具 returnDirect=true        ← 工具决定结束（框架翻成 finishReason=returnDirect）
+     *   ③ 步数达到 max-steps            ← 防御出口（我们决定）
+     *   ④ 上游异常                      ← 错误出口（走 onError）
+     * </pre>
+     *
+     * <p>★ <b>只靠①是危险的</b>：那是"由模型控制的出口"。模型若绕圈（反复请求同一个工具、
+     * 或永远不停），循环不会自己结束，而<b>每一次循环都是一次计费的模型调用</b>。
+     * 所以③必须有；②由工具自己声明（框架已支持）；④由 Reactor 的 onError 通道承担。
+     *
+     * <h2>★ 为什么要"克隆配置好的 options 再挂工具"（而不是新建一个）</h2>
+     *
+     * <p>阶段 8 用字节码确认过：{@code DeepSeekChatModel.buildRequestPrompt} 里
+     * <pre>
+     *   if (prompt.getOptions() == null) → 填入 this.getOptions()（配置里的那份）
+     *   else                            → 原样使用（★ 配置被覆盖）
+     * </pre>
+     * 而<b>要带工具就必须显式传 options</b>（工具挂在 options 上）。
+     * 于是"显式传"与"保住 reasoning-effort"直接冲突 ——
+     * 若新建一个裸 options，配置里的 {@code reasoning-effort: HIGH} 与模型名<b>会静默丢失</b>，
+     * 表现为"思考过程忽然没了"，而没有任何报错。
+     *
+     * <p><b>解法</b>：从模型配置好的那份 options <b>克隆</b>再加工具
+     * （{@code getOptions().mutate().toolCallbacks(...).build()}）。
+     * 实测字节码：{@code DeepSeekChatOptions.mutate()} 返回
+     * {@code DeepSeekChatOptions.Builder}，而它继承
+     * {@code DefaultToolCallingChatOptions.Builder<B>}（泛型自引用），
+     * 所以链式 {@code .toolCallbacks(...)} 之后 {@code .build()} 仍返回 {@code DeepSeekChatOptions} ——
+     * 原有字段全部保留。
+     *
+     * <p>构造器里已做一次启动自检：模型不是 DeepSeek 时<b>直接失败</b>，
+     * 而不是等到运行时才发现思考没了。
+     */
+    private Flux<PipelineEvent> loop(LoopState state,
+                                     String conversationId,
+                                     UserContext user,
+                                     long startNanos) {
+        return Flux.defer(() -> {
+            if (state.steps >= memoryProperties.getMaxSteps()) {
+                // ---------- ③ 防御出口：不再调用模型，用已累积的内容收尾 ----------
+                log.warn("[{}] ★ 达到步数上限 {}（可能模型在绕圈）—— 用已累积的 {} 字收尾。"
+                                + "【排查方向】① 工具描述是否让模型误解了用途；"
+                                + "② 工具返回内容是否让模型以为【还没做完】；"
+                                + "③ hagent.memory.chat.max-steps 是否需要调整",
+                        LOG_TAG, memoryProperties.getMaxSteps(), state.text.length());
+                return Flux.just(finish(state, conversationId, startNanos, "maxSteps"));
+            }
+            state.steps++;
+
+            // ---------- 用"克隆配置 + 挂工具 + 带身份"的 options 调模型 ----------
+            Prompt prompt = new Prompt(state.messages, optionsFor(user, null));
+
+            return chatModel.stream(prompt)
                     .doOnNext(chunk -> {
-                        lastChunk.set(chunk);
+                        state.lastChunk = chunk;
                         String text = textOf(chunk);
                         String reasoning = reasoningOf(chunk);
                         if (text != null && !text.isEmpty()) {
-                            textAcc.append(text);
+                            state.text.append(text);
                         }
                         if (reasoning != null && !reasoning.isEmpty()) {
-                            reasoningAcc.append(reasoning);
+                            state.reasoning.append(reasoning);
                         }
                     })
+                    // ★ 过滤空片：实测首片是 text=null / reasoning=空串。不过滤会往 SSE 里发空事件
                     .flatMap(this::emit)
-                    .concatWith(Flux.defer(() -> {
-                        // ---------- ⑦ 写回（必须在 Final 之前） ----------
-                        writeBack(conversationId, assembled, textAcc.toString());
-                        return Flux.just(buildFinal(textAcc, reasoningAcc, lastChunk.get(), startNanos));
-                    }));
+                    // ★ 本步的完整响应（含 toolCalls）决定"继续还是收尾"。
+                    //
+                    //   ⚠️ 这里【必须】用 concatWith，不能用 then：
+                    //     · concatWith → 先把上游事件（Reasoning/Token）全部发出去，
+                    //                    等上游完成后再订阅下一步 —— 事件保留 ✅
+                    //     · then       → 丢弃上游所有元素，只保留完成信号 —— 事件全丢 ❌
+                    //   实测踩过：用 then 时前端只会收到一个 Final，
+                    //   而断言会以 "Expected size: 3 but was: 1" 的形式暴露它。
+                    .concatWith(Flux.defer(() -> handleToolCalls(state, conversationId, user, startNanos)));
         });
+    }
+
+    /**
+     * 本步结束后：有工具请求就执行并回灌、递归下一步；否则收尾。
+     *
+     * <p><b>为什么返回 {@code Flux} 而不是 {@code Mono}</b>：这条路径可能产出
+     * <b>整条下一步的流</b>（递归），而不是单个元素。
+     */
+    private Flux<PipelineEvent> handleToolCalls(LoopState state,
+                                                String conversationId,
+                                                UserContext user,
+                                                long startNanos) {
+        return Flux.defer(() -> {
+            ChatResponse response = state.lastChunk;
+            if (response == null || !response.hasToolCalls()) {
+                // ---------- ① 正常出口 ----------
+                return Flux.just(finish(state, conversationId, startNanos,
+                        response == null ? null : finishReasonOf(response)));
+            }
+
+            // ---------- ② 执行工具并把结果回灌 ----------
+            //   两者都交给框架的 ToolCallingManager：
+            //   · 它负责按 JSON Schema 解析参数、反射调用、异常 → 文本
+            //   · 它负责把 assistant(toolCalls) 与 tool(结果) 两条消息拼进 conversationHistory
+            //   ★ "结果回流"不是框架自动做的 —— 是我们把 conversationHistory() 交回给模型的结果
+            //     （阶段 9 动手前已用一次性测试实测过这一点）。
+            List<AssistantMessage.ToolCall> requested = response.getResult().getOutput().getToolCalls();
+
+            // ---------- 先发 ToolCall 事件（用户要立刻看到"正在查…"）----------
+            //   ★ 顺序很重要：执行工具可能很慢，先发"开始"才有反馈。
+            //     若等执行完再一起发，前端在调用与结果之间没有任何可显示的东西。
+            Flux<PipelineEvent> callEvents = Flux.fromIterable(requested)
+                    .map(call -> (PipelineEvent) new PipelineEvent.ModelOutput.ToolCall(
+                            call.id(), call.name(), call.arguments()));
+
+            // ---------- 同步执行工具（框架的阻塞 API）----------
+            //   ★ 这一步【必须是阻塞的】：不仅因为框架的 executeToolCalls 是同步方法，
+            //     更因为"先发 ToolCall、再执行、再发 ToolResult"这个顺序需要它。
+            //     而工具内部若要发事件（如检索发出 Retrieved），走 ToolContext 里的
+            //     ToolEventSink —— 它也是同步的（见该类注释）。
+            List<PipelineEvent> toolPhaseEvents = new ArrayList<>();
+            Prompt prompt = new Prompt(state.messages, optionsFor(user, toolPhaseEvents::add));
+            ToolExecutionResult execution =
+                    toolCallingManager.executeToolCalls(prompt, response);
+
+            state.messages.clear();
+            state.messages.addAll(execution.conversationHistory());
+
+            // ---------- 再发"工具执行期间产生的"事件 + ToolResult ----------
+            List<PipelineEvent.ModelOutput.ToolResult> results = toolResultEvents(execution, requested);
+            toolPhaseEvents.addAll(results);
+
+            // ---------- ⑧ 写审计（阶段 9.3）----------
+            //   ★ 与记忆写回一样：【不在关键路径上】。
+            //     实现内部吞掉异常并记 ERROR（见 ToolInvocationStore 的类注释）——
+            //     为"审计写不进去"丢掉已经产生的模型回复是双重损失。
+            recordAudit(conversationId, state.steps, requested, results);
+
+            log.debug("[{}] 第 {} 步：执行了 {} 个工具，历史消息数 {} → {}",
+                    LOG_TAG, state.steps, requested.size(),
+                    prompt.getInstructions().size(), state.messages.size());
+
+            // ---------- 递归走下一步 ----------
+            //   ★ 用 Flux.defer + concatWith 保持整条链响应式；不要 block()（那会在 SSE 线程上阻塞）。
+            return callEvents.concatWith(Flux.fromIterable(toolPhaseEvents))
+                    .concatWith(Flux.defer(() -> loop(state, conversationId, user, startNanos)));
+        });
+    }
+
+    /**
+     * 把本步的每一次工具调用写进审计表。
+     *
+     * <p><b>为什么按"调用"逐条写，而不是把整步写成一条</b>：
+     * 一轮可能有 N 次调用，每条都是一次独立的事实（调了什么、拿到什么）。
+     * 合成一条会逼着查询方去解析那个合并结构 —— 正是本项目反对的
+     * "结构化数据变文本、再解析回来"。
+     *
+     * <p><b>参数与结果按下标配对</b>：框架保证 {@code ToolResponse} 与 {@code ToolCall} 同序。
+     * 若某次调用没有对应结果（理论上不该发生），{@code result} 为 null 而<b>记录照写</b> ——
+     * 审计要如实反映"这次调用发生了"，而不是因为拿不到结果就整条不记。
+     */
+    private void recordAudit(String conversationId,
+                             int stepIndex,
+                             List<AssistantMessage.ToolCall> requested,
+                             List<PipelineEvent.ModelOutput.ToolResult> results) {
+        if (auditStore == null) {
+            // ★ 明确告知"审计没在跑"，而不是静默不写。
+            //   运维若以为审计一直在记录，出事时才会发现它是空的。
+            log.warn("[{}] 审计存储不可用（hagent.tool.audit.enabled=false？）—— "
+                    + "本次 {} 个工具调用【没有留下审计记录】", LOG_TAG, requested.size());
+            return;
+        }
+        for (int i = 0; i < requested.size(); i++) {
+            AssistantMessage.ToolCall call = requested.get(i);
+            String result = i < results.size() ? results.get(i).result() : null;
+            auditStore.record(new ToolInvocationStore.ToolInvocation(
+                    conversationId, stepIndex, call.name(), call.arguments(), result));
+        }
+    }
+
+    /**
+     * 把工具返回的文本转成 {@link PipelineEvent.ModelOutput.ToolResult} 事件。
+     *
+     * <p>结果在 {@code conversationHistory} 的<b>最后一条</b> {@code ToolResponseMessage} 里
+     * （框架的约定：assistant(工具请求) 之后紧跟 tool(结果)）。
+     *
+     * <p>★ 与请求配对：模型一次可能请求多个工具，框架保证响应与请求<b>同序</b>，
+     * 所以这里按下标取 {@code id}。若框架将来不保证顺序，配对的 id 会错 ——
+     * 但正文不受影响（刻意不让它成为关键路径）。
+     */
+    private List<PipelineEvent.ModelOutput.ToolResult> toolResultEvents(ToolExecutionResult execution,
+                                                  List<AssistantMessage.ToolCall> requested) {
+        List<Message> history = execution.conversationHistory();
+        if (history == null || history.isEmpty()) {
+            return List.of();
+        }
+        Message last = history.get(history.size() - 1);
+        if (!(last instanceof ToolResponseMessage toolResponse)) {
+            return List.of();
+        }
+        List<PipelineEvent.ModelOutput.ToolResult> events = new ArrayList<>();
+        List<ToolResponseMessage.ToolResponse> responses = toolResponse.getResponses();
+        for (int i = 0; i < responses.size(); i++) {
+            ToolResponseMessage.ToolResponse r = responses.get(i);
+            String id = (requested != null && i < requested.size()) ? requested.get(i).id() : null;
+            events.add(new PipelineEvent.ModelOutput.ToolResult(id, r.name(), r.responseData()));
+        }
+        return events;
+    }
+
+    /**
+     * 克隆"模型配置好的 options"，挂上工具、调用方身份与事件出口。
+     *
+     * <p>构造器已保证 {@code chatModel.getOptions()} 是 {@code DeepSeekChatOptions}
+     * （不是就在启动期失败），所以这里的转换是安全的。
+     *
+     * @param sink 工具执行期间发事件的通道；没有工具要发事件时传 null 也可以
+     *             （工具侧取不到出口是正常状态，不告警 —— 见 {@code KnowledgeRetrievalTool}）
+     */
+    private ToolCallingChatOptions optionsFor(UserContext user, ToolEventSink sink) {
+        var builder = DeepSeekChatOptions.class.cast(baseOptions)
+                .mutate()
+                .toolCallbacks(toolCallbacks)
+                .toolContext(KnowledgeRetrievalTool.TOOL_CONTEXT_USER, user);
+        if (sink != null) {
+            builder = builder.toolContext(KnowledgeRetrievalTool.TOOL_CONTEXT_SINK, sink);
+        }
+        return builder.build();
+    }
+
+    /** 收尾：写回记忆 + 产出 {@link PipelineEvent.ModelOutput.Final}。 */
+    private PipelineEvent.ModelOutput.Final finish(LoopState state,
+                                                   String conversationId,
+                                                   long startNanos,
+                                                   String finishReason) {
+        writeBack(conversationId, state.userMessage, state.text.toString());
+        return buildFinal(state.text, state.reasoning, finishReason, state.lastChunk, startNanos);
     }
 
     /**
@@ -256,11 +553,11 @@ public class AgentPipeline {
 
     private PipelineEvent.ModelOutput.Final buildFinal(StringBuilder textAcc,
                                                        StringBuilder reasoningAcc,
+                                                       String finishReason,
                                                        ChatResponse lastChunk,
                                                        long startNanos) {
         String text = textAcc.toString();
         String reasoning = reasoningAcc.toString();
-        String finishReason = finishReasonOf(lastChunk);
         Usage usage = usageOf(lastChunk);
         long costMillis = (System.nanoTime() - startNanos) / 1_000_000;
 
@@ -277,22 +574,30 @@ public class AgentPipeline {
     }
 
     /**
-     * 写回「本次问 + 模型答」。
+     * 写回「本次问 + 模型最终答」。
      *
-     * <p><b>用户消息从哪取</b>：从<b>拼装前的</b>原始 prompt 取，而不是从 {@code assembled} 取。
-     * 拼装后的 prompt 里最后一条确实是本次用户消息，但"靠位置取"会在将来
-     * （阶段 9 插入 tool 消息时）变得脆弱 —— 而原始 prompt 里只有一条 user，语义明确。
-     * 本方法因此接收的是<b>拼装后</b>的 prompt 仅用于取 user；
-     * 由于 {@code PromptBuilder} 保证 user 消息原样保留到最后，两者取到的是同一个对象。
+     * <p><b>★ 阶段 9 起：只写这两条，不写工具活动</b>（决策 32 的延续）。
+     * 循环过程中 {@code state.messages} 会不断长出 {@code assistant(toolCalls)} 与
+     * {@code tool(结果)} 消息 —— 它们**不进会话记忆**：
+     * <ul>
+     *   <li>记录层是<b>用户可见的对话记录</b>；混进工具消息会让用户看到模型的"手机屏幕"
+     *       （将来"给用户的完整历史"API 就得额外过滤）；</li>
+     *   <li>上下文层是<b>模型这次要用的上下文</b>；工具结果是执行态，重放它既费 token
+     *       又可能在下一轮造成困惑。</li>
+     * </ul>
+     * 工具活动另有归宿：审计表 {@code chat_tool_invocation}（阶段 9.3）。
+     *
+     * <p><b>用户消息从哪取</b>：从<b>拼装前的原始 prompt</b> 取（由调用方传入），
+     * 而不是从循环中的消息列表取 —— 后者已经混进了 tool 消息，
+     * "靠位置找最后一条 user" 会随循环增长而变脆。
      *
      * <p>写回失败<b>不影响本次响应</b> —— 失败分级在 {@code LayeredConversationMemory} 里，
      * 本方法无法也不应感知成败（见类注释的诚实声明）。
      */
-    private void writeBack(String conversationId, Prompt assembled, String replyText) {
+    private void writeBack(String conversationId, Message userMessage, String replyText) {
         List<Message> turn = new ArrayList<>(2);
-        UserMessage user = assembled.getUserMessage();
-        if (user != null) {
-            turn.add(user);
+        if (userMessage != null) {
+            turn.add(userMessage);
         }
         if (replyText != null && !replyText.isBlank()) {
             turn.add(new AssistantMessage(replyText));

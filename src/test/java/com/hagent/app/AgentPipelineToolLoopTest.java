@@ -1,0 +1,557 @@
+package com.hagent.app;
+
+import com.hagent.config.PromptProperties;
+import com.hagent.config.TraceProperties;
+import com.hagent.memory.ConversationMemory;
+import com.hagent.memory.MemoryMode;
+import com.hagent.memory.MemoryProperties;
+import com.hagent.memory.TokenBudget;
+import com.hagent.security.UserContext;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
+import org.springframework.ai.deepseek.DeepSeekChatOptions;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.definition.DefaultToolDefinition;
+import org.springframework.core.io.ByteArrayResource;
+import reactor.core.publisher.Flux;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * <b>工具循环的行为契约</b> —— 阶段 9.1 的核心防线。
+ *
+ * <h2>★ 它守的四件事（都是"写错了不报错"的类型）</h2>
+ *
+ * <ol>
+ *   <li><b>循环真的会"多走一步"</b>：模型请求工具 → 执行 → 把结果回灌 → <b>再调模型</b>。
+ *       若忘了回灌（或回灌后没再调模型），表现为"模型说了一句『我要查一下』就结束了"，
+ *       <b>用户永远拿不到答案，而没有任何报错</b>；</li>
+ *   <li><b>循环会正常结束</b>：模型不再请求工具时就收尾，
+ *       而不是无限地再调一次；</li>
+ *   <li>★ <b>步数上限真的会拦住绕圈的模型</b>：这一条尤其重要 ——
+ *       它是唯一"由我们控制"的出口，而<b>每多走一步都是一次计费的模型调用</b>；</li>
+ *   <li><b>工具结果确实被送给了模型</b>：断言第 2 次调用的提示词里有 {@code ToolResponseMessage}
+ *       （这是"工具真的被执行并回流"的直接证据，而不是只看最终文本猜）。</li>
+ * </ol>
+ *
+ * <h2>测试怎么做到"确定"</h2>
+ *
+ * <p>用假的 {@code ChatModel} 按<b>脚本</b>逐次返回：第 1 次要求调工具、第 2 次给最终答案。
+ * 用假的 {@link ToolCallback} 记录被调用次数并返回固定结果。
+ * 两者都不碰真实 API，因此可重复、不花钱。
+ */
+class AgentPipelineToolLoopTest {
+
+    // ========================================================================
+    // 测试替身
+    // ========================================================================
+
+    /** 记录型记忆。 */
+    private static final class RecordingMemory implements ConversationMemory {
+        private final List<List<Message>> appended = new ArrayList<>();
+
+        @Override
+        public void append(String conversationId, List<Message> messages) {
+            appended.add(messages);
+        }
+
+        @Override
+        public List<Message> load(String conversationId, TokenBudget budget) {
+            return List.of();
+        }
+
+        @Override
+        public void clear(String conversationId) {
+        }
+
+        @Override
+        public void delete(String conversationId) {
+        }
+    }
+
+    /** 记录被调用次数的假工具。 */
+    private static final class FakeTool {
+        private final String name;
+        private final String result;
+        private final AtomicInteger calls = new AtomicInteger();
+
+        FakeTool(String name, String result) {
+            this.name = name;
+            this.result = result;
+        }
+
+        ToolCallback asCallback() {
+            return new ToolCallback() {
+                @Override
+                public org.springframework.ai.tool.definition.ToolDefinition getToolDefinition() {
+                    return DefaultToolDefinition.builder()
+                            .name(name)
+                            .description("测试用假工具：" + name)
+                            .inputSchema("{\"type\":\"object\",\"properties\":{}}")
+                            .build();
+                }
+
+                @Override
+                public String call(String toolInput) {
+                    calls.incrementAndGet();
+                    return result;
+                }
+            };
+        }
+    }
+
+    private MemoryProperties memoryProperties(int maxSteps) {
+        MemoryProperties props = new MemoryProperties();
+        props.setConversationMaxTokens(5000);
+        props.setConversationMaxMessages(30);
+        props.setWorkflowMaxTokens(50000);
+        props.setWorkflowMaxMessages(200);
+        props.setMaxSteps(maxSteps);
+        return props;
+    }
+
+    private static DeepSeekChatOptions deepSeekOptions() {
+        return DeepSeekChatOptions.builder().model("deepseek-flash").build();
+    }
+
+    /** 一片"要求调用工具"的响应。 */
+    private ChatResponse toolCallChunk(String toolName, String args) {
+        DeepSeekAssistantMessage message = DeepSeekAssistantMessage.builder()
+                .content("")
+                .reasoningContent("我应该调用 " + toolName)
+                .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", toolName, args)))
+                .build();
+        return new ChatResponse(List.of(new Generation(message)));
+    }
+
+    /** 一片"最终回答"的响应（无工具调用）。 */
+    private ChatResponse finalChunk(String text) {
+        DeepSeekAssistantMessage message = DeepSeekAssistantMessage.builder()
+                .content(text)
+                .reasoningContent("想清楚了")
+                .toolCalls(List.of())
+                .build();
+        return new ChatResponse(List.of(new Generation(message)));
+    }
+
+    private PipelineEvent.ModelOutput.Final finalOf(List<PipelineEvent> events) {
+        return events.stream()
+                .filter(PipelineEvent.ModelOutput.Final.class::isInstance)
+                .map(PipelineEvent.ModelOutput.Final.class::cast)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("事件流里没有 Final：" + events));
+    }
+
+    // ========================================================================
+    // 一、★★ 循环真的会多走一步（本测试最重要的一条）
+    // ========================================================================
+
+    @Test
+    @DisplayName("★★ 模型请求工具 → 执行 → 结果回灌 → 再调模型 → 拿到最终答案")
+    void loopFeedsToolResultBackAndCallsModelAgain() {
+        FakeTool weather = new FakeTool("getWeather", "杭州今天晴，26 度");
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+
+        AtomicInteger modelCalls = new AtomicInteger();
+        List<Prompt> captured = new ArrayList<>();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> {
+            captured.add(invocation.getArgument(0));
+            return modelCalls.getAndIncrement() == 0
+                    ? Flux.just(toolCallChunk("getWeather", "{}"))
+                    : Flux.just(finalChunk("杭州今天晴，26 度。"));
+        });
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(),
+                TestToolCallbackProvider.of(weather.asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(modelCalls.get())
+                .as("★ 模型必须被调用【两次】：一次请求工具、一次给答案。"
+                        + "若只调用一次，说明循环没有继续 —— 用户会只看到『我要查一下』")
+                .isEqualTo(2);
+        assertThat(weather.calls.get())
+                .as("工具必须被真的执行一次")
+                .isEqualTo(1);
+        assertThat(finalOf(events).text())
+                .as("最终答案来自【第 2 次】模型调用（工具结果之后的那个）")
+                .isEqualTo("杭州今天晴，26 度。");
+
+        // ★ 直接证据：第 2 次调用的提示词里必须有工具结果
+        List<Message> secondPrompt = captured.get(1).getInstructions();
+        assertThat(secondPrompt)
+                .as("第 2 次提示词必须含 ToolResponseMessage —— 这是『结果真的回流了』的直接证据，"
+                        + "而不是靠最终文本反推")
+                .anyMatch(ToolResponseMessage.class::isInstance);
+    }
+
+    @Test
+    @DisplayName("★ 模型不请求工具时只调用一次 —— 循环不会白走")
+    void noToolCallMeansSingleModelCall() {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger modelCalls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> {
+            modelCalls.incrementAndGet();
+            return Flux.just(finalChunk("不需要工具"));
+        });
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(), TestToolCallbackProvider.none(),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(modelCalls.get())
+                .as("没有工具请求就【不该】再调一次 —— 那是一次白花的模型调用")
+                .isEqualTo(1);
+        assertThat(finalOf(events).text()).isEqualTo("不需要工具");
+    }
+
+    // ========================================================================
+    // 二、★★ 步数上限（唯一由我们控制的出口）
+    // ========================================================================
+
+    @Test
+    @DisplayName("★★ 模型一直请求工具 → 达到 max-steps 就收尾，不会无限循环")
+    void maxStepsStopsARunawayLoop() {
+        FakeTool loopTool = new FakeTool("loopingTool", "结果");
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger modelCalls = new AtomicInteger();
+        // ★ 每次都给"要调工具"，模拟绕圈的模型
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> {
+            modelCalls.incrementAndGet();
+            return Flux.just(toolCallChunk("loopingTool", "{}"));
+        });
+
+        int maxSteps = 3;
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(),
+                TestToolCallbackProvider.of(loopTool.asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(maxSteps),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("一直绕圈", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(modelCalls.get())
+                .as("★ 模型调用次数必须【恰好】等于 max-steps(%d)："
+                        + "每多一次都是一次计费调用。若这里失败，说明防御出口没生效 ——"
+                        + "而现实中那意味着账单失控", maxSteps)
+                .isEqualTo(maxSteps);
+        assertThat(events)
+                .as("即使绕圈，也必须产出 Final 收尾 —— 不能让调用方拿不到任何结果")
+                .anyMatch(PipelineEvent.ModelOutput.Final.class::isInstance);
+    }
+
+    @Test
+    @DisplayName("★ 达到上限时用【已累积的内容】收尾，而不是丢掉（用户已经等到了）")
+    void maxStepsStillReturnsAccumulatedText() {
+        FakeTool tool = new FakeTool("t", "r");
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
+                // 既有正文又有工具请求：正文要留下来
+                Flux.just(new ChatResponse(List.of(new Generation(
+                        DeepSeekAssistantMessage.builder()
+                                .content("我先查一下。")
+                                .reasoningContent("想想")
+                                .toolCalls(List.of(new AssistantMessage.ToolCall(
+                                        "c", "function", "t", "{}")))
+                                .build())))));
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(), TestToolCallbackProvider.of(tool.asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(2),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("问", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(finalOf(events).text())
+                .as("超限收尾时要把已经流出来的正文带上 —— 丢掉它等于让用户白等")
+                .isEqualTo("我先查一下。我先查一下。");
+    }
+
+    // ========================================================================
+    // 四、★ 工具事件：ToolCall 必须先于 ToolResult（前端要有"正在做"的反馈）
+    // ========================================================================
+
+    @Test
+    @DisplayName("★★ 事件顺序：ToolCall 先、ToolResult 后，且顺序恰好一一对应")
+    void toolCallEventComesBeforeToolResult() {
+        FakeTool weather = new FakeTool("getWeather", "杭州今天晴，26 度");
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger calls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
+                calls.getAndIncrement() == 0
+                        ? Flux.just(toolCallChunk("getWeather", "{\"city\":\"杭州\"}"))
+                        : Flux.just(finalChunk("今天晴。")));
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(), TestToolCallbackProvider.of(weather.asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("杭州天气", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        List<PipelineEvent.ModelOutput> modelEvents = events.stream()
+                .filter(PipelineEvent.ModelOutput.class::isInstance)
+                .map(PipelineEvent.ModelOutput.class::cast)
+                .toList();
+
+        PipelineEvent.ModelOutput.ToolCall call = modelEvents.stream()
+                .filter(PipelineEvent.ModelOutput.ToolCall.class::isInstance)
+                .map(PipelineEvent.ModelOutput.ToolCall.class::cast)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("没有 ToolCall 事件：" + modelEvents));
+        PipelineEvent.ModelOutput.ToolResult result = modelEvents.stream()
+                .filter(PipelineEvent.ModelOutput.ToolResult.class::isInstance)
+                .map(PipelineEvent.ModelOutput.ToolResult.class::cast)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("没有 ToolResult 事件：" + modelEvents));
+
+        assertThat(call.name()).isEqualTo("getWeather");
+        assertThat(call.arguments()).as("参数是模型生成的 JSON 原文").contains("杭州");
+        assertThat(result.name()).isEqualTo("getWeather");
+        assertThat(result.result()).as("结果文本就是模型看到的那个").contains("26 度");
+        assertThat(result.id())
+                .as("请求与结果必须能配对（前端据此把一次调用渲染成一行）")
+                .isEqualTo(call.id());
+
+        assertThat(modelEvents.indexOf(call))
+                .as("★ ToolCall 必须排在 ToolResult【之前】—— 工具执行可能很慢，"
+                        + "先发『开始』用户才有『正在查…』的反馈；"
+                        + "若两者顺序反了，前端只能在结果出来后才显示这次调用")
+                .isLessThan(modelEvents.indexOf(result));
+    }
+
+    @Test
+    @DisplayName("★★ 检索工具发出 Retrieved 事件 —— 出处是结构化数据，不经过文本解析")
+    void retrievalToolEmitsRetrievedEvent() {
+        // 用【真实】的 KnowledgeRetrievalTool，而不是假工具：
+        // 这条要验的正是"工具从 ToolContext 拿到事件出口并发出 Retrieved"。
+        com.hagent.app.KnowledgeRetrievalService retrieval =
+                mock(com.hagent.app.KnowledgeRetrievalService.class);
+        com.hagent.retrieval.RetrievedChunk chunk = new com.hagent.retrieval.RetrievedChunk(
+                "员工每年享有五天带薪年假", "员工手册", "员工手册", "假期管理", 0,
+                com.hagent.document.AccessLevel.INTERNAL, 0.8,
+                com.hagent.retrieval.RelevanceBand.HIGH);
+        when(retrieval.retrieve(any(), any())).thenReturn(List.of(chunk));
+
+        ToolCallback[] callbacks = org.springframework.ai.tool.method.MethodToolCallbackProvider
+                .builder()
+                .toolObjects(new com.hagent.tool.KnowledgeRetrievalTool(retrieval))
+                .build()
+                .getToolCallbacks();
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger calls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
+                calls.getAndIncrement() == 0
+                        ? Flux.just(toolCallChunk("retrieveKnowledge", "{\"query\":\"年假几天\"}"))
+                        : Flux.just(finalChunk("五天。")));
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(), TestToolCallbackProvider.of(callbacks),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("年假几天", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        PipelineEvent.Retrieved retrieved = events.stream()
+                .filter(PipelineEvent.Retrieved.class::isInstance)
+                .map(PipelineEvent.Retrieved.class::cast)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "检索工具没有发出 Retrieved 事件 —— 前端将无法显示『参考了哪几篇』。"
+                                + "事件流：" + events));
+
+        assertThat(retrieved.chunks()).containsExactly(chunk);
+        assertThat(retrieved.query())
+                .as("外传查询串，让前端与排查都能确认『检索用的是什么问题』"
+                        + "（它可能已被模型改写得更明确）")
+                .isEqualTo("年假几天");
+    }
+
+    @Test
+    @DisplayName("★ 检索被关掉（0 个工具）时不产生任何工具事件")
+    void noToolsMeansNoToolEvents() {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(finalChunk("纯对话")));
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(), TestToolCallbackProvider.none(),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(events)
+                .noneMatch(PipelineEvent.ModelOutput.ToolCall.class::isInstance)
+                .noneMatch(PipelineEvent.ModelOutput.ToolResult.class::isInstance)
+                .noneMatch(PipelineEvent.Retrieved.class::isInstance);
+    }
+
+    // ========================================================================
+    // 五、★ 审计（阶段 9.3）：工具调用必须留下可追溯的记录
+    // ========================================================================
+
+    @Test
+    @DisplayName("★★ 每次工具调用写一条审计：会话 / 步序 / 工具名 / 参数 / 结果")
+    void toolInvocationsAreAudited() {
+        FakeTool weather = new FakeTool("getWeather", "杭州今天晴，26 度");
+        TestAudit.RecordingAudit audit = TestAudit.recording();
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger calls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
+                calls.getAndIncrement() == 0
+                        ? Flux.just(toolCallChunk("getWeather", "{\"city\":\"杭州\"}"))
+                        : Flux.just(finalChunk("今天晴。")));
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(),
+                TestToolCallbackProvider.of(weather.asCallback()),
+                audit,
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        pipeline.run("杭州天气", "conv-9", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(audit.recorded())
+                .as("一次工具调用 = 一条审计记录。这是『事后能查』的唯一载体 —— "
+                        + "若这里是空的，说明审计没落库，而出事时才发现的代价很高")
+                .hasSize(1);
+
+        var record = audit.recorded().get(0);
+        assertThat(record.conversationId()).isEqualTo("conv-9");
+        assertThat(record.stepIndex()).as("第 1 步（该工具是本次对话的第一次工具调用）").isEqualTo(1);
+        assertThat(record.toolName()).isEqualTo("getWeather");
+        assertThat(record.arguments()).as("参数原文要留档（审计要能回答『它被喂了什么』）").contains("杭州");
+        assertThat(record.result()).as("结果原文要留档（模型看到的同一份）").contains("26 度");
+    }
+
+    @Test
+    @DisplayName("★★ 审计被关掉时：工具照常执行、对话照常完成，只是没有审计记录")
+    void auditDisabledStillRunsToolsButRecordsNothing() {
+        FakeTool weather = new FakeTool("getWeather", "晴");
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger calls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
+                calls.getAndIncrement() == 0
+                        ? Flux.just(toolCallChunk("getWeather", "{}"))
+                        : Flux.just(finalChunk("今天晴。")));
+
+        // TestAudit.disabled() 的 getIfAvailable() 返回 null —— 等价于
+        // hagent.tool.audit.enabled=false（该 Bean 不存在）
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(),
+                TestToolCallbackProvider.of(weather.asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        List<PipelineEvent> events = pipeline
+                .run("天气", "conv-8", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(weather.calls.get())
+                .as("★ 关掉审计【不能】影响功能：工具必须照常执行")
+                .isEqualTo(1);
+        assertThat(finalOf(events).text())
+                .as("对话必须照常完成 —— 审计是可关闭的旁路，不是依赖")
+                .isEqualTo("今天晴。");
+    }
+
+    // ========================================================================
+    // 三、工具活动不进会话记忆（跨轮不注入那条决定的落点）
+    // ========================================================================
+
+    @Test
+    @DisplayName("★★ 写回记忆的只有【问 + 最终答】，工具消息不进记忆")
+    void toolMessagesAreNotWrittenToMemory() {
+        FakeTool tool = new FakeTool("getWeather", "晴");
+        RecordingMemory memory = new RecordingMemory();
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger calls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
+                calls.getAndIncrement() == 0
+                        ? Flux.just(toolCallChunk("getWeather", "{}"))
+                        : Flux.just(finalChunk("今天晴。")));
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, memory, TestToolCallbackProvider.of(tool.asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+
+        pipeline.run("天气", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(memory.appended).hasSize(1);
+        List<Message> turn = memory.appended.get(0);
+        assertThat(turn)
+                .as("★ 只写两条：用户提问 + 最终回答。工具活动另有归宿（审计表），"
+                        + "若这里出现 ToolResponseMessage，说明有人把工具消息写进了 "
+                        + "用户可见的对话记录 —— 用户会在聊天窗口看到模型的『手机屏幕』")
+                .hasSize(2)
+                .noneMatch(ToolResponseMessage.class::isInstance);
+        assertThat(turn.get(0).getText()).isEqualTo("天气");
+        assertThat(turn.get(1).getText()).isEqualTo("今天晴。");
+    }
+}

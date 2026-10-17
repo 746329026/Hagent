@@ -2,9 +2,6 @@ package com.hagent.app;
 
 import com.hagent.config.PromptProperties;
 import com.hagent.config.TraceProperties;
-import com.hagent.document.AccessLevel;
-import com.hagent.retrieval.RelevanceBand;
-import com.hagent.retrieval.RetrievedChunk;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -68,11 +65,6 @@ class PromptBuilderTest {
         return new Prompt(List.of(new UserMessage(userText)));
     }
 
-    private RetrievedChunk chunk(String content, String source, String section) {
-        return new RetrievedChunk(content, source, source, section, 0,
-                AccessLevel.INTERNAL, 0.8, RelevanceBand.HIGH);
-    }
-
     // ========================================================================
     // 一、结构：顺序不能变
     // ========================================================================
@@ -84,7 +76,7 @@ class PromptBuilderTest {
                 new UserMessage("我叫张三"),
                 new AssistantMessage("你好张三"));
 
-        Prompt assembled = builder().assemble(original("我叫什么？"), history, List.of());
+        Prompt assembled = builder().assemble(original("我叫什么？"), history);
 
         List<Message> messages = assembled.getInstructions();
         assertThat(messages).hasSize(1 + history.size() + 1);
@@ -97,12 +89,9 @@ class PromptBuilderTest {
     }
 
     @Test
-    @DisplayName("★ 约束与片段合并进【同一条】 system 消息，而不是多条")
-    void constraintAndFragmentsShareOneSystemMessage() {
-        Prompt assembled = builder().assemble(
-                original("年假几天"),
-                List.of(),
-                List.of(chunk("员工每年享有五天带薪年假", "员工手册", "假期管理")));
+    @DisplayName("★ 约束与原有 system 合并进【同一条】 system 消息，而不是多条")
+    void constraintAndSystemShareOneSystemMessage() {
+        Prompt assembled = builder().assemble(original("年假几天"), List.of());
 
         long systemCount = assembled.getInstructions().stream()
                 .filter(SystemMessage.class::isInstance).count();
@@ -113,38 +102,26 @@ class PromptBuilderTest {
                 .isEqualTo(1);
 
         String systemText = ((SystemMessage) assembled.getInstructions().get(0)).getText();
-        assertThat(systemText)
-                .contains(CONSTRAINT_TEXT.trim())
-                .contains("【知识库片段】")
-                .contains("员工每年享有五天带薪年假");
+        assertThat(systemText).contains(CONSTRAINT_TEXT.trim());
     }
 
-    @Test
-    @DisplayName("★ 片段在 system 里且带来源与档位 —— 模型据此才能『说明出处』")
-    void fragmentsCarrySourceAndBand() {
-        Prompt assembled = builder().assemble(
-                original("年假几天"),
-                List.of(),
-                List.of(chunk("员工每年享有五天带薪年假", "员工手册", "假期管理")));
+    // ========================================================================
+    // ★ 阶段 9 迁走的三个用例（不是删除功能，是搬到职责的新归属处）
+    //
+    //   它们原先断言"检索片段被拼进 system"：
+    //     · constraintAndFragmentsShareOneSystemMessage
+    //     · fragmentsCarrySourceAndBand（来源 / 相关度）
+    //     · noFragmentBlockWhenEmpty
+    //
+    //   阶段 9 把检索改成 retrieveKnowledge 工具后，片段【不再进 system】，
+    //   而是作为工具结果回到模型手里 —— 模型只能看到工具返回的字符串，
+    //   所以"渲染成带来源与相关度的文本"这件事跟着职责搬到了
+    //   KnowledgeRetrievalTool#render。
+    //
+    //   ⇒ 对应的断言在 KnowledgeRetrievalToolTest 里（renderedResultCarriesSourceAndBand 等）。
+    //     测试跟着职责走，而不是留在原地测一个已经不存在的路径。
+    // ========================================================================
 
-        String systemText = ((SystemMessage) assembled.getInstructions().get(0)).getText();
-        assertThat(systemText)
-                .contains("来源：员工手册")
-                .contains("相关度：高")
-                .as("没有元数据时『说明出处』只能靠编造（决策 22 的甲方案）")
-                .contains("假期管理");
-    }
-
-    @Test
-    @DisplayName("★ 片段为空时不产出片段块 —— 不能让模型看到一个空的『知识库片段』标题")
-    void noFragmentBlockWhenEmpty() {
-        Prompt assembled = builder().assemble(original("你好"), List.of(), List.of());
-
-        String systemText = ((SystemMessage) assembled.getInstructions().get(0)).getText();
-        assertThat(systemText)
-                .doesNotContain("【知识库片段】")
-                .contains(CONSTRAINT_TEXT.trim());
-    }
 
     // ========================================================================
     // 二、未知消息保留（从旧实现的教训保留下来的一条义务）
@@ -159,7 +136,7 @@ class PromptBuilderTest {
                 unknown,
                 new UserMessage("本次提问")));
 
-        Prompt assembled = builder().assemble(original, List.of(), List.of());
+        Prompt assembled = builder().assemble(original, List.of());
 
         assertThat(assembled.getInstructions())
                 .as("旧实现只挑 system / history / user 三类、其余全丢 —— 它丢的是别人的东西。"
@@ -177,7 +154,7 @@ class PromptBuilderTest {
                 sameContentAsUser,
                 new UserMessage("一样的话")));
 
-        Prompt assembled = builder().assemble(original, List.of(), List.of());
+        Prompt assembled = builder().assemble(original, List.of());
 
         assertThat(assembled.getInstructions())
                 .as("内容相同但引用不同的消息必须被保留")
@@ -195,7 +172,7 @@ class PromptBuilderTest {
         SystemMessage second = new SystemMessage("第二段 system（阶段 9 的工具说明之类）");
         Prompt original = new Prompt(List.of(first, second, new UserMessage("提问")));
 
-        Prompt assembled = builder().assemble(original, List.of(), List.of());
+        Prompt assembled = builder().assemble(original, List.of());
 
         String systemText = ((SystemMessage) assembled.getInstructions().get(0)).getText();
         assertThat(systemText)
@@ -217,7 +194,7 @@ class PromptBuilderTest {
         PromptProperties off = new PromptProperties();
         off.setIncludeConstraint(false);
 
-        Prompt assembled = builder(off).assemble(original("你好"), List.of(), List.of());
+        Prompt assembled = builder(off).assemble(original("你好"), List.of());
 
         assertThat(assembled.getInstructions())
                 .allMatch(m -> m instanceof UserMessage,
@@ -231,7 +208,7 @@ class PromptBuilderTest {
         PromptProperties off = new PromptProperties();
         off.setIncludeConstraint(false);
 
-        Prompt assembled = builder(off).assemble(original("你好"), List.of(), List.of());
+        Prompt assembled = builder(off).assemble(original("你好"), List.of());
 
         assertThat(assembled.getInstructions())
                 .allMatch(m -> m instanceof UserMessage)
@@ -264,7 +241,7 @@ class PromptBuilderTest {
                 new TraceProperties(), new PromptProperties(),
                 new ClassPathResource("prompts/rag-answer-prompt.md"));
 
-        Prompt assembled = real.assemble(original("你好"), List.of(), List.of());
+        Prompt assembled = real.assemble(original("你好"), List.of());
         String systemText = ((SystemMessage) assembled.getInstructions().get(0)).getText();
 
         assertThat(systemText)
@@ -279,7 +256,7 @@ class PromptBuilderTest {
     @Test
     @DisplayName("★ 空历史与 null 片段都不报错 —— 新会话是最常见的路径")
     void emptyHistoryAndNullFragmentsAreSafe() {
-        Prompt assembled = builder().assemble(original("第一句话"), List.of(), null);
+        Prompt assembled = builder().assemble(original("第一句话"), List.of());
 
         assertThat(assembled.getInstructions()).isNotEmpty();
         assertThat(assembled.getInstructions().get(assembled.getInstructions().size() - 1))
@@ -289,7 +266,7 @@ class PromptBuilderTest {
     @Test
     @DisplayName("★ 不传 ChatOptions —— 让框架自动填入已配置的默认值")
     void doesNotCarryChatOptions() {
-        Prompt assembled = builder().assemble(original("你好"), List.of(), List.of());
+        Prompt assembled = builder().assemble(original("你好"), List.of());
 
         assertThat(assembled.getOptions())
                 .as("实测字节码：DeepSeekChatModel.buildRequestPrompt 在 options 为 null 时"

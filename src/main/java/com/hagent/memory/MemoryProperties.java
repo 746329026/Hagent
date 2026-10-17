@@ -105,6 +105,33 @@ public class MemoryProperties implements InitializingBean {
     /** 工作流模式的条数上限。 */
     private int workflowMaxMessages = 200;
 
+    // ==================== 工具循环上限 ====================
+
+    /**
+     * 一次对话里<b>最多允许的模型调用步数</b>（阶段 9 新增）。
+     *
+     * <p><b>为什么必须有这个上限</b>：工具循环的正常出口是"模型不再请求工具"
+     * （参考实现与主流 harness 都这么做）。但那是一个<b>由模型控制的</b>出口 ——
+     * 模型如果绕圈（反复请求同一个工具、或永远不停），循环就不会自己结束，
+     * 而<b>每一次循环都是一次计费的模型调用</b>。
+     *
+     * <p>所以这是"由我们控制的强制出口"，与下面两条一起构成完整的终止条件：
+     * <pre>
+     *   ① 模型不再请求工具          ← 正常出口（模型决定）
+     *   ② 工具声明 returnDirect      ← 工具决定结束（框架翻译成 finishReason=returnDirect）
+     *   ③ 本上限 + 框架的工具调用次数上限  ← 防御出口（我们决定）
+     *   ④ 上游异常                   ← 错误出口
+     * </pre>
+     *
+     * <p><b>取值依据</b>：10 步足够覆盖"查两次资料 + 追问一次 + 汇总"这类常见形态；
+     * 再多通常意味着模型在绕圈。超限时<b>不抛异常</b>，而是用已累积的内容收尾
+     * （见 {@code AgentPipeline}）—— 用户已经等到了一些结果，丢掉它没有好处。
+     *
+     * <p>★ 与框架的 {@code maxCallsPerTool} / {@code maxTotalToolCalls} 是<b>两层</b>：
+     * 框架那层防"同一个工具被调太多次"，本层防"整轮步数太多"。
+     */
+    private int maxSteps = 10;
+
     // ==================== 各实现的参数 ====================
 
     /** 记录层 file 实现的存储目录（record-store=file 时使用）。 */
@@ -175,6 +202,11 @@ public class MemoryProperties implements InitializingBean {
             throw new IllegalStateException(
                     "hagent.memory.chat.circuit-break-seconds 不能为负：" + circuitBreakSeconds
                             + "（0 表示关闭熔断）");
+        }
+        if (maxSteps <= 0) {
+            throw new IllegalStateException(
+                    "hagent.memory.chat.max-steps 必须为正数：" + maxSteps
+                            + "（它是一次对话里模型调用的步数上限，0 或负数会让工具循环无法进行）");
         }
     }
 

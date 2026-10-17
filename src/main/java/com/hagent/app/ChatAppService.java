@@ -163,16 +163,21 @@ public class ChatAppService {
      *
      * <p><b>事件映射</b>（{@link PipelineEvent} → {@link StreamEventType}）：
      * <pre>
-     *   Retrieved                     → 不外发（本阶段前端还不用它，理由见下）
-     *   ModelOutput.Reasoning(text)   → reasoning 帧  ← 思考区
-     *   ModelOutput.Token(text)       → message   帧  ← 回答区
-     *   ModelOutput.Final             → done      帧  ← 结束
+     *   ModelOutput.Reasoning(text)      → reasoning 帧     ← 思考区
+     *   ModelOutput.Token(text)          → message   帧     ← 回答区
+     *   ModelOutput.ToolCall(id,name,args)→ tool_call 帧     ← ★ 阶段 9：正在调用工具
+     *   ModelOutput.ToolResult(id,name,r)→ tool_result 帧   ← ★ 阶段 9：工具结果
+     *   Retrieved(chunks, query)         → retrieved 帧     ← ★ 阶段 9：参考了哪几篇
+     *   ModelOutput.Final                → done      帧     ← 结束
      * </pre>
      *
-     * <p><b>为什么 {@code Retrieved} 暂不外发</b>：它携带的是 {@code List<RetrievedChunk>}，
-     * 而前端还没有消费它的页面（前端在后续阶段）。现在就把它塞进 SSE 帧，
-     * 属于"为还没有消费者的数据定义契约"（协议第 7 条）。
-     * 管道已经在产出它，<b>接线是前端阶段一行的事</b>。
+     * <p><b>★ 阶段 9 起 {@code Retrieved} 也外发了</b>（此前刻意不外发，
+     * 理由是"前端还没有消费它的页面"）。现在它由检索工具发出，
+     * 而"展示参考了哪几篇"正是本阶段要做出来的能力 —— 消费者出现了，接线就该接上。
+     *
+     * <p>三条新事件的数据都经过<b>显式的 {@code Map} 收窄</b>，而不是直接序列化领域对象：
+     * 直接暴露 record / 领域类会让"内部字段改名"意外变成"前端契约破坏"，
+     * 而这里只想给前端它真正需要的那几项（见 {@code toolCallData} 等方法的注释）。
      *
      * <p><b>为什么 {@code id} / {@code retry} 要带</b>：浏览器断线重连时会自动带上
      * {@code Last-Event-ID} 请求头，服务端可据此判断续传位置；{@code retry} 则告诉浏览器
@@ -220,8 +225,66 @@ public class ChatAppService {
                     StreamEventType.MESSAGE, token.text()));
             return;
         }
-        // Final 与 Retrieved 不在这里发：Final 由流的 onComplete 统一发 done，
-        // Retrieved 本阶段不外发（理由见 stream 方法注释）。
+        // ★ 阶段 9：工具调用与结果外发 —— 这是"用户能看到模型在做什么"的关键。
+        //   两者共用同一个 id，前端据此把一次调用渲染成一行（开始 → 结果）。
+        if (event instanceof PipelineEvent.ModelOutput.ToolCall call) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.TOOL_CALL, toolCallData(call)));
+            return;
+        }
+        if (event instanceof PipelineEvent.ModelOutput.ToolResult result) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.TOOL_RESULT, toolResultData(result)));
+            return;
+        }
+        // ★ 检索命中片段外发 —— 前端据此显示"参考了哪几篇"。
+        //   它是结构化数据（来源 / 相关度都在里面），不需要前端从工具文本里解析。
+        if (event instanceof PipelineEvent.Retrieved retrieved) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.RETRIEVED, retrievedData(retrieved)));
+            return;
+        }
+        // Final 不在这里发：它由流的 onComplete 统一发 done（见 stream 方法）。
+    }
+
+    /**
+     * 工具调用 → SSE 数据。
+     *
+     * <p>用一个显式的小 {@code Map} 而不是直接序列化 record：
+     * record 的字段名会成为前端的契约，而这里只想暴露<b>前端真正需要的三个</b>
+     * （{@code id} / {@code name} / {@code arguments}）——
+     * 直接暴露模型/领域对象会让"内部字段改名"意外变成"前端契约破坏"。
+     */
+    private java.util.Map<String, Object> toolCallData(PipelineEvent.ModelOutput.ToolCall call) {
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("id", call.id());
+        data.put("name", call.name());
+        data.put("arguments", call.arguments());
+        return data;
+    }
+
+    private java.util.Map<String, Object> toolResultData(PipelineEvent.ModelOutput.ToolResult result) {
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("id", result.id());
+        data.put("name", result.name());
+        data.put("result", result.result());
+        return data;
+    }
+
+    private java.util.Map<String, Object> retrievedData(PipelineEvent.Retrieved retrieved) {
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("query", retrieved.query());
+        data.put("sources", retrieved.chunks().stream()
+                // ★ 只外发"用户能看懂"的两项：出处与相关度档位。
+                //   不吐 content（可能很长，且前端这一屏只需要"参考了哪些"）；
+                //   不吐 level / similarity（密级与原始分数属于内部实现细节）。
+                //   ⚠️ displayName() 是方法不是属性，Jackson 不会序列化它 ——
+                //      所以这里显式调用，避免前端拿到 "HIGH" 而无法显示中文档位。
+                .map(c -> java.util.Map.of(
+                        "source", c.displaySource(),
+                        "band", c.band().displayName()))
+                .toList());
+        return data;
     }
 
     /**

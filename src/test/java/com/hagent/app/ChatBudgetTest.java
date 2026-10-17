@@ -15,6 +15,8 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.core.io.ByteArrayResource;
 import reactor.core.publisher.Flux;
 
@@ -79,16 +81,31 @@ class ChatBudgetTest {
                 .reasoningContent(null)
                 .build();
         ChatResponse chunk = new ChatResponse(List.of(new Generation(message)));
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
         when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk));
 
         return new AgentPipeline(
                 chatModel,
                 memory,
-                mock(KnowledgeRetrievalService.class),
+                TestToolCallbackProvider.none(),
+                TestAudit.disabled(),
                 new TraceProperties(),
                 new PromptProperties(),
                 props,
                 new ByteArrayResource("测试用约束".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
+
+    /**
+     * 模型"配置好的" options。
+     *
+     * <p>★ 阶段 9 起管线构造器要求 {@code chatModel.getOptions()} 是
+     * {@code DeepSeekChatOptions}（它要"克隆配置 + 挂工具"，见 AgentPipeline 的启动自检），
+     * 所以测试必须真的 stub 出来，否则构造期就失败。
+     */
+    private static org.springframework.ai.deepseek.DeepSeekChatOptions deepSeekOptions() {
+        return org.springframework.ai.deepseek.DeepSeekChatOptions.builder()
+                .model("deepseek-flash")
+                .build();
     }
 
     /** 记录型记忆：把每次 {@code load} 收到的预算记下来。 */

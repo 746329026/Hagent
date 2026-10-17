@@ -2,7 +2,6 @@ package com.hagent.app;
 
 import com.hagent.config.PromptProperties;
 import com.hagent.config.TraceProperties;
-import com.hagent.retrieval.RetrievedChunk;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -99,16 +98,6 @@ public class PromptBuilder {
 
     private static final String LOG_TAG = "PromptBuilder";
 
-    /**
-     * 片段块的起始标记 —— 提示词里的约束 1/3/5 都引用它。
-     *
-     * <p><b>⚠️ 一处真实的耦合</b>：{@code prompts/rag-answer-prompt.md} 里写的是
-     * "优先依据【知识库片段】回答"。改这里的字样必须同步改提示词，
-     * 否则约束会指向一个不存在的标记，而<b>不会有任何报错</b> ——
-     * 模型只会觉得那句约束莫名其妙。
-     */
-    private static final String FRAGMENT_HEADER = "【知识库片段】";
-
     private final TraceProperties traceProperties;
     private final PromptProperties promptProperties;
 
@@ -136,23 +125,27 @@ public class PromptBuilder {
      * <b>自动填入已配置的默认 options</b>（{@code reasoning-effort}、模型名等）。
      * 实测字节码：{@code DeepSeekChatModel.buildRequestPrompt} 里
      * {@code if (prompt.getOptions() == null) → prompt.mutate().chatOptions(this.getOptions())}。
-     * <b>若在此显式传 options，反而会覆盖掉配置</b> —— 表现为"配置写了却没生效"。
+     *
+     * <p>★ 注意：<b>带工具的调用是例外</b> —— 那一步必须显式传 options（工具挂在它上面），
+     * 所以 {@code AgentPipeline} 用的是"从配置克隆再挂工具"（见该类的 {@code optionsFor}）。
+     * 本方法只负责把<b>消息列表</b>拼对，options 由调用方决定。
+     *
+     * <p><b>★ 阶段 9：这里不再注入检索片段</b>。检索已改成 {@code retrieveKnowledge} 工具，
+     * 片段作为<b>工具结果</b>回到模型手里（见 {@code KnowledgeRetrievalTool}）。
+     * 于本类回归它最纯粹的职责：<b>把 system / 历史 / 未知 / 本次提问拼成一条消息列表</b>。
      *
      * @param original 进入 pipeline 时的原始 prompt（含 system 与本次用户消息）
      * @param history  历史消息，时间正序
-     * @param fragments 检索片段；可为空列表
      * @return 拼装后的 prompt
      */
-    public Prompt assemble(Prompt original, List<Message> history, List<RetrievedChunk> fragments) {
+    public Prompt assemble(Prompt original, List<Message> history) {
         List<Message> originalMessages = original.getInstructions();
         List<SystemMessage> systems = collectSystemMessages(originalMessages);
         UserMessage userMessage = original.getUserMessage();
         List<Message> unknown = collectUnknown(originalMessages, systems, userMessage);
 
         List<Message> safeHistory = history == null ? List.of() : history;
-        List<RetrievedChunk> safeFragments = fragments == null ? List.of() : fragments;
-
-        String systemText = buildSystemText(systems, safeFragments);
+        String systemText = buildSystemText(systems);
 
         List<Message> assembled = new ArrayList<>();
         if (!systemText.isBlank()) {
@@ -164,7 +157,7 @@ public class PromptBuilder {
             assembled.add(userMessage);
         }
 
-        logAssembled(assembled, systems.size(), safeHistory, safeFragments);
+        logAssembled(assembled, systems.size(), safeHistory);
 
         // ★ 用构造器显式重建 Prompt，但【不带 options】—— 理由见方法注释。
         return new Prompt(assembled);
@@ -232,12 +225,17 @@ public class PromptBuilder {
     // ========================================================================
 
     /**
-     * 组装 system 正文：原有 system（全部）→ 回答约束 → 检索片段。
+     * 组装 system 正文：原有 system（全部）→ 回答约束。
      *
      * <p>顺序的理由：先立"角色与规则"，再给"资料"。反过来会让模型在读规则之前
      * 先看到一堆文档，更容易把文档里的语气当成指令。
+     *
+     * <p><b>★ 阶段 9：这里不再拼检索片段</b>。片段现在由 {@code retrieveKnowledge}
+     * 工具作为**工具结果**送回模型 —— 它不再是 system 的一部分。
+     * 渲染片段的代码随职责搬到了 {@code KnowledgeRetrievalTool#render}
+     * （模型只能看到工具返回的字符串，所以"来源/相关度"必须由工具自己拼好）。
      */
-    private String buildSystemText(List<SystemMessage> systems, List<RetrievedChunk> fragments) {
+    private String buildSystemText(List<SystemMessage> systems) {
         StringBuilder sb = new StringBuilder();
 
         for (SystemMessage system : systems) {
@@ -249,39 +247,7 @@ public class PromptBuilder {
         if (promptProperties.isIncludeConstraint() && !constraintText.isBlank()) {
             appendBlock(sb, constraintText.trim());
         }
-        if (!fragments.isEmpty()) {
-            appendBlock(sb, renderFragments(fragments));
-        }
         return sb.toString();
-    }
-
-    /**
-     * 把片段渲染成提示词里的文本块。
-     *
-     * <p>格式（与提示词约束里的措辞一致）：
-     * <pre>
-     *   【知识库片段 1／来源：员工手册 第二章 假期管理／相关度：高】
-     *   员工每年享有五天带薪年假……
-     * </pre>
-     *
-     * <p>三处取值都来自 {@link RetrievedChunk}，且都<b>不允许为空</b>：
-     * 来源走 {@code displaySource()}（section 为空时降级为"第 N 块"），
-     * 档位走 {@code band().displayName()}。
-     * 这样模型手里始终有"这条出自哪里、有多可信"两项信息 ——
-     * 而提示词约束正是建立在它们之上的（没有元数据时"说明出处"只能靠编造）。
-     */
-    private String renderFragments(List<RetrievedChunk> fragments) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(FRAGMENT_HEADER).append('\n');
-        for (int i = 0; i < fragments.size(); i++) {
-            RetrievedChunk chunk = fragments.get(i);
-            sb.append("【知识库片段 ").append(i + 1)
-                    .append("／来源：").append(chunk.displaySource())
-                    .append("／相关度：").append(chunk.band().displayName())
-                    .append("】\n");
-            sb.append(chunk.content() == null ? "" : chunk.content().trim()).append('\n');
-        }
-        return sb.toString().trim();
     }
 
     private void appendBlock(StringBuilder sb, String block) {
@@ -299,7 +265,7 @@ public class PromptBuilder {
      * 记"模型真正收到的 prompt"。
      *
      * <p>同时打出各部分的条数：排查"注入没生效"时，
-     * "历史 0 条 / 片段 0 条"比读一长串文本更快定位。
+     * "历史 0 条"比读一长串文本更快定位。
      *
      * <p>★ 刻意把"没有 system"与"有 system 但内容为空"分开报：
      * 两者都会让模型看不到约束，但原因完全不同（前者是调用方没给，
@@ -307,8 +273,7 @@ public class PromptBuilder {
      */
     private void logAssembled(List<Message> assembled,
                               int systemCount,
-                              List<Message> history,
-                              List<RetrievedChunk> fragments) {
+                              List<Message> history) {
         if (!traceProperties.isEnabled()) {
             return;
         }
@@ -320,13 +285,12 @@ public class PromptBuilder {
         boolean hasSystem = !assembled.isEmpty() && assembled.get(0) instanceof SystemMessage;
 
         log.info("[{}] ← 模型收到的 prompt | 总条数={} | system={}（合并了 {} 条原有 system）"
-                        + " | 历史={} 条 | 片段={} 条 | 内容={}",
+                        + " | 历史={} 条 | 内容={}",
                 LOG_TAG,
                 assembled.size(),
                 hasSystem ? "有" : "无",
                 systemCount,
                 history.size(),
-                fragments.size(),
                 PromptLogFormat.truncate(contents, traceProperties));
     }
 
