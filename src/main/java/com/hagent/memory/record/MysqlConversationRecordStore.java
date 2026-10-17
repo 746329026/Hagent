@@ -64,6 +64,9 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
     /** 读"某会话最近 N 条"要走的索引名（启动自检会核对它存在）。 */
     private static final String CONVERSATION_INDEX = "idx_conv_id";
 
+    /** 阶段 10 新增的思考列名（启动自检会核对它存在）。 */
+    private static final String REASONING_COLUMN = "reasoning";
+
     private static final String DDL_HINT = """
             表 %s 不存在，会话记忆的记录层无法工作。
             本项目的表由【显式 DDL】创建，应用不自动建表 ——
@@ -121,9 +124,9 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
         // 只读 N 行 —— 不随会话长度增长。
         // ★ 排序用 id 而不是"会话内序号"：id 是自增主键，写入顺序即会话顺序，且无需任何锁。
         List<MessageCodec.StoredMessage> rows = jdbc.query(
-                "SELECT role, content FROM " + table
+                "SELECT role, content, reasoning FROM " + table
                         + " WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
-                (rs, rowNum) -> new MessageCodec.StoredMessage(rs.getString("role"), rs.getString("content")),
+                (rs, rowNum) -> toStored(rs),
                 conversationId, maxMessages);
         if (rows.isEmpty()) {
             return List.of();
@@ -133,6 +136,40 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
         Collections.reverse(chronological);
         // ★ 本层不做 token 预算裁剪（那是门面的事）；未知类型由 fromStoredList 记录并跳过
         return MessageCodec.fromStoredList(chronological);
+    }
+
+    /**
+     * 读出该会话的<b>全部</b>消息（时间正序）。
+     *
+     * <p><b>唯一消费者是给前端的"历史回放"</b>（{@code GET /chat/sessions/{id}/messages}），
+     * 与 {@link #readLatest} 的分工是：
+     * <pre>
+     *   readLatest(n)  → 给【模型】的上下文，按预算截断，越大越慢
+     *   readAll()      → 给【用户】的完整记录，不截断，因为它就是"记录"本身
+     * </pre>
+     * 所以这里<b>刻意不做分页</b>：分页要游标、要"下一页"的交互，而当前没有消费者需要它。
+     * 会话再长也只是几万行文本（一次 HTTP 响应能装下），
+     * 真需要分页时再加一个带 {@code afterId} 的重载即可 —— 表结构不用动（id 天然是游标）。
+     */
+    @Override
+    public List<Message> readAll(String conversationId) {
+        List<MessageCodec.StoredMessage> rows = jdbc.query(
+                "SELECT role, content, reasoning FROM " + table
+                        + " WHERE conversation_id = ? ORDER BY id ASC",
+                (rs, rowNum) -> toStored(rs),
+                conversationId);
+        return MessageCodec.fromStoredList(rows);
+    }
+
+    /**
+     * 一行结果集 → 可持久化结构。
+     *
+     * <p>抽成方法而不是在三个地方各写一遍 lambda：列名拼错在 lambda 里只表现为
+     * "某个字段恒为 null"，而抽出后它只有一处。
+     */
+    private MessageCodec.StoredMessage toStored(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return new MessageCodec.StoredMessage(
+                rs.getString("role"), rs.getString("content"), rs.getString("reasoning"));
     }
 
     @Override
@@ -164,6 +201,10 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
                 return LayerStatus.down("record", "mysql",
                         "缺少索引 " + CONVERSATION_INDEX + "（读历史会退化成全表扫描）");
             }
+            if (!columnExists(REASONING_COLUMN)) {
+                return LayerStatus.down("record", "mysql",
+                        "缺少 " + REASONING_COLUMN + " 列（阶段 10 新增，思考内容无法落库）");
+            }
             return LayerStatus.up("record", "mysql",
                     "表 " + table + " 可用，content 字符集=" + charset + "，索引 " + CONVERSATION_INDEX + " 就位");
         } catch (Exception e) {
@@ -179,11 +220,13 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
         List<Object[]> batchArgs = new ArrayList<>(messages.size());
         for (Message message : messages) {
             MessageCodec.StoredMessage stored = MessageCodec.toStored(message);
-            batchArgs.add(new Object[]{conversationId, stored.type(), stored.text()});
+            // ★ 阶段 10：reasoning 与 content 同一行 —— 一个回合就是一行，
+            //   思考是该回合的附属事实，拆表只会让"读一个回合"变成两次查询。
+            batchArgs.add(new Object[]{conversationId, stored.type(), stored.text(), stored.reasoning()});
         }
-        // extra 列刻意不写（保持 NULL）：阶段 8 的 TOOL 消息才有内容
+        // extra 列刻意不写（保持 NULL）：它留给真正结构化的数据，思考不是（见 chat_message.sql）
         jdbc.batchUpdate("INSERT INTO " + table
-                + " (conversation_id, role, content) VALUES (?, ?, ?)", batchArgs);
+                + " (conversation_id, role, content, reasoning) VALUES (?, ?, ?, ?)", batchArgs);
     }
 
     private String contentCharset() {
@@ -202,8 +245,23 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
     }
 
     /**
+     * 某列是否存在。
+     *
+     * <p>为什么单独查而不是"启动时试跑一次 SELECT"：试跑会掩盖问题
+     * ——{@code SELECT} 里少写一列照样成功，而 {@code INSERT} 才炸。
+     * 直接问 {@code information_schema} 得到的是"结构事实"，不依赖任何语句的写法。
+     */
+    private boolean columnExists(String column) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                        + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                Integer.class, table, column);
+        return count != null && count > 0;
+    }
+
+    /**
      * 启动自检：表必须存在、{@code content} 必须是 utf8mb4、
-     * 读历史要用的索引必须在。
+     * 读历史要用的索引与阶段 10 的 {@code reasoning} 列必须在。
      *
      * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 ——
      * 与 {@code VectorStoreConfig.vectorTableSelfCheck}、
@@ -232,8 +290,19 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
                                 + "而且不会报错）。请按 src/main/resources/db/chat_message.sql 重建该表。",
                         table, CONVERSATION_INDEX));
             }
-            log.info("[记忆-记录-mysql] 启动自检通过：表={} content 字符集={} 索引={}",
-                    table, charset, CONVERSATION_INDEX);
+            if (!columnExists(REASONING_COLUMN)) {
+                throw new IllegalStateException(String.format("""
+                        表 %s 缺少 %s 列（阶段 10 新增：模型思考内容落库）。
+                        不修的话每一次对话写回都会 SQL 报错，而症状只是"历史里没有思考"。
+                        请在项目根目录执行（存量库升级，只跑一次）：
+                          ALTER TABLE %s
+                              ADD COLUMN reasoning MEDIUMTEXT NULL
+                              COMMENT '阶段 10：该回合模型的完整思考（多步用 @@step:N 标记分隔）'
+                              AFTER content;
+                        """, table, REASONING_COLUMN, table));
+            }
+            log.info("[记忆-记录-mysql] 启动自检通过：表={} content 字符集={} 索引={} 列={}",
+                    table, charset, CONVERSATION_INDEX, REASONING_COLUMN);
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {

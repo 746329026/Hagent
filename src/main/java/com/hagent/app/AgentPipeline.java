@@ -5,6 +5,8 @@ import com.hagent.config.TraceProperties;
 import com.hagent.memory.ConversationMemory;
 import com.hagent.memory.MemoryMode;
 import com.hagent.memory.MemoryProperties;
+import com.hagent.memory.MessageCodec;
+import com.hagent.memory.ReasoningTrace;
 import com.hagent.memory.TokenBudget;
 import com.hagent.security.UserContext;
 import com.hagent.tool.KnowledgeRetrievalTool;
@@ -33,7 +35,9 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Agent 管道 —— <b>本项目唯一的编排者</b>：把"一次对话"拆成固定的顺序步骤，直连 {@link ChatModel}。
@@ -60,11 +64,12 @@ import java.util.List;
  * <pre>
  *   ① 记请求日志        ← 取代 PromptTraceAdvisor 的 before
  *   ② 读历史            ← 取代 MemoryReadAdvisor
- *   ③ 检索（含权限过滤） ← 取代 RagRetrievalAdvisor
+ *   ③ （已无"无条件检索"）← 阶段 9 起检索是 retrieveKnowledge 工具，由模型决定何时调
  *   ④ 拼装              ← 委托 PromptBuilder（唯一重建消息列表者）
- *   ⑤ 调模型            ← chatModel.stream(prompt)
- *   ⑥ 逐片累积 text / reasoning → 发出 Reasoning / Token
- *   ⑦ 流结束时：写回记忆（问 + 答）→ 发出 Final
+ *   ⑤ 发 StepStarted(N) ← 阶段 10：调模型【之前】先发"第 N 步开始"
+ *   ⑥ 调模型            ← chatModel.stream(prompt)，逐片累积 text / reasoning
+ *   ⑦ 有工具 → 执行并回灌 → 回到 ⑤（N+1）；没有工具 → 收尾
+ *   ⑧ 收尾：写回记忆（问 + 答 + 思考）→ 发出 Final
  * </pre>
  *
  * <h2>★★ 四条来自实测的硬约束（改本类前必读）</h2>
@@ -272,6 +277,25 @@ public class AgentPipeline {
         private final StringBuilder text = new StringBuilder();
         /** 整轮拼接后的思考（跨所有步骤）。 */
         private final StringBuilder reasoning = new StringBuilder();
+        /**
+         * 每一步开始时 {@link #reasoning} 的<b>长度</b>（阶段 10）。
+         *
+         * <p><b>为什么记偏移量，而不是"每步攒一个 StringBuilder"</b>：
+         * 思考是一条连续追加的流，步与步之间并没有天然的分割动作
+         * （循环是递归的，两个出口都可能结束一整步）。
+         * 记下"这一步从第几个字符开始"，两个出口都不需要做任何收尾工作 ——
+         * 落库时按相邻偏移量切片，就得到每一步的思考。
+         * <b>一份数据、一种增长方式、两处读取</b>，比"流式追加 + 到边界再 flush"少一类 bug。
+         */
+        private final List<Integer> reasoningOffsets = new ArrayList<>();
+        /**
+         * 步号（从 1 开始）→ 该步<b>之后</b>请求的工具名（阶段 10）。
+         *
+         * <p>用途：落库的思考标记要带上"这一步之后调了什么工具"
+         * （{@code @@step:2 tool:retrieveKnowledge}）。
+         * 只存工具名、不存参数与结果 —— 参数与结果在审计表里（决策 32）。
+         */
+        private final Map<Integer, List<String>> stepTools = new LinkedHashMap<>();
         /** 已执行的步数（= 已发生的模型调用次数）。 */
         private int steps;
         /** 最后一片响应 —— {@code Final} 的 finishReason / usage 取自它。 */
@@ -340,32 +364,41 @@ public class AgentPipeline {
             }
             state.steps++;
 
+            // ---------- ★ 阶段 10：先发"第 N 步开始" ----------
+            //   顺序必须在调模型【之前】：它是"这一步已经开始"的唯一信号。
+            //   若等首片响应回来再发，模型思考的那十几秒里前端一个事件都收不到 ——
+            //   而那正是用户最需要反馈的时间段。（见 StreamEventType.STEP 的注释）
+            int step = state.steps;
+            //   记下这一步的思考起点：落库时按相邻偏移量切出每一步的思考（见 LoopState 注释）
+            state.reasoningOffsets.add(state.reasoning.length());
+
             // ---------- 用"克隆配置 + 挂工具 + 带身份"的 options 调模型 ----------
             Prompt prompt = new Prompt(state.messages, optionsFor(user, null));
 
-            return chatModel.stream(prompt)
-                    .doOnNext(chunk -> {
-                        state.lastChunk = chunk;
-                        String text = textOf(chunk);
-                        String reasoning = reasoningOf(chunk);
-                        if (text != null && !text.isEmpty()) {
-                            state.text.append(text);
-                        }
-                        if (reasoning != null && !reasoning.isEmpty()) {
-                            state.reasoning.append(reasoning);
-                        }
-                    })
-                    // ★ 过滤空片：实测首片是 text=null / reasoning=空串。不过滤会往 SSE 里发空事件
-                    .flatMap(this::emit)
-                    // ★ 本步的完整响应（含 toolCalls）决定"继续还是收尾"。
-                    //
-                    //   ⚠️ 这里【必须】用 concatWith，不能用 then：
-                    //     · concatWith → 先把上游事件（Reasoning/Token）全部发出去，
-                    //                    等上游完成后再订阅下一步 —— 事件保留 ✅
-                    //     · then       → 丢弃上游所有元素，只保留完成信号 —— 事件全丢 ❌
-                    //   实测踩过：用 then 时前端只会收到一个 Final，
-                    //   而断言会以 "Expected size: 3 but was: 1" 的形式暴露它。
-                    .concatWith(Flux.defer(() -> handleToolCalls(state, conversationId, user, startNanos)));
+            return Flux.<PipelineEvent>just(new PipelineEvent.StepStarted(step))
+                    .concatWith(chatModel.stream(prompt)
+                            .doOnNext(chunk -> {
+                                state.lastChunk = chunk;
+                                String text = textOf(chunk);
+                                String reasoning = reasoningOf(chunk);
+                                if (text != null && !text.isEmpty()) {
+                                    state.text.append(text);
+                                }
+                                if (reasoning != null && !reasoning.isEmpty()) {
+                                    state.reasoning.append(reasoning);
+                                }
+                            })
+                            // ★ 过滤空片：实测首片是 text=null / reasoning=空串。不过滤会往 SSE 里发空事件
+                            .flatMap(this::emit)
+                            // ★ 本步的完整响应（含 toolCalls）决定"继续还是收尾"。
+                            //
+                            //   ⚠️ 这里【必须】用 concatWith，不能用 then：
+                            //     · concatWith → 先把上游事件（Reasoning/Token）全部发出去，
+                            //                    等上游完成后再订阅下一步 —— 事件保留 ✅
+                            //     · then       → 丢弃上游所有元素，只保留完成信号 —— 事件全丢 ❌
+                            //   实测踩过：用 then 时前端只会收到一个 Final，
+                            //   而断言会以 "Expected size: 3 but was: 1" 的形式暴露它。
+                            .concatWith(Flux.defer(() -> handleToolCalls(state, conversationId, user, startNanos))));
         });
     }
 
@@ -394,6 +427,12 @@ public class AgentPipeline {
             //   ★ "结果回流"不是框架自动做的 —— 是我们把 conversationHistory() 交回给模型的结果
             //     （阶段 9 动手前已用一次性测试实测过这一点）。
             List<AssistantMessage.ToolCall> requested = response.getResult().getOutput().getToolCalls();
+
+            // ---------- 记下"这一步之后调了什么工具"（阶段 10）----------
+            //   落库的思考标记要带它（@@step:2 tool:retrieveKnowledge），
+            //   前端历史回放的"执行轨迹"面板也只靠这一项（参数与结果在审计表里）。
+            state.stepTools.put(state.steps,
+                    requested.stream().map(AssistantMessage.ToolCall::name).toList());
 
             // ---------- 先发 ToolCall 事件（用户要立刻看到"正在查…"）----------
             //   ★ 顺序很重要：执行工具可能很慢，先发"开始"才有反馈。
@@ -522,8 +561,51 @@ public class AgentPipeline {
                                                    String conversationId,
                                                    long startNanos,
                                                    String finishReason) {
-        writeBack(conversationId, state.userMessage, state.text.toString());
+        writeBack(conversationId, state);
         return buildFinal(state.text, state.reasoning, finishReason, state.lastChunk, startNanos);
+    }
+
+    /**
+     * 把整个回合的思考按"步"切成段，再拼成<b>落库形态</b>（带 {@code @@step:} 标记）。
+     *
+     * <p>切片数据全部来自 {@link LoopState}：{@code reasoningOffsets} 给出每步的起点，
+     * {@code stepTools} 给出每步<b>之后</b>调了哪些工具。本方法<b>只做组装</b>，
+     * 格式与容错都在 {@link ReasoningTrace} 里（那里也负责反向解析）。
+     *
+     * <p><b>★ 工具名挂在"下一步的标记"上，而不是自己那一步</b>：
+     * 工具是在第 N 步<b>结束之后</b>才被执行的（模型先请求、框架再执行），
+     * 所以它属于第 N 步与第 N+1 步之间的那个接缝。落库文本因此长这样：
+     * <pre>
+     *   我应该调用 getWeather          ← 第 1 步（无标记）
+     *
+     *   @@step:2 tool:getWeather       ← 上一步之后调了它，现在是第 2 步
+     *   想清楚了                        ← 第 2 步
+     * </pre>
+     * 反过来（把工具挂在自己那一步）会让<b>第 1 步的工具名彻底丢失</b> ——
+     * 因为第 1 步按约定不写标记（见 {@link ReasoningTrace}）。
+     *
+     * <p>⚠️ 一个已知的边角：若第 N 步请求了工具、执行完之后正好撞上
+     * {@code max-steps} 上限，第 N+1 步不会发生，于是那一批工具名没有标记可挂。
+     * 这是<b>降级路径</b>（模型大概率在绕圈），工具本身仍记在审计表里。
+     *
+     * @return 落库文本；<b>本回合根本没有思考时返回 null</b>（不写空串，见 ReasoningTrace）
+     */
+    private String markedReasoning(LoopState state) {
+        int steps = state.reasoningOffsets.size();
+        if (steps == 0 || state.reasoning.length() == 0) {
+            return null;
+        }
+        List<ReasoningTrace.Section> sections = new ArrayList<>(steps);
+        for (int i = 0; i < steps; i++) {
+            int from = state.reasoningOffsets.get(i);
+            int to = (i + 1 < steps) ? state.reasoningOffsets.get(i + 1) : state.reasoning.length();
+            sections.add(new ReasoningTrace.Section(
+                    i + 1,
+                    // ★ 取第 i 步（= 上一个 1-based 步号）请求的工具：它们是通向第 i+1 步的原因
+                    state.stepTools.getOrDefault(i, List.of()),
+                    state.reasoning.substring(from, to)));
+        }
+        return ReasoningTrace.render(sections);
     }
 
     /**
@@ -574,7 +656,7 @@ public class AgentPipeline {
     }
 
     /**
-     * 写回「本次问 + 模型最终答」。
+     * 写回「本次问 + 模型最终答（含思考）」。
      *
      * <p><b>★ 阶段 9 起：只写这两条，不写工具活动</b>（决策 32 的延续）。
      * 循环过程中 {@code state.messages} 会不断长出 {@code assistant(toolCalls)} 与
@@ -587,25 +669,51 @@ public class AgentPipeline {
      * </ul>
      * 工具活动另有归宿：审计表 {@code chat_tool_invocation}（阶段 9.3）。
      *
-     * <p><b>用户消息从哪取</b>：从<b>拼装前的原始 prompt</b> 取（由调用方传入），
+     * <h3>★ 阶段 10：思考也写进来了，但走的是 properties 而不是 reasoningContent</h3>
+     *
+     * <p>思考挂在 {@link AssistantMessage} 的 <b>properties</b>（键
+     * {@link MessageCodec#REASONING_PROPERTY}）上，<b>不是</b>
+     * {@code DeepSeekAssistantMessage.reasoningContent}。理由是一条实测：
+     * {@code DeepSeekChatModel.createRequest} 里会
+     * {@code instanceof DeepSeekAssistantMessage → getReasoningContent()}，
+     * 把它<b>重新填进发出去的请求</b>；而 {@code reasoning_content} 是
+     * <b>输出专用字段</b>，回传轻则白烧 token、重则 HTTP 400。
+     *
+     * <p>⇒ 用 properties 存：前端能显示，<b>模型永远看不到自己的历史思考</b>。
+     * 这不是"暂时没做"，是刻意的（想让它记住结论，那是长期记忆的事，阶段 11）。
+     * 有人若把它"简化"成 reasoningContent，症状会是"下一轮对话莫名失败"。
+     *
+     * <p><b>用户消息从哪取</b>：从<b>拼装前的原始 prompt</b> 取（{@code LoopState.userMessage}），
      * 而不是从循环中的消息列表取 —— 后者已经混进了 tool 消息，
      * "靠位置找最后一条 user" 会随循环增长而变脆。
      *
      * <p>写回失败<b>不影响本次响应</b> —— 失败分级在 {@code LayeredConversationMemory} 里，
      * 本方法无法也不应感知成败（见类注释的诚实声明）。
      */
-    private void writeBack(String conversationId, Message userMessage, String replyText) {
+    private void writeBack(String conversationId, LoopState state) {
+        String replyText = state.text.toString();
+        String reasoningTrace = markedReasoning(state);
+
         List<Message> turn = new ArrayList<>(2);
-        if (userMessage != null) {
-            turn.add(userMessage);
+        if (state.userMessage != null) {
+            turn.add(state.userMessage);
         }
         if (replyText != null && !replyText.isBlank()) {
-            turn.add(new AssistantMessage(replyText));
+            turn.add(reasoningTrace == null
+                    ? new AssistantMessage(replyText)
+                    : AssistantMessage.builder()
+                            .content(replyText)
+                            .properties(Map.of(MessageCodec.REASONING_PROPERTY, reasoningTrace))
+                            .build());
         }
         if (turn.isEmpty()) {
             log.debug("[{}] 本次没有可写回的内容，跳过", LOG_TAG);
             return;
         }
+        log.debug("[{}] 写回记忆：会话={} 消息 {} 条，思考 {} 字（分 {} 步）",
+                LOG_TAG, conversationId, turn.size(),
+                reasoningTrace == null ? 0 : reasoningTrace.length(),
+                state.reasoningOffsets.size());
         memory.append(conversationId, turn);
     }
 

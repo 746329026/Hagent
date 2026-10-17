@@ -29,13 +29,27 @@ import java.util.List;
  * <pre>
  *   PipelineEvent                      ← 顶层：一次运行对外吐出的东西
  *   ├── Retrieved(chunks, query)       ← 【我们的】检索产物
+ *   ├── StepStarted(step)              ← 【我们的】骨架：第 N 步开始（阶段 10）
  *   └── ModelOutput                    ← 【模型的】产出（sealed，可继续嵌套）
  *       ├── Reasoning(text)            ← 思考增量（DeepSeek 的 reasoning_content）
  *       ├── Token(text)                ← 回答增量
+ *       ├── ToolCall / ToolResult      ← 阶段 9：工具活动的开始与结束
  *       └── Final(text, reasoning, finishReason, usage)
- *
- *   阶段 9 新增：ModelOutput.ToolCall / ModelOutput.ToolResult
  * </pre>
+ *
+ * <p><b>★ 为什么 {@code StepStarted} 在顶层而不是 {@code ModelOutput} 里</b>：
+ * 它不是模型的产出，而是<b>我们编排的骨架</b> —— "要调模型了"这件事由
+ * {@code AgentPipeline} 决定，不由模型决定。放进 {@code ModelOutput} 会让
+ * "模型输出了第 N 步"这种说法成立，而它是错的。
+ *
+ * <p>它与 {@code ToolCall} / {@code ToolResult} 的关系是<b>骨架与明细</b>：
+ * <pre>
+ *   StepStarted(2)                      ← 第 2 步开始
+ *     ToolCall(id=A, retrieveKnowledge) ← 第 2 步里调了工具 A
+ *     ToolResult(id=A, …)               ← A 回来了
+ * </pre>
+ * 前端据此把 N 个工具调用<b>归到同一步</b>下，而不是摊成一串平铺的事件
+ * （平铺的话，"一步里连调两个工具"与"两步各调一个"看起来一模一样）。
  *
  * <p><b>为什么不把 {@code Retrieved} 放进 {@code ModelOutput}</b>：
  * 两者的<b>来源、生产者、生命周期完全不同</b> ——
@@ -71,9 +85,8 @@ import java.util.List;
 public sealed interface PipelineEvent {
 
     // ========================================================================
-    // 一、我们的产物：检索
+    // 一、我们的产物：检索 + 编排骨架
     // ========================================================================
-
     /**
      * 检索完成（含权限过滤）—— <b>我们的产物，不是模型说的话</b>。
      *
@@ -100,10 +113,39 @@ public sealed interface PipelineEvent {
         }
     }
 
+    /**
+     * <b>第 N 步开始</b>（阶段 10 新增）—— 一个回合里"模型被第几次调用"的骨架。
+     *
+     * <h3>★ 它解决什么问题</h3>
+     *
+     * <p>一个回合里模型可能被调用多次（每次工具调用后重新决策一次）。
+     * 没有这个事件，前端只能看到一串<b>平铺</b>的 {@code tool_call} / {@code tool_result}：
+     * <pre>
+     *   "一步里连调两个工具"  与  "两步各调一个"  →  看起来完全一样
+     * </pre>
+     * 而且模型<b>思考很久却还没决定调工具</b>的那段时间，前端<b>什么事件都收不到</b>
+     * —— 用户盯着一个空面板，不知道是在思考还是卡住了。
+     *
+     * <p>有了它，前端能把这段时间显示成"第 2 步 · 思考中"，并在收到
+     * {@code ToolCall} 时把它变成"第 2 步 · retrieveKnowledge · 调用中"。
+     * 三种状态（思考中 / 调用中 / 已返回）分别由
+     * {@code StepStarted} / {@code ToolCall} / {@code ToolResult} 推动，
+     * 不需要额外事件。
+     *
+     * <h3>★ 为什么必须在调模型【之前】发出</h3>
+     *
+     * <p>顺序决定它能表达什么：先发它，才代表"这一步已经开始"。
+     * 若在拿到第一片响应之后再发，那"等待模型的首字"这段时间就没有任何事件
+     * —— 而那恰恰是最需要反馈的时间段。
+     *
+     * @param step 第几步，<b>从 1 开始</b>（与 {@code chat_tool_invocation.step_index} 同一口径）
+     */
+    record StepStarted(int step) implements PipelineEvent {
+    }
+
     // ========================================================================
     // 二、模型的产物
     // ========================================================================
-
     /**
      * 模型的产出 —— sealed，阶段 9 在此<b>新增变体</b>而不改动已有代码。
      *

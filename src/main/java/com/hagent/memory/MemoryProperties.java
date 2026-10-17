@@ -162,6 +162,16 @@ public class MemoryProperties implements InitializingBean {
     private String mysqlTableName = "chat_message";
 
     /**
+     * 会话目录的 MySQL 表名（阶段 10 新增，{@code record-store=mysql} 时使用）。
+     *
+     * <p>它与 {@link #mysqlTableName} 是<b>两张表</b>：一张存"会话里有什么"（消息），
+     * 一张存"有哪些会话"（标题 / 模式 / 时间），见 {@code chat_conversation.sql}。
+     *
+     * <p>同样只允许普通标识符（在实现类构造器里校验，因为它会被拼进 SQL）。
+     */
+    private String conversationTableName = "chat_conversation";
+
+    /**
      * 启动自检 —— 把"配置写错"变成<b>明确失败</b>。
      *
      * <p><b>这道校验有两次（这里是第二次）</b>：真正的早期拦截在

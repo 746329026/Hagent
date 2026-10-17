@@ -6,6 +6,9 @@ import com.hagent.memory.context.RedisConversationContextCache;
 import com.hagent.memory.record.ConversationRecordStore;
 import com.hagent.memory.record.FileConversationRecordStore;
 import com.hagent.memory.record.MysqlConversationRecordStore;
+import com.hagent.memory.session.ConversationCatalog;
+import com.hagent.memory.session.FileConversationCatalog;
+import com.hagent.memory.session.MysqlConversationCatalog;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -30,6 +33,15 @@ import javax.sql.DataSource;
  *                ├── ConversationRecordStore   ← 记录层：mysql | file
  *                └── ConversationContextCache  ← 上下文层：redis | none
  * </pre>
+ *
+ * <p><b>★ 阶段 10 多了一个不进这条链的协作者</b>：
+ * <pre>
+ *   ConversationCatalog（会话目录：标题 / 模式 / 时间，一会话一行）
+ *        └── mysql | file   ← 与记录层【共用】record-store 这一个开关
+ * </pre>
+ * 它不进 {@code LayeredConversationMemory} 是因为它<b>不参与"给模型看什么"</b> ——
+ * 模型不需要知道自己的会话叫什么名字。它的消费者是<b>前端侧栏</b>，
+ * 以及"这个会话是什么模式"这条<b>需要被记住的事实</b>（见 {@code ConversationCatalog} 类注释）。
  *
  * <p>所以本类里有<b>两组</b>条件装配，各由自己的开关决定 ——
  * 而不是阶段 5 那种"三者选其一"。见 {@link MemoryProperties} 的类注释。
@@ -109,6 +121,34 @@ public class MemoryConfig {
                                                                ObjectMapper objectMapper) {
         log.info("[记忆] 记录层 = file（零基础设施兜底；★ 它是【记录层】，不是缓存）");
         return new FileConversationRecordStore(properties, objectMapper);
+    }
+
+    // ========================================================================
+    // 会话目录（阶段 10）—— 一会话一行：标题 / 模式 / 时间
+    // ========================================================================
+
+    /**
+     * 会话目录的 MySQL 实现。
+     *
+     * <p>★ 它与记录层<b>共用同一个开关</b>（{@code record-store}），刻意不给它单独一个：
+     * "消息在 MySQL、目录在文件里"这个组合没有任何意义，而两个开关可以配出那种组合，
+     * 且<b>不会有任何报错</b> —— 只表现为"侧栏永远是空的"。
+     */
+    @Bean
+    @ConditionalOnProperty(name = "hagent.memory.chat.record-store",
+            havingValue = "mysql", matchIfMissing = true)
+    public ConversationCatalog mysqlConversationCatalog(
+            @Qualifier("dataSource") DataSource dataSource,
+            MemoryProperties properties) {
+        return new MysqlConversationCatalog(dataSource, properties);
+    }
+
+    /** 会话目录的 file 实现（与记录层同为 {@code record-store=file}）。 */
+    @Bean
+    @ConditionalOnProperty(name = "hagent.memory.chat.record-store", havingValue = "file")
+    public ConversationCatalog fileConversationCatalog(MemoryProperties properties,
+                                                       ObjectMapper objectMapper) {
+        return new FileConversationCatalog(properties, objectMapper);
     }
 
     // ========================================================================

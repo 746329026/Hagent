@@ -3,6 +3,7 @@ package com.hagent.app;
 import com.hagent.config.StreamProperties;
 import com.hagent.dto.ChatResponse;
 import com.hagent.memory.MemoryMode;
+import com.hagent.memory.session.ConversationCatalog;
 import com.hagent.security.UserContext;
 import com.hagent.stream.StreamEventType;
 import lombok.RequiredArgsConstructor;
@@ -67,6 +68,19 @@ public class ChatAppService {
     /** 流式相关参数（超时 / 重连间隔 / 心跳）。 */
     private final StreamProperties streamProperties;
 
+    /**
+     * 会话目录（阶段 10）—— <b>不是"聊天链路"的一部分，是"这次请求到达"的记录</b>。
+     *
+     * <p>放在这一层而不是 {@code AgentPipeline}，因为它记的是
+     * {@code (会话ID, 模式, 用户消息)} 三样东西，而这三样在<b>入口处</b>就齐了：
+     * 管道要到"写回记忆"那一刻才知道它们，那时模型已经答完 ——
+     * <b>会话要等答完才出现在侧栏里</b>，用户发出第一句话后会看到侧栏空着十几秒。
+     * 放在这里，会话在请求到达的瞬间就落库。
+     *
+     * <p>★ 它失败不能影响对话：见 {@link #touchCatalog} 的容错处理。
+     */
+    private final ConversationCatalog conversationCatalog;
+
     // ========================================================================
     // 入口一：阻塞式
     // ========================================================================
@@ -85,10 +99,12 @@ public class ChatAppService {
      * 那套 key 约定随切面链一起删除（阶段 8）：
      *
      * <ul>
-     *   <li><b>模式</b>由本层显式声明：这里固定传 {@link MemoryMode#CONVERSATION}。
-     *       只有 app 层知道"本次调用属于哪种场景"，管线拿不到这个信息；
+     *   <li><b>模式</b>由本层的<b>调用方</b>声明（{@link #chat} 的 {@code mode} 参数）：
+     *       只有 HTTP 层知道"这次请求属于哪种场景"，管线拿不到这个信息；
      *       若让它去猜，猜错的后果是<b>静默地少给或多给 10 倍预算</b>。
-     *       阶段 9 的工作流引擎在这里改传 {@link MemoryMode#WORKFLOW} 即可，管线无需改动；</li>
+     *       ★ 阶段 10 起这个参数<b>来自请求体</b>（{@code ChatRequest.mode}），
+     *       并会在会话目录里落库 —— 同一个会话的模式<b>首次确定后不再改变</b>，
+     *       所以客户端不能靠"每轮换一次 mode"来来回跳预算；</li>
      *   <li><b>身份</b>（{@code userContext}）的来源是 HTTP 层的
      *       {@code UserContextInterceptor}，由 Controller 用 {@code @RequestAttribute}
      *       取出后<b>作为参数传到这里</b>。
@@ -106,13 +122,16 @@ public class ChatAppService {
      *
      * @param message        已经过参数校验的用户消息（非空）
      * @param conversationId 会话标识（由 Controller 生成或透传；空则落到管线的兜底值）
+     * @param mode           记忆模式（阶段 10 起来自请求体）
      * @param userContext    调用方身份（未认证时为 {@link UserContext#ANONYMOUS}）
      * @return 模型的完整回复：正文 + 思考过程
      */
-    public ChatResponse chat(String message, String conversationId, UserContext userContext) {
+    public ChatResponse chat(String message, String conversationId,
+                             MemoryMode mode, UserContext userContext) {
+        touchCatalog(conversationId, mode, message);
         // 流是冷的：collectList 订阅时才真正发出请求。逻辑上最后一个事件必然是 Final。
         List<PipelineEvent> events = agentPipeline
-                .run(message, conversationId, MemoryMode.CONVERSATION, userContext)
+                .run(message, conversationId, mode, userContext)
                 .collectList()
                 .block(Duration.ofMillis(streamProperties.getSseTimeoutMs()));
 
@@ -157,18 +176,19 @@ public class ChatAppService {
      *
      * <p><b>模式由调用方传入</b>：{@code mode} 与 {@code conversationId} / {@code userContext}
      * 一样，是 {@code AgentPipeline.run(...)} 的<b>方法参数</b> —— 谁调用谁声明本次属于哪种场景
-     * （Controller 目前两处都传 {@link MemoryMode#CONVERSATION}）。
+     * （Controller 从请求体解析后传进来，见 {@code ChatRequest.mode}）。
      * 旧实现把它塞进 {@code ChatClientRequest.context} 的字符串 key 里由切面去取 ——
      * key 与值都是字符串，写错不报错；现在它是枚举实参，模式名写错编译不过。
      *
      * <p><b>事件映射</b>（{@link PipelineEvent} → {@link StreamEventType}）：
      * <pre>
-     *   ModelOutput.Reasoning(text)      → reasoning 帧     ← 思考区
-     *   ModelOutput.Token(text)          → message   帧     ← 回答区
-     *   ModelOutput.ToolCall(id,name,args)→ tool_call 帧     ← ★ 阶段 9：正在调用工具
-     *   ModelOutput.ToolResult(id,name,r)→ tool_result 帧   ← ★ 阶段 9：工具结果
-     *   Retrieved(chunks, query)         → retrieved 帧     ← ★ 阶段 9：参考了哪几篇
-     *   ModelOutput.Final                → done      帧     ← 结束
+     *   StepStarted(step)                → step       帧    ← ★ 阶段 10：第 N 步开始（骨架）
+     *   ModelOutput.Reasoning(text)      → reasoning 帧    ← 思考区
+     *   ModelOutput.Token(text)          → message   帧    ← 回答区
+     *   ModelOutput.ToolCall(id,name,args)→ tool_call 帧    ← 阶段 9：正在调用工具（明细）
+     *   ModelOutput.ToolResult(id,name,r)→ tool_result帧    ← 阶段 9：工具结果（明细）
+     *   Retrieved(chunks, query)         → retrieved 帧    ← 阶段 9：参考了哪几篇
+     *   ModelOutput.Final                → done      帧    ← 结束
      * </pre>
      *
      * <p><b>★ 阶段 9 起 {@code Retrieved} 也外发了</b>（此前刻意不外发，
@@ -196,6 +216,9 @@ public class ChatAppService {
         AtomicLong seq = new AtomicLong();
         AtomicBoolean retrySent = new AtomicBoolean(false);
 
+        // 会话先落库（侧栏立刻能看到），再开始跑模型。理由见 touchCatalog。
+        touchCatalog(conversationId, mode, message);
+
         agentPipeline.run(message, conversationId, mode, userContext)
                 .subscribe(event -> sendEvent(emitter, event, seq, retrySent),
                         error -> handleStreamError(emitter, error),
@@ -215,14 +238,24 @@ public class ChatAppService {
                            PipelineEvent event,
                            AtomicLong seq,
                            AtomicBoolean retrySent) {
-        if (event instanceof PipelineEvent.ModelOutput.Reasoning reasoning) {
+        // ★ 阶段 10：第 N 步开始 —— 工具调用的"骨架"。
+        //   它没有载荷之外的信息量（只有一个步号），但它是"思考中"这个状态
+        //   唯一能出现的时机：模型决定调工具之前，一条 tool_call 都不会有。
+        if (event instanceof PipelineEvent.StepStarted step) {
             sendNamedEvent(emitter, frame(emitter, seq, retrySent,
-                    StreamEventType.REASONING, reasoning.text()));
+                    StreamEventType.STEP, stepData(step)));
+            return;
+        }
+        if (event instanceof PipelineEvent.ModelOutput.Reasoning reasoning) {
+            // ★ 阶段 10：文本载荷改成 {"text":"…"}，而不是裸字符串。
+            //   理由见 textData 的注释（SSE 的 data: 行不能直接放换行，实测字节码确认）
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.REASONING, textData(reasoning.text())));
             return;
         }
         if (event instanceof PipelineEvent.ModelOutput.Token token) {
             sendNamedEvent(emitter, frame(emitter, seq, retrySent,
-                    StreamEventType.MESSAGE, token.text()));
+                    StreamEventType.MESSAGE, textData(token.text())));
             return;
         }
         // ★ 阶段 9：工具调用与结果外发 —— 这是"用户能看到模型在做什么"的关键。
@@ -245,6 +278,54 @@ public class ChatAppService {
             return;
         }
         // Final 不在这里发：它由流的 onComplete 统一发 done（见 stream 方法）。
+    }
+
+    /**
+     * 「第 N 步开始」→ SSE 数据：{@code {"step":2}}。
+     *
+     * <p>只有一个字段，仍然走 {@code Map} 而不是直接发 record ——
+     * 与其它三个事件同一做法（见 {@link #toolCallData}）：
+     * record 的字段名会变成前端契约，而这里只想承诺"前端需要的那些"。
+     */
+    private java.util.Map<String, Object> stepData(PipelineEvent.StepStarted step) {
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("step", step.step());
+        return data;
+    }
+
+    /**
+     * 文本载荷 → {@code {"text":"…"}}。
+     *
+     * <h3>★ 为什么不能直接把裸字符串塞进 SSE（这是实测出来的一个真实缺陷）</h3>
+     *
+     * <p>SSE 的帧格式是"一行 {@code data:} + 换行 + 空行结束"。而
+     * {@code SseEmitter.event().data(String)} 的实现<b>不转义换行</b> ——
+     * 用 {@code javap -c} 读 {@code SseEmitter$SseEventBuilderImpl} 可以看到
+     * 它只是 {@code append("data:")} 之后 {@code append(数据)}，没有任何替换。
+     *
+     * <p>所以只要一个 token 里出现 {@code \n}（markdown 的段落、列表、代码块<b>到处都有</b>），
+     * 浏览器收到的就是：
+     * <pre>
+     *   event:message
+     *   data:第一段
+     *   &lt;空行&gt;              ← 帧在这里被提前结束
+     *   第二段               ← 变成一条没有名字、没有 data: 前缀的"垃圾行"
+     *   &lt;空行&gt;
+     * </pre>
+     * 前端要么丢掉"第二段"，要么把它当成新事件 —— 而<b>段落的空行会彻底消失</b>
+     * （它被当成帧分隔符吃掉了）。症状是"回答的排版偶尔错乱"，与"思考/回答"毫无关联，
+     * 极难归因。
+     *
+     * <p>⇒ 把文本包进 JSON 对象：Jackson 会把 {@code \n} 转义成 {@code \\n}，
+     * 序列化结果<b>永远只有一行</b>，帧边界不再依赖内容。
+     *
+     * <p>代价：前端要读 {@code data.text} 而不是把 data 当字符串用。
+     * 这是阶段 10 建立前端时的一次性代价，换掉的是那条"偶发排版错乱"的坑。
+     */
+    private java.util.Map<String, Object> textData(String text) {
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("text", text == null ? "" : text);
+        return data;
     }
 
     /**
@@ -307,6 +388,45 @@ public class ChatAppService {
     }
 
     // ========================================================================
+    // 会话目录（阶段 10）
+    // ========================================================================
+
+    /**
+     * 把"这次请求到达"记进会话目录：<b>不存在则创建</b>（标题取第一句用户消息），
+     * <b>存在则只刷新活跃时间</b>。
+     *
+     * <h3>★ 为什么在跑模型<b>之前</b>调用</h3>
+     *
+     * <p>会话在请求到达的瞬间就该出现在侧栏里。若等模型答完才记（也就是放在
+     * {@code AgentPipeline#writeBack}），用户发出第一句话后会看到侧栏<b>空着十几秒</b>
+     * —— 而那正是他最容易怀疑"没发出去"的时候。
+     *
+     * <h3>★ 为什么失败只记 WARN，不向上抛</h3>
+     *
+     * <p>与审计、记忆写回同一立场：<b>为"目录写不进去"丢掉已经产生的模型回复是双重损失</b>。
+     * 但也不能静默 —— 目录失败的表现是"侧栏看不到这个会话"，而它的<b>历史其实存下来了</b>；
+     * 这种"数据在、入口没了"的情况必须留下日志，否则会被当成前端 bug 排查很久。
+     *
+     * <h3>★ 为什么用管道的兜底会话 ID</h3>
+     *
+     * <p>空 ID 时管道会落到 {@link AgentPipeline#FALLBACK_CONVERSATION_ID} 去写消息；
+     * 这里若直接跳过，就会出现"<b>消息写进了 default，目录里却没有 default</b>"——
+     * 一份谁也打不开的历史。所以两侧必须用同一个兜底值。
+     *
+     * <p>（正常路径上不会发生：Controller 总会生成一个随机 UUID。）
+     */
+    private void touchCatalog(String conversationId, MemoryMode mode, String message) {
+        String cid = (conversationId == null || conversationId.isBlank())
+                ? AgentPipeline.FALLBACK_CONVERSATION_ID : conversationId;
+        try {
+            conversationCatalog.touch(cid, mode, message);
+        } catch (Exception e) {
+            log.warn("[会话目录] 记录活跃会话失败（对话继续；只是侧栏可能看不到这个会话，"
+                    + "而它的历史消息仍会被正常写入）：会话={} 原因={}", cid, e.toString());
+        }
+    }
+
+    // ========================================================================
     // 发送与错误处理
     // ========================================================================
 
@@ -337,9 +457,13 @@ public class ChatAppService {
      */
     private void handleStreamError(SseEmitter emitter, Throwable error) {
         // 第 1 路：前端 —— 推 error 事件（放在最前，保证用户先收到反馈）
+        //   ★ 载荷同样包成 JSON：异常消息里带换行并不罕见（上游返回的多行报错），
+        //     而裸字符串会像 message 一样把帧切断（见 textData 的注释）
+        String message = error.getMessage() == null
+                ? error.getClass().getSimpleName() : error.getMessage();
         sendNamedEvent(emitter, SseEmitter.event()
                 .name(StreamEventType.ERROR)
-                .data(error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()));
+                .data(java.util.Map.of("message", message)));
 
         // 第 2 路：服务端 —— 记录完整根因（含堆栈），这是 complete() 方案必须补上的一环
         log.error("[流式对话] 失败：{}", error.getMessage(), error);

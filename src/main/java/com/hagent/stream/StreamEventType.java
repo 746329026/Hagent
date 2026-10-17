@@ -21,17 +21,41 @@ package com.hagent.stream;
  * </ol>
  * 成本 ≈ 0，所以不需要现在预支。
  *
- * <p><b>注意"工具调用"不会作为一个事件名出现</b>：它是模型<b>内部</b>的决策，
- * 用户关心的是"做到第几步了"（阶段 9 的"步骤轨迹"），而不是"模型请求调工具"这个信号。
- * 所以未来大概率是 {@code STEP} 事件承载"正在做第 N 步"，
- * 工具调用体现在 step 事件的内容里，而不是独立成事件。
+ * <p><b>★ 阶段 10 纠正了一段自相矛盾的注释</b>：本类早期版本写着
+ * "工具调用不会作为一个事件名出现…未来大概率是 {@code STEP} 事件承载'正在做第 N 步'，
+ * 工具调用体现在 step 事件的内容里，而不是独立成事件"。
+ * 而阶段 9 实际把 {@code TOOL_CALL} / {@code TOOL_RESULT} 做成了独立事件
+ * （{@link #TOOL_CALL} 的理由写得很清楚：调用与结果之间隔着一次真实的执行，
+ * 先发"开始"前端才有反馈）。于是注释与代码直接对立。
+ *
+ * <p>正确的说法不是二选一，而是<b>分层</b>：
+ * <pre>
+ *   {@link #STEP}        骨架：第 N 步开始（没有它，工具调用只能摊成一串平铺的）
+ *   {@link #TOOL_CALL}   明细：这一步里模型请求调用了什么
+ *   {@link #TOOL_RESULT} 明细：这个调用返回了什么
+ * </pre>
+ * 一个 STEP 后面可以跟 0..N 组 CALL/RESULT。所以三者都要有，
+ * 谁也不能取代谁 —— 只保留 step 会让"一步里调了哪几个工具"无处表达。
  */
 public final class StreamEventType {
 
-    /** 模型逐片输出的文字（回答正文）。 */
+    /**
+     * 模型逐片输出的文字（回答正文）。
+     *
+     * <p>数据是 JSON 字符串：{@code {"text":"…"}}。
+     *
+     * <p>★ <b>阶段 10 起载荷从裸字符串改成对象</b>，原因是一个实测出来的真实缺陷：
+     * {@code SseEmitter.event().data(String)} <b>不转义换行</b>
+     * （{@code javap -c} 读 {@code SseEmitter$SseEventBuilderImpl} 可证：只有
+     * {@code append("data:")} + {@code append(数据)}）。于是 token 里的 {@code \n}
+     * 会把 SSE 帧切断、把段落空行吃掉 —— 表现为"回答排版偶尔错乱"。
+     * 包成 JSON 后换行被转义，帧边界不再依赖内容。
+     */
     public static final String MESSAGE = "message";
     /**
      * 模型的<b>思考过程</b>逐片输出（阶段 8 新增，DeepSeek 的 {@code reasoningContent}）。
+     *
+     * <p>数据格式与 {@link #MESSAGE} 相同：{@code {"text":"…"}}（理由见上）。
      *
      * <p><b>为什么它是独立的事件名而不是混进 {@code message}</b>：
      * 前端要把"思考区"与"回答区"渲染成两块不同的内容，语义也不同 ——
@@ -50,7 +74,12 @@ public final class StreamEventType {
     /** 正常结束信号。 */
     public static final String DONE = "done";
 
-    /** 出错信号。 */
+    /**
+     * 出错信号：{@code {"message":"…"}}。
+     *
+     * <p>数据是 JSON 对象而不是裸字符串 —— 与 {@link #MESSAGE} 同一个理由
+     * （异常消息里带换行并不罕见，裸字符串会把 SSE 帧切断）。
+     */
     public static final String ERROR = "error";
 
     /**
@@ -68,6 +97,24 @@ public final class StreamEventType {
     public static final String TOOL_RESULT = "tool_result";
 
     /**
+     * <b>第 N 步开始</b>（阶段 10 新增）—— 工具调用的"骨架"。
+     *
+     * <p>数据是 JSON 字符串：{@code {"step":2}}。
+     *
+     * <p><b>为什么需要它，而不是"看到 tool_call 就知道开始了"</b>：
+     * <ol>
+     *   <li>模型在<b>决定调工具之前要思考很久</b>（实测可达十几秒）。
+     *       那段时间一个 {@code tool_call} 都还没有，前端面板是空的 ——
+     *       用户分不清"在想"和"卡住了"。有了本事件，可以立刻显示"第 2 步 · 思考中"；</li>
+     *   <li>一步里可能调多个工具。没有骨架，前端只能把调用摊成一串平铺的，
+     *       "一步调两个"与"两步各调一个"看起来一模一样。</li>
+     * </ol>
+     *
+     * <p>★ 它是<b>本回合内</b>的骨架，不跨回合：每次用户提交都从 {@code step:1} 重新开始。
+     */
+    public static final String STEP = "step";
+
+    /**
      * 知识库检索命中的片段（阶段 9 新增，由检索工具发出）。
      *
      * <p>数据是片段列表 —— 前端据此显示"参考了哪几篇"。
@@ -78,9 +125,9 @@ public final class StreamEventType {
 
     // ==========================================================================
     // 扩展位（未来阶段启用，当前不定义，见类注释）：
-    //   STEP      —— 阶段 9：步骤轨迹（"正在做第 N 步"）
-    //   QUESTION  —— 阶段 10：中断续跑（模型停下来问用户）
+    //   QUESTION  —— 阶段 10 之后：中断续跑（模型停下来问用户）
     //   TODO      —— 阶段 11：任务列表更新
+    // ★ STEP 已在阶段 10 启用，见上方常量。
     // ==========================================================================
 
     private StreamEventType() {

@@ -2,9 +2,11 @@ package com.hagent.controller;
 
 import com.hagent.app.ChatAppService;
 import com.hagent.common.BaseResponse;
+import com.hagent.common.ErrorCode;
 import com.hagent.config.StreamProperties;
 import com.hagent.dto.ChatRequest;
 import com.hagent.dto.ChatResponse;
+import com.hagent.exception.AgentException;
 import com.hagent.memory.MemoryMode;
 import com.hagent.security.UserContext;
 import jakarta.validation.Valid;
@@ -26,9 +28,19 @@ import java.util.UUID;
  *
  * <pre>
  *   POST /chat         阻塞：一次返回完整回复（含思考过程）
- *   POST /stream-sse   流式：SSE 逐事件推送（reasoning / message / done / error）
+ *   POST /stream-sse   流式：SSE 逐事件推送
+ *                      （step / reasoning / message / tool_call / tool_result / retrieved / done / error）
  *   GET  /stream-sse   同上，供浏览器 EventSource 使用（会话 ID 走 query，有泄露风险）
  * </pre>
+ *
+ * <p><b>阶段 10 起还有三个只读接口</b>（会话列表 / 历史回放 / 改名），
+ * 它们<b>不碰模型</b>，所以放在 {@link ConversationController} 而不是这里。
+ *
+ * <p><b>★ 阶段 10：模式不再是硬编码</b>。{@code ChatRequest.mode}（{@code chat} / {@code workflow}）
+ * 决定本次的历史预算（5k vs 50k token），并会随会话落库
+ * （{@code chat_conversation.mode}）—— <b>首次确定后不再由请求改变</b>。
+ * 在此之前两处都写死 {@code MemoryMode.CONVERSATION}，于是 workflow 预算虽然配了、
+ * 整条通道也通了，却<b>没有任何真实调用能走到它</b>（"装好了但没通电的开关"）。
  *
  * <h2>★ 阶段 8 删除了两条流式端点（旧 {@code /stream} 与 {@code /stream-flux}）</h2>
  *
@@ -83,7 +95,29 @@ public class ChatController {
                                            jakarta.servlet.http.HttpServletResponse servletResponse) {
         String conversationId = resolveConversationId(request.conversationId());
         servletResponse.setHeader(CONVERSATION_ID_HEADER, conversationId);
-        return BaseResponse.success(chatAppService.chat(request.message(), conversationId, userContext));
+        return BaseResponse.success(chatAppService.chat(
+                request.message(), conversationId, resolveMode(request.mode()), userContext));
+    }
+
+    /**
+     * 解析请求体里的 {@code mode}。
+     *
+     * <p><b>★ 为什么要把 {@code IllegalArgumentException} 翻成 {@code AgentException}</b>：
+     * {@code GlobalExceptionHandler} 里<b>没有</b> {@code IllegalArgumentException} 的处理器
+     * （这是刻意的 —— 它太宽泛，接住它会把真正的编程错误也变成 400）。
+     * 不翻的话，"客户端把 mode 打成 {@code wrokflow}"会落进兜底的
+     * {@code Exception.class} → <b>HTTP 500 "服务内部错误"</b>，
+     * 于是客户端会去重试一个永远不会成功的请求，运维也会以为服务挂了。
+     *
+     * <p>合法取值见 {@link MemoryMode#fromWire}：{@code chat} / {@code workflow}，
+     * 大小写不敏感；不传则用 {@link MemoryMode#DEFAULT}。
+     */
+    private MemoryMode resolveMode(String rawMode) {
+        try {
+            return MemoryMode.fromWire(rawMode);
+        } catch (IllegalArgumentException e) {
+            throw new AgentException(ErrorCode.INVALID_PARAM, e.getMessage());
+        }
     }
 
     /**
@@ -107,8 +141,12 @@ public class ChatController {
      *
      * <p><b>它推什么事件</b>（见 {@code StreamEventType}）：
      * <pre>
+     *   step       → 第 N 步开始（阶段 10；工具调用的"骨架"，先于任何 tool_call）
      *   reasoning  → 模型的思考过程（DeepSeek 独有，可能整体缺失）
      *   message    → 回答正文逐片（可能多次）
+     *   tool_call  → 模型请求调用工具（阶段 9）
+     *   tool_result→ 工具返回（阶段 9）
+     *   retrieved  → 知识库命中的片段（阶段 9）
      *   done       → 正常结束（恰好一次）
      *   error      → 出错（异常时一次，替代 done）
      * </pre>
@@ -129,7 +167,7 @@ public class ChatController {
         servletResponse.setHeader(CONVERSATION_ID_HEADER, conversationId);
         SseEmitter emitter = new SseEmitter(streamProperties.getSseTimeoutMs());
         chatAppService.stream(request.message(), conversationId,
-                MemoryMode.CONVERSATION, userContext, emitter);
+                resolveMode(request.mode()), userContext, emitter);
         return emitter;
     }
 
@@ -151,12 +189,13 @@ public class ChatController {
     @GetMapping(value = "/stream-sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamSseGet(@RequestParam String message,
                                    @RequestParam(required = false) String conversationId,
+                                   @RequestParam(required = false) String mode,
                                    @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext,
                                    jakarta.servlet.http.HttpServletResponse servletResponse) {
         String resolved = resolveConversationId(conversationId);
         servletResponse.setHeader(CONVERSATION_ID_HEADER, resolved);
         SseEmitter emitter = new SseEmitter(streamProperties.getSseTimeoutMs());
-        chatAppService.stream(message, resolved, MemoryMode.CONVERSATION, userContext, emitter);
+        chatAppService.stream(message, resolved, resolveMode(mode), userContext, emitter);
         return emitter;
     }
 }

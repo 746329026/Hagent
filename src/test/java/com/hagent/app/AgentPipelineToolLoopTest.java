@@ -554,4 +554,110 @@ class AgentPipelineToolLoopTest {
         assertThat(turn.get(0).getText()).isEqualTo("天气");
         assertThat(turn.get(1).getText()).isEqualTo("今天晴。");
     }
+
+    // ========================================================================
+    // 六、阶段 10：步骤骨架（StepStarted）与思考的分步落库
+    // ========================================================================
+
+    /** 造一个"第 1 步调工具、第 2 步给答案"的模型。 */
+    private ChatModel twoStepModel(AtomicInteger modelCalls) {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
+                modelCalls.getAndIncrement() == 0
+                        ? Flux.just(toolCallChunk("getWeather", "{}"))
+                        : Flux.just(finalChunk("杭州今天晴，26 度。")));
+        return chatModel;
+    }
+
+    private AgentPipeline twoStepPipeline(ChatModel chatModel, RecordingMemory memory) {
+        return new AgentPipeline(
+                chatModel, memory, TestToolCallbackProvider.of(new FakeTool("getWeather", "杭州今天晴").asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    @DisplayName("★★ 两步回合发两个 StepStarted，且都在同一步的思考之前")
+    void stepEventsMarkEachModelCall() {
+        List<PipelineEvent> events = twoStepPipeline(twoStepModel(new AtomicInteger()), new RecordingMemory())
+                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        List<Integer> steps = events.stream()
+                .filter(PipelineEvent.StepStarted.class::isInstance)
+                .map(PipelineEvent.StepStarted.class::cast)
+                .map(PipelineEvent.StepStarted::step)
+                .toList();
+
+        assertThat(steps)
+                .as("★ 模型被调用两次 ⇒ 必须有两个 StepStarted(1)(2)。前端靠它把工具调用归到"
+                        + "同一步下；没有它，『一步调两个工具』与『两步各调一个』完全无法区分")
+                .containsExactly(1, 2);
+
+        // ★ 顺序：StepStarted 必须在同一步的第一个模型事件之前
+        int firstStep = events.indexOf(new PipelineEvent.StepStarted(1));
+        int firstReasoning = -1;
+        for (int i = 0; i < events.size(); i++) {
+            if (events.get(i) instanceof PipelineEvent.ModelOutput.Reasoning) {
+                firstReasoning = i;
+                break;
+            }
+        }
+        assertThat(firstStep)
+                .as("★ StepStarted 必须【先于】任何 Reasoning —— 模型思考的十几秒里若没有它，"
+                        + "前端面板是空的，用户分不清『在想』和『卡住』")
+                .isNotNegative()
+                .isLessThan(firstReasoning);
+    }
+
+    @Test
+    @DisplayName("★★ 思考按步落库：第 1 步不带标记，第 2 步的标记带上『上一步调了什么工具』")
+    void reasoningIsPersistedWithStepMarkers() {
+        RecordingMemory memory = new RecordingMemory();
+        List<PipelineEvent> events = twoStepPipeline(twoStepModel(new AtomicInteger()), memory)
+                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        List<Message> turn = memory.appended.get(0);
+        String trace = com.hagent.memory.MessageCodec.reasoningOf(turn.get(1));
+
+        assertThat(trace)
+                .as("★ 落库形态：第 1 步的思考（无标记）+ 标记行 + 第 2 步的思考。"
+                        + "工具名挂在『下一步的标记』上 —— 因为工具是在第 1 步【结束之后】才执行的，"
+                        + "而第 1 步按约定不写标记，挂在自己那一步会让它彻底丢失")
+                .isEqualTo("我应该调用 getWeather\n\n@@step:2 tool:getWeather\n想清楚了");
+
+        assertThat(finalOf(events).reasoning())
+                .as("★ 而 Final.reasoning 是【不带标记】的纯文本：它给 /chat 阻塞接口用，"
+                        + "那里没有『步』这个概念，塞进标记只会让调用方去解析它")
+                .isEqualTo("我应该调用 getWeather想清楚了");
+
+        // 反向解析：历史回放拿到的结构与落库文本对得上
+        assertThat(com.hagent.memory.ReasoningTrace.parse(trace))
+                .hasSize(2)
+                .extracting(com.hagent.memory.ReasoningTrace.Section::step)
+                .containsExactly(1, 2);
+    }
+
+    @Test
+    @DisplayName("★ 单步回合（没调工具）落库就是纯思考，一个标记都没有")
+    void singleStepReasoningHasNoMarker() {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> Flux.just(finalChunk("不需要工具")));
+
+        RecordingMemory memory = new RecordingMemory();
+        new AgentPipeline(chatModel, memory, TestToolCallbackProvider.none(), TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)))
+                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(com.hagent.memory.MessageCodec.reasoningOf(memory.appended.get(0).get(1)))
+                .as("★ 绝大多数回合都是单步（没调工具），它们的思考落库必须是【干净的一段话】——"
+                        + "否则每一行历史里都会多一行格式噪音")
+                .isEqualTo("想清楚了");
+    }
 }

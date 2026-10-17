@@ -117,6 +117,16 @@ public class FileConversationRecordStore implements ConversationRecordStore {
     }
 
     @Override
+    public List<Message> readAll(String conversationId) {
+        List<MessageCodec.StoredMessage> stored;
+        Object lock = locks.computeIfAbsent(conversationId, k -> new Object());
+        synchronized (lock) {
+            stored = readStored(conversationId);
+        }
+        return MessageCodec.fromStoredList(stored);
+    }
+
+    @Override
     public void clear(String conversationId) {
         Object lock = locks.computeIfAbsent(conversationId, k -> new Object());
         synchronized (lock) {

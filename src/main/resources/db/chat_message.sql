@@ -74,6 +74,7 @@ CREATE TABLE chat_message (
     conversation_id VARCHAR(64)     NOT NULL COMMENT '会话 ID（服务端生成的随机 UUID）',
     role            VARCHAR(16)     NOT NULL COMMENT 'SYSTEM / USER / ASSISTANT / TOOL（TOOL 为阶段 8 预留）',
     content         MEDIUMTEXT      NOT NULL COMMENT '消息正文（utf8mb4，可存 emoji 与生僻字）',
+    reasoning       MEDIUMTEXT      NULL     COMMENT '阶段 10：该回合模型的完整思考（多步用 @@step:N 标记分隔，见下方说明）',
     extra           JSON            NULL COMMENT '阶段 8 预留：tool_name / tool_call_id 等',
     created_at      DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
@@ -81,3 +82,51 @@ CREATE TABLE chat_message (
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COMMENT='会话记忆的记录层（权威·完整·永久）；模型的上下文缓存另在 Redis';
+
+-- ============================================================================
+-- ★★ 阶段 10：`reasoning` 列（为什么是"一段文本 + 标记"，不是一张子表/一个 JSON）
+-- ============================================================================
+--
+-- 【它存什么】
+--   一个【回合】（一次用户输入 → 模型最终回答）里，模型**所有步**的思考，
+--   按步顺序拼成一段，用下面这种独立一行做分隔：
+--
+--       @@step:2 tool:retrieveKnowledge
+--
+--   一行一个标记，后面紧跟该步的思考。第 1 步不写标记（它就是开头那一段）。
+--
+-- 【为什么需要标记（不是可有可无的美化）】
+--   多步任务的思考，价值恰好在【步与步之间】的转折：
+--     "第一次没查到 → 换个说法再查 → 还是不行 → 放弃工具直接答"
+--   不标步号，这段文字读得出、查不出：无法回答"它在第几次工具调用后改的主意"。
+--   而 chat_message 一行 = 一个回合，步的信息没有别的地方放
+--   （审计表 chat_tool_invocation 只有"工具调用"，没有"思考"）。
+--
+-- 【为什么不用 JSON 数组 / 子表】
+--   消费者第一是人（用 SQL 直接查、在前端折叠面板里回看）。JSON 在
+--   `SELECT reasoning` 里是一坨转义的 \n，得先解一次才知道写了什么。
+--   而每步要表达的事实只有三项：步号、这步之后调了什么工具、这步想了什么
+--   —— 一行文本足够，不需要结构化到那个程度。
+--   ⇒ 结构化程度要匹配消费者的需要，不是越高越好。
+--
+-- 【★ 为什么模型的下一轮**看不到**它（这条别"优化"掉）】
+--   思考内容存进 `AssistantMessage` 的 **properties/元数据**，而不是
+--   `DeepSeekAssistantMessage.reasoningContent`。理由是实测过的：
+--   `DeepSeekChatModel.createRequest` 里 `instanceof DeepSeekAssistantMessage`
+--   会把它**重新填进发出去的 chat 请求**，而 reasoning_content 是**输出专用字段**，
+--   回传轻则白烧 token、重则 400。用 properties 存则不进请求 —— 前端能显示、
+--   模型永远看不到。将来若有人把它"简化"成 reasoningContent，
+--   症状会是"下一轮模型调用失败"，而根因（历史里带了思考）几乎不可能被想到。
+--
+-- 【存量库升级（只对"已经建过 chat_message"的库执行一次，全新库跳过）】
+--   本文件描述的是【目标结构】，重复执行会报 table already exists。
+--   已存在的库请执行这一句（After content 只是为了列顺序好看，不影响功能）：
+--
+--     ALTER TABLE chat_message
+--         ADD COLUMN reasoning MEDIUMTEXT NULL
+--         COMMENT '阶段 10：该回合模型的完整思考（多步用 @@step:N 标记分隔）'
+--         AFTER content;
+--
+--   忘记执行会怎样：应用启动自检会核对本列是否存在，
+--   不符即【启动失败】并打印这句 ALTER —— 不会等到第一次写入才报 SQL 错。
+-- ============================================================================

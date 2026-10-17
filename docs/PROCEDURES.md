@@ -3179,14 +3179,255 @@ provider 表达的依赖是"**能提供工具的东西**" —— 与"可插拔"�
 
 ---
 
+## 10. 前端页面 + 会话目录 + 思考落库
+
+### 10.1 本阶段要解决的问题
+
+阶段 9 结束时，链路是通的，但**没有任何人能用**：
+
+| 缺什么 | 具体表现 |
+|---|---|
+| 界面 | 只有 `curl` 能看到 SSE；"思考 / 工具调用 / 回答"三条信息没有可视化 |
+| 会话列表 | 刷新页面就**回不到之前的会话** —— 没有"我有哪些会话"的接口 |
+| 标题 | 就算列出了会话，也只有一串 UUID，**没有名字** |
+| 思考的历史 | 思考只在流式期间存在，落库的只有"问 + 答"，刷新后思考永久丢失 |
+| 模式 | `ChatRequest` 没有 `mode`，`MemoryMode.WORKFLOW` 那条通道**装好了但没通电** |
+
+所以本阶段做四件事：**会话目录（新表）+ 思考落库（新列）+ 三个只读接口 + 一个 Vue 前端**。
+
+### 10.2 主要新增 / 修改 / 删除
+
+| 动作 | 文件 |
+|---|---|
+| 新增表 | `db/chat_conversation.sql`（一会话一行：标题 / 模式 / 时间） |
+| 新增列 | `db/chat_message.sql` 的 `reasoning MEDIUMTEXT NULL`（存量库用文件末尾的 `ALTER`） |
+| 新增 | `memory/session/{ConversationCatalog,MysqlConversationCatalog,FileConversationCatalog}.java` |
+| 新增 | `memory/ReasoningTrace.java`（落库文本 ↔ 结构化分段，写读两侧的唯一格式出处） |
+| 新增 | `app/ConversationQueryService.java`、`controller/ConversationController.java`、`dto/SessionDtos.java` |
+| 改 | `MessageCodec`（`StoredMessage` 加 `reasoning` + 从 properties 存取）、两个 `RecordStore`（读写 `reasoning` + `readAll` + 自检） |
+| 改 | `AgentPipeline`（发 `StepStarted`、按步切思考、写回带标记的思考） |
+| 改 | `ChatAppService`（`mode` 参数、`step` 事件、**文本载荷改 JSON**、`touchCatalog`） |
+| 改 | `ChatRequest`（+`mode`）、`ChatController`（解析 mode）、`MemoryMode`（+`wireName`/`fromWire`） |
+| 改 | `application.yml`（CORS + `5173`、`conversation-table-name`） |
+| 新增（前端） | `frontend/`（Vite + Vue3 + axios 风格 fetch + marked + DOMPurify） |
+
+### 10.3 本阶段数据流向
+
+```mermaid
+flowchart TD
+    subgraph FE["前端 :5173"]
+        UI["会话侧栏 / 对话区 / 执行轨迹"]
+        P["SSE 解码器<br/>（fetch + ReadableStream）"]
+    end
+
+    subgraph BE["后端 :8123/api"]
+        C1["ChatController<br/>POST /chat/stream-sse"]
+        C2["ConversationController<br/>GET /sessions · GET /messages · PATCH"]
+        AS["ChatAppService"]
+        QS["ConversationQueryService"]
+        PL["AgentPipeline"]
+    end
+
+    subgraph MEM["记忆层"]
+        CAT["ConversationCatalog<br/>标题 / 模式"]
+        REC["ConversationRecordStore<br/>消息 + reasoning"]
+    end
+
+    M[("DeepSeek")]
+    MY[("MySQL<br/>chat_conversation<br/>chat_message")]
+
+    UI -->|"POST {message, mode}"| C1
+    C1 --> AS
+    AS -->|"① 先记会话（标题=首句）"| CAT
+    AS --> PL
+    PL -->|"② 每步先发 StepStarted"| M
+    M -->|"③ 思考/正文/工具请求"| PL
+    PL -->|"④ 写回：问 + 答 + 带@@step:的思考"| REC
+    PL -.->|"事件流"| AS
+    AS -.->|"SSE 帧"| P
+    P --> UI
+
+    UI -->|"点开会话"| C2
+    C2 --> QS
+    QS --> CAT
+    QS -->|"readAll()"| REC
+    QS -->|"parse(@@step:)"| QS
+
+    CAT --> MY
+    REC --> MY
+```
+
+### 10.4 一个回合的事件顺序与三块视图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant AS as ChatAppService
+    participant PL as AgentPipeline
+    participant M as DeepSeek
+    participant T as 工具
+    participant DB as MySQL
+
+    U->>AS: POST /chat/stream-sse {message, mode:chat}
+    AS->>DB: touch 会话目录（懒创建，标题=首句）
+    AS->>PL: run(message, cid, mode, user)
+    PL->>PL: 读历史 + 拼装
+    PL-->>AS: StepStarted(1)
+    AS-->>U: step {"step":1}          （执行轨迹：第 1 步 · 思考中）
+    PL->>M: 调模型 #1
+    M-->>PL: reasoning 片
+    PL-->>AS: Reasoning
+    AS-->>U: reasoning {"text":"…"}   （思考区滚动）
+    M-->>PL: tool_calls
+    PL-->>AS: ToolCall / ToolResult
+    AS-->>U: tool_call / tool_result  （执行轨迹：retrieveKnowledge · 已返回）
+    PL-->>AS: StepStarted(2)
+    AS-->>U: step {"step":2}          （执行轨迹：第 2 步）
+    PL->>M: 调模型 #2（带工具结果）
+    M-->>PL: 正文片
+    PL-->>AS: Token
+    AS-->>U: message {"text":"…"}     （对话区出字；思考区自动收起）
+    PL->>DB: 写回「问 + 答 + @@step: 标记的思考」
+    AS-->>U: done
+```
+
+### 10.5 坑 38：SSE 的 `data:` 行**放不下**裸换行 —— 而这个问题一直存在
+
+**症状**：回答里只要出现换行（markdown 的段落、列表、代码块，**到处都有**），
+前端就会"偶发排版错乱"，而且与思考/回答的边界毫无关系，极难归因。
+
+**根因（字节码证据，不是猜）**：
+
+```
+javap -c 'org.springframework.web.servlet.mvc.method.annotation.SseEmitter$SseEventBuilderImpl'
+  data(Object, MediaType):
+      ... ldc "data:" ; invokevirtual append(String)
+      ...                          ← 之后直接 append 数据，没有任何换行转义
+```
+
+于是 `event:message` + `data:第一段\n\n第二段` 发出去的真实字节是：
+
+```
+event:message
+data:第一段
+              ← 空行：SSE 认为这一帧结束了
+第二段        ← 一条没有 event:、没有 data: 前缀的"垃圾行"
+              ← 空行
+```
+
+**为什么"以前没暴露"**：前端一直是 `curl` 或一个极简 HTML，没人认真看排版；
+而**段落的空行直接被当成帧分隔符吃掉**，所以问题看起来像"markdown 渲染有问题"。
+
+**修法**：把所有**文本**载荷包成 JSON 对象（`{"text":"…"}` / `{"message":"…"}`）。
+Jackson 会把 `\n` 转义成 `\\n`，序列化结果**永远只有一行** —— 帧边界不再依赖内容。
+
+**可迁移的判据**：**任何"把自由文本塞进行协议字段"的地方都要先问"这文本能含换行吗"**。
+一旦答案是"能"，就必须编码（这里用 JSON），而不能指望对端"聪明地"把续行拼回去 ——
+拼接是有损的：`\n\n` 的第二个换行已经被协议吃掉了，**拼不回来**。
+
+### 10.6 坑 39：Vue 里改「裸对象」不会触发更新
+
+**症状**：流式过程中界面**完全不动**，等流结束才一次性出现完整回答。
+
+**原因**：代码是这么写的：
+
+```js
+const assistant = { role: 'ASSISTANT', content: '', reasoning: [] }
+messages.value.push(assistant)   // 数组是 reactive，但存进去的是【原始对象】
+// ... 之后直接改 assistant.content += '…'
+```
+
+Vue 3 的响应式靠 **Proxy**：数组读出来的元素是代理，而**手上这个 `assistant` 是原始对象**。
+改原始对象等于绕过 Proxy，**不会触发任何更新**。
+
+**修法**：`reactive({...})` 之后再 push —— 存进去与手上的引用是同一个代理。
+
+**可迁移的判据**：**"数据在响应式容器里"不等于"我手里的引用是响应式的"**。
+凡是"创建对象 → 放进容器 → 继续用旧引用改它"的写法，都要检查这一点。
+
+### 10.7 坑 40：MySQL 的"影响行数 = 0"有两种含义
+
+`rename` 的实现是 `UPDATE … SET title = ? WHERE conversation_id = ?`，
+`affected == 0` 可能是：
+
+1. **会话不存在**（该返回 404）；
+2. **新标题与旧标题完全相同**（MySQL 不把"没变化"算作被修改）。
+
+把 0 一律当成"不存在"，用户**原样提交**改名就会收到 404，看起来像会话丢了。
+修法是 `affected == 0` 时再查一次"它到底存不存在"。
+
+**可迁移的判据**：**用 `affected rows` 判断"记录是否存在"之前，先问"有没有可能值没变"**。
+这不是 MySQL 的怪癖，PostgreSQL / SQL Server 也有同类语义差异 —— 所以要修的是**代码的判断依据**，
+而不是记住某一行注释。
+
+### 10.8 阶段结果与验证证据
+
+**测试**：`279 用例全绿，2 skipped`（`ModelOutputProbeTest` 是环境开关的探针）。
+
+新增用例 28 个：
+
+| 测试 | 盯住什么 |
+|---|---|
+| `ReasoningTraceTest`（12） | 标记格式 + `render/parse` **往返恒等**；正文中间出现的 `@@step:` 不被当成标记 |
+| `AgentPipelineToolLoopTest`（+3） | 两步发两个 `StepStarted`、`StepStarted` 先于任何 `Reasoning`、落库思考带标记而 `Final.reasoning` 不带、单步回合无标记 |
+| `MysqlConversationCatalogTest`（5） | 不覆盖标题/模式、改名成同名仍成功、按活跃时间倒序、超长标题被截断 |
+| `FileConversationCatalogTest`（3） | sidecar 文件、跨实例可见、坏文件按空目录处理 |
+| `MemoryModeTest`（5） | 线上名称是 `chat/workflow`（不是枚举名）、打错字**抛异常**而不是静默退回默认 |
+
+**真实 HTTP 证据**（后端跑起来、用真实请求打的；模型因无有效 Key 而 401，这恰好验证了链路）：
+
+```
+POST /api/chat/stream-sse  {message:"…", mode:"workflow"}
+  → 200，响应头 X-Conversation-Id: ddc34ab4-…
+  → 事件流（原样）：
+      id:1  event:step  data:{"step":1}  retry:5000
+      event:error data:{"message":"401 Unauthorized from POST https://api.deepseek.com/chat/completions"}
+
+GET /api/chat/sessions        → 该会话已出现，mode=workflow（★ 模型调用失败也照样建了会话，
+                                因为它是在调模型【之前】记的）
+PATCH /api/chat/sessions/{id} → 200，updatedAt 变了
+GET /api/chat/sessions/{id}/messages → {"session":{…},"messages":[]}
+                                 ★ 空的：失败回合不留半条记录（既有硬约束）
+GET /api/chat/sessions/nope-404/messages → HTTP 404 {"code":41001,"message":"会话不存在"}
+POST /api/chat {"mode":"wrokflow"} → HTTP 400 {"code":40001}   （打错字不是静默降级）
+
+OPTIONS /api/chat/sessions（Origin: http://localhost:5173）
+  → 200，Access-Control-Allow-Origin: http://localhost:5173
+        Access-Control-Allow-Credentials: true
+        Access-Control-Expose-Headers: Content-Type, X-Request-Id, X-Conversation-Id
+
+前端：npm run build 通过；npm run dev 起在 5173 并返回 <title>Hagent</title>。
+```
+
+**一条被验证为"假警报"的事**（值得记，因为差点误判成编码 bug）：
+用 `Invoke-WebRequest -Body '{"title":"年假政策"}'` 在 PowerShell 里发中文，
+落库查出来是 `3F3F3F…`（一串问号）。改用**按码点构造 + UTF-8 字节**发送后，
+`HEX(title)` 是 `E5B9B4E58187E694BFE7AD96`（正是"年假政策"的 UTF-8）——
+**服务端没问题，是测试命令里的中文在到达 HTTP 之前就被替换掉了**。
+⇒ 判据：**中文落库异常时，先用 `HEX()` 看字节，并检查"发出去的那一侧"**，
+不要直接怀疑服务端编码。
+
+### 10.9 本阶段**没有**做成的事（诚实清单）
+
+| # | 没做 | 为什么 |
+|---|---|---|
+| 1 | 会话**删除**接口 | 目前没有消费者（前端没有删除按钮）。数据模型已能承载（`delete` 两个存储都有） |
+| 2 | 历史回放的**工具参数与结果** | 它们不进会话历史（决策 32），只在审计表 `chat_tool_invocation`。前端因此只显示"第 N 步 · 工具名" |
+| 3 | 工具**成功/失败**标识 | `ToolResult` 刻意没有 `error` 字段（阶段 9.7），前端拿不到该信号，所以状态只能到"已返回"，**不画绿勾** |
+| 4 | 单次工具**耗时** | 框架的 `executeToolCalls` 一次执行整批，不逐个计时。要做得自己拆执行，代价大于收益 |
+| 5 | 会话按**用户隔离** | 现在没有鉴权，"我的会话"其实就是"所有会话"。这是既有安全缺口（阶段 13 的鉴权要一起解决） |
+| 6 | 工作流的**真实编排** | 阶段 10 只让 `mode` 名副其实（真实生效的历史预算 + 落库），编排本身在**阶段 12** |
+| 7 | 会话列表**分页** | 侧栏一次只显示前 50 个。真需要滚动加载时加游标（`updated_at` 已是索引） |
+
+---
+
+
+---
+
 ## 待推进
 
-- **阶段 10：前端极简页面** —— 用 `EventSource` 真实消费 SSE，把"思考 / 工具调用 / 回答"可视化
-  - ★ 事件名已全部就位：`reasoning`（思考）/ `message`（回答）/ `tool_call` / `tool_result` /
-    `retrieved`（参考了哪几篇）/ `done` / `error`
-  - ★ 已知契约：`retrieved` 的字段已由后端**收窄为 `source` + `band`（中文档位）**，
-    前端无需再映射枚举
-  - ★ 还需设计的：**"第 N 步"的展示时机**（本阶段刻意没发 Step 事件 —— 那属于前端设计）
+- ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`279 用例全绿`）
 - **阶段 11：长期记忆**（`.md` + 索引）
   - 与会话记忆的分工：会话记忆由**管线自动**存取；长期记忆由**模型通过工具**自主读写
   - ★ `.md` 读写必须显式 `UTF_8`（协议 §9.4 第 3 条）
@@ -3194,8 +3435,10 @@ provider 表达的依赖是"**能提供工具的东西**" —— 与"可插拔"�
   - ⚠️ **流式路径的 token 用量实测未观察到**（`Final.usage` 可能拿到 `EmptyUsage`）——
     做成本统计前必须**先测**，别假设
   - ★ 工具调用审计表已经落地，调用计数可以直接查库（见 `chat_tool_invocation`）
-- **工作流模式（`MemoryMode.WORKFLOW`）** —— 通道已通、尚无调用方
-  - 阶段 8 起它是 `AgentPipeline.run(..., mode, ...)` 的方法参数
+- **工作流模式（`MemoryMode.WORKFLOW`）** —— 阶段 10 起它**通电了**（`ChatRequest.mode` 真实生效并落库），
+  但**仍没有真正的编排**：行为与 `chat` 一致，只有历史预算不同（5 万 vs 5 千 token）
+  - 阶段 8 起它是 `AgentPipeline.run(..., mode, ...)` 的方法参数；阶段 10 起由请求体声明、
+    首次创建会话时写入 `chat_conversation.mode`，之后**不再由请求改变**
   - 预算 50000 token 是否够用，需要真实多步任务来验证
 - **一个待补的验证**（不是新功能，是欠的证据）：`docs/STAGE5-VERIFICATION.md` 里的"下一轮能否答出名字"
   至今未跑 —— 目前只能证明记忆能装配、能落盘，**不能证明注入后模型真的用上了**

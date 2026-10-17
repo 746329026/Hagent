@@ -110,6 +110,62 @@ public enum MemoryMode {
     public static final MemoryMode DEFAULT = CONVERSATION;
 
     // ========================================================================
+    // 线上名称 —— 阶段 10 新增（HTTP 请求体与数据库里存的都是它）
+    // ========================================================================
+
+    /**
+     * 本模式的<b>线上名称</b>：{@code chat} / {@code workflow}。
+     *
+     * <h3>★ 为什么需要这么一层映射，而不是直接用 {@code name()}</h3>
+     *
+     * <p>枚举值叫 {@code CONVERSATION}，但<b>产品与配置里这个词一直是 {@code chat}</b>
+     * （配置前缀 {@code hagent.memory.chat.*}，本文件顶部的"待办"也写着
+     * 这笔改名迟早要做）。如果 HTTP 与数据库直接用 {@code name()}，
+     * 那么这笔改名会从"改 4 处代码"升级成"还要迁移历史数据" —— 一个纯粹由
+     * <b>命名不一致</b> 引发的数据迁移，没有任何收益。
+     *
+     * <p>所以把映射<b>收在这一个方法里</b>：改名时只改枚举常量与下面这个 switch，
+     * 请求体、响应体、数据库三者一个字都不用动。
+     *
+     * <p>★ 附带的结构好处：{@code switch} 是<b>穷尽</b>的且刻意不写 {@code default}
+     * —— 将来新增第三种模式会<b>编译失败</b>，而不是在运行期悄悄漏掉一个映射
+     * （漏掉的症状是"新模式存进库变成了 null"）。
+     */
+    public String wireName() {
+        return switch (this) {
+            case CONVERSATION -> "chat";
+            case WORKFLOW -> "workflow";
+        };
+    }
+
+    /**
+     * 把线上名称（或枚举名）解析成模式。
+     *
+     * <p>两种写法都接受：{@code chat} / {@code WORKFLOW} / {@code conversation} 都行 ——
+     * 大小写不敏感，因为这是<b>人输入的参数</b>，不该因大小写不同而失败。
+     *
+     * <p><b>空值 → {@link #DEFAULT}</b>（调用方没声明模式是合法状态：老客户端、
+     * 手工 curl）。<b>无法识别 → 抛异常</b>，而不是退回默认值 ——
+     * 后者会让"客户端把 {@code wrokflow} 打错"表现为"静默用了 chat 的 1/10 预算"，
+     * 而且没有人会发现，直到模型开始忘事。
+     *
+     * @throws IllegalArgumentException 取值无法识别
+     */
+    public static MemoryMode fromWire(String wire) {
+        if (wire == null || wire.isBlank()) {
+            return DEFAULT;
+        }
+        String normalized = wire.trim().toLowerCase(java.util.Locale.ROOT);
+        for (MemoryMode mode : values()) {
+            if (mode.wireName().equals(normalized) || mode.name().equalsIgnoreCase(normalized)) {
+                return mode;
+            }
+        }
+        throw new IllegalArgumentException(
+                "mode 取值非法：" + wire + "（合法取值：" + "chat / workflow）");
+    }
+
+    // ========================================================================
     // ⚠️ 阶段 8 删除了 CONTEXT_KEY（原值 "hagent_memory_mode"）
     //
     //   它曾是"模式经 ChatClientRequest.context 传递"这个机制的 key。

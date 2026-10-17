@@ -213,10 +213,11 @@ class AgentPipelineTest {
         List<PipelineEvent> events = collect(pipeline(new RecordingMemory(), chunks));
 
         assertThat(events)
-                .as("★ 阶段 9 起：管线不再发 Retrieved（检索已工具化），"
-                        + "所以事件 = 1 个 Reasoning + 1 个 Token + 1 个 Final。"
+                .as("★ 阶段 9 起：管线不再发 Retrieved（检索已工具化）；"
+                        + "阶段 10 起多 1 个 StepStarted（第 N 步开始，在所有模型事件之前）。"
+                        + "所以事件 = 1 个 StepStarted + 1 个 Reasoning + 1 个 Token + 1 个 Final。"
                         + "空片若未被过滤，这里会多出两个空事件（前端表现为收到空消息）")
-                .hasSize(3)
+                .hasSize(4)
                 .noneMatch(PipelineEvent.Retrieved.class::isInstance)
                 .hasAtLeastOneElementOfType(PipelineEvent.ModelOutput.Final.class);
 
