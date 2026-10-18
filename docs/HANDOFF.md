@@ -3,7 +3,8 @@
 > **用途**：新开对话时先读本文件，即可在**不重读历史对话**的前提下继续推进。
 > 本文件是"当前状态 + 已定决策 + 全部待办 + 踩坑红线"的**唯一权威快照**。
 >
-> **最后更新**：阶段 10 已完成（**前端页面 + 会话目录 + 思考落库**：`279 用例全绿` + 真实 HTTP 联调取证）。
+> **最后更新**：阶段 10 已完成（**前端页面 + 会话目录 + 思考落库**：`282 用例全绿` + 真实 HTTP 联调取证），
+> 并在**真机联调**中修掉两个"逻辑对、位置错"的 bug（检索跑在 Reactor 事件循环上 / 失败被降级成"没命中"）。
 > ★ 下一步是**阶段 11（长期记忆 `.md` + 索引）** —— 动手前先按协议第 1 条走五步，等明确放行。
 
 ---
@@ -479,7 +480,7 @@ $h = "C:\Users\Rong\Desktop\实习准备\Hagent"
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 Set-Location $h
 
-# 全量测试（279 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
+# 全量测试（282 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
 .\mvnw.cmd -B -ntp clean test
 
 # 启动（需要 DEEPSEEK_API_KEY；IDEA 运行配置里已配好）
@@ -581,6 +582,25 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
    判据：中文落库异常时先 `HEX()` 看字节 + 检查"发出去的那一侧"。
 2. **`Get-Content` 显示 `鏉窞…`**（老坑）：文件是好的，是控制台编码问题 —— 用 `-Encoding utf8` 或 `read` 工具。
 
+#### ★★ 真机联调修掉的两个 bug（联调才有，mock 永远测不到）
+
+| bug | 根因 | 认知 |
+|---|---|---|
+| **问年假/差旅，检索全返回"未找到"，而库里就是有** | 检索**跑在 Reactor 的 Netty 事件循环线程上**（`reactor-http-nio-*`）。工具里的阻塞调用（Ollama embedding 的 RestClient 底要 `Mono.block()`）被 Reactor 直接拒绝：`block() ... not supported in thread reactor-http-nio-4` → 异常被吞 → 空列表 → "没命中" | **整条管道允许阻塞，所以整条管道都不该在事件循环上跑。** 修法：`loop()` 里 `concatWith(handleToolCalls)` **之前**加 `publishOn(boundedElastic)`（加在外层无效 —— publishOn 只管它下游）。★ 同一根因还压着 `writeBack`/`recordAudit` 两个 JDBC 调用：它们不报错，只**静默堵事件循环** |
+| **每次都被答"知识库中未找到相关内容"** | `retrieve` 失败时 `return List.of()` → 与"没命中"**同形** → 工具回"没找到" → 模型照说 | **降级要发生在"能说出原因"的那一层。** 在只看得到 `List` 的层里降级，原因永久丢失。修法：失败**抛** `RetrievalUnavailableException`，工具接住后返回"检索不可用（系统故障，**不是**没有资料）"。★ 顺带修掉阶段 9.7 留的账：工具自己知道失败 → 不必从文本猜 |
+
+**为什么 282 个用例都没抓到**：所有假模型都是 `Flux.just(...)`，元素在**调用线程**上发出；
+真机上元素来自 Netty 线程。**bug 正好长在 mock 边界之外**（§十 第 5 条）。
+⇒ 已机制化：新用例用 `publishOn(Schedulers.parallel())` 假装"元素来自非阻塞线程"，
+假工具在**工具外**断言 `Schedulers.isInNonBlockingThread() == false`（工具内抛异常会被框架翻成文本 → 假绿）。
+**先红（跑在 `parallel-1`）后绿**都验证过。
+
+**顺带澄清**：执行轨迹里"一步两个 retrieveKnowledge"**不是重复渲染** ——
+日志里两条 query 不同，是模型在同一步发了两个并行工具调用（自己做查询改写）。
+已改为显示 `「query」` 以便区分；代价是双倍 embedding/向量查询，**决定接受**（召回更好）。
+
+
+
 #### 三条可迁移认知
 
 1. **自由文本不能直接塞进协议字段**（坑 38）：先问"这文本能含换行吗"，能就必须编码。
@@ -600,7 +620,7 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 #### 留下的诚实清单（本阶段没做）
 
 会话删除接口 / 历史回放的工具参数与结果 / 工具成功失败标识 / 单次工具耗时 /
-会话按用户隔离（无鉴权）/ 工作流的真实编排（阶段 12）/ 会话列表分页 —— 理由逐条见 `PROCEDURES.md` 10.9。
+会话按用户隔离（无鉴权）/ 工作流的真实编排（阶段 12）/ 会话列表分页 —— 理由逐条见 `PROCEDURES.md` 10.10。
 
 ---
 
@@ -887,7 +907,8 @@ Hagent/
 ├── src/main/java/com/hagent/
 │   ├── HagentApplication.java     ← ★ 含 exclude = ChatMemoryAutoConfiguration（阶段 8）
 │   ├── common/       BaseResponse / ErrorCode / GlobalResponseBodyAdvice
-│   ├── exception/    AgentException / GlobalExceptionHandler / FailureMapper / FailureMapping
+│   ├── exception/    AgentException / GlobalExceptionHandler / FailureMapper / FailureMapping /
+│   │                 RetrievalUnavailableException（★ 阶段 10 联调："查不了" ≠ "没查到"）
 │   ├── config/       AiConfig（阶段 8 起几乎空）/ WebConfig / StreamProperties /
 │   │                 TraceProperties（原 AdvisorProperties）/ VectorStoreConfig /
 │   │                 VectorStoreProperties / VectorStoreDataSourceProperties /
@@ -984,6 +1005,14 @@ Hagent/
 | 32 | ★★★ **回答的 markdown 排版偶发错乱**（段落空行消失、后段变正文以外的东西） | **SSE 的 `data:` 行放不下裸换行**：`SseEmitter$SseEventBuilderImpl.data(...)` 只 `append("data:") + append(数据)`，**不转义**（`javap -c` 可证）。于是 token 里的 `\n` 直接切断了帧，而 `\n\n` 的第二个换行被当成帧分隔符**吃掉** | **自由文本不能直接塞进协议字段**。判据：先问"这文本能含换行吗"，能就必须编码（本项目用 JSON）。★ **不要指望对端把续行拼回去 —— 那是"有损"的**：被协议吃掉的空行拼不回来 |
 | 33 | ★★ **流式过程中界面完全不动**，流结束才一次性出现整段回答 | 裸对象 push 进 `reactive` 数组后，手上的引用仍是**原始对象**；改它绕过 Proxy，**不触发更新** | **"数据在响应式容器里"≠"我手里的引用是响应式的"**。凡"创建对象 → 放进容器 → 继续用旧引用改它"的写法都要检查。（已用 `reactive()` 修） |
 | 34 | ★ **改名成同一个标题时前端收到 404** | MySQL `UPDATE` 在"新旧值相同"时 `affected rows = 0` —— 与"记录不存在"**同形** | **用 `affected rows` 判断"记录是否存在"之前，先问"有没有可能值没变"**。这不是某个数据库的怪癖（PG/SQL Server 也有同类语义），所以要修的是**判断依据**，不是记住一句注释。★ 与坑 #28 同源：**两种不同原因产生同一种结果时，必须再加一次判别** |
+
+### 阶段 10 联调新增（真机才暴露，mock 永远测不到）
+
+| # | 现象 | 根因 | 认知 |
+|---|---|---|---|
+| 35 | ★★★ **问年假/差旅，检索一律返回"未找到"，而库里就有** | 检索跑在 **Reactor 的 Netty 事件循环**（`reactor-http-nio-*`）上；工具里的阻塞调用（Ollama embedding 的 RestClient 底要 `Mono.block()`）被 Reactor 拒绝 → 异常被吞 → 空列表 → "没命中" | **整条管道允许阻塞，所以整条管道都不该在事件循环上跑**（`publishOn(boundedElastic)`）。★ 加的位置很关键：`publishOn` 只影响**下游**，必须加在 `concatWith(handleToolCalls)` **之前**；加在外层仍然红（实测过）。★ 同根因还压着 `writeBack`/`recordAudit`：JDBC 不报错，只**静默堵事件循环** —— 更隐蔽 |
+| 36 | ★★★ **每次都被答"知识库中未找到相关内容"** | `retrieve` 失败 `return List.of()` → 与"没命中"**同形** → 工具回"没找到" → 模型照说。**系统在诚实地撒谎** | **降级要发生在"能说出原因"的那一层。** 在只看得到 `List` 的层里降级，原因永久丢失。修法：失败**抛**（`RetrievalUnavailableException`），由工具翻成"检索不可用（**不是**没有资料）"。★ 与坑 #16（过滤坏掉→返回空）、#34（affected rows）**是同一类** |
+| 37 | ★ **282 个用例全绿，而真机每次都失败** | 假模型都是 `Flux.just(...)`：元素在**调用线程**（允许阻塞）上发出；真机元素来自 Netty 线程 | **bug 长在 mock 边界之外**。补的机制化用例：`publishOn(Schedulers.parallel())` 假装"元素来自非阻塞线程" + 假工具**在工具外**断言 `isInNonBlockingThread()==false`（★ 工具内抛断言会被框架翻成文本，测试**假绿**）。先红后绿都验证过 |
 
 #### 两条"假警报"（排错方向比结论更值得记）
 

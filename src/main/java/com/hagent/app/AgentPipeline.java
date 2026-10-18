@@ -33,6 +33,7 @@ import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -390,6 +391,37 @@ public class AgentPipeline {
                             })
                             // ★ 过滤空片：实测首片是 text=null / reasoning=空串。不过滤会往 SSE 里发空事件
                             .flatMap(this::emit)
+                            // ★★ 阶段 10 修：把阻塞段搬到 boundedElastic —— 这条链里【有阻塞调用】。
+                            //
+                            //   实测事故（接真实 WebClient 时必现，mock 模型时永远看不到）：
+                            //     模型流的元素在 reactor-http-nio-*（Netty 事件循环）上发出
+                            //     → 上游 onComplete 也在那条线程上触发
+                            //     → 下面的 concatWith(Flux.defer(handleToolCalls)) 就在那里被订阅
+                            //     → 工具里的阻塞调用（Ollama embedding 的 RestClient 底层要 Mono.block()）
+                            //     → Reactor 直接拒绝：
+                            //         IllegalStateException: block()/blockFirst()/blockLast() are blocking,
+                            //         which is not supported in thread reactor-http-nio-4
+                            //     → 检索每次都抛异常 → 被降级成"没命中" → 模型回答"知识库中未找到相关内容"
+                            //
+                            //   ★ 位置为什么必须【在这里】，而不是加在 run() 的返回链上：
+                            //     publishOn 只影响它【下游】的操作符。handleToolCalls 是由
+                            //     本方法的 concatWith 订阅的 —— 把它加在外层，等于把 publishOn
+                            //     加在"订阅源头"的下游，管不到这里的订阅。
+                            //     （实测：加在外层时假工具仍跑在 parallel-1 上，红。）
+                            //
+                            //   ★ 一条 publishOn 覆盖三处阻塞：工具执行、writeBack（JDBC）、
+                            //     recordAudit（JDBC）都在 handleToolCalls 的同步段里；
+                            //     而且每一轮递归都会走到这里，所以下一步同样被搬走。
+                            //     JDBC 那两处【不抛错】（普通阻塞驱动，不经过 Reactor 的 block 检查），
+                            //     只静默堵事件循环 —— 更隐蔽，同样需要这次搬迁。
+                            //
+                            //   ★ 为什么是 boundedElastic：它是 Reactor 专门给"会阻塞的任务"的池
+                            //     （有上限、可复用）；parallel 只适合纯 CPU 且不许阻塞。
+                            //
+                            //   ★ 判据：**整条管道允许阻塞，所以整条管道都不该在事件循环上跑。**
+                            //     逐点包 Mono.fromCallable(...).subscribeOn(...) 也能修，但那样
+                            //     将来再往里加一个阻塞调用，又会忘。
+                            .publishOn(Schedulers.boundedElastic())
                             // ★ 本步的完整响应（含 toolCalls）决定"继续还是收尾"。
                             //
                             //   ⚠️ 这里【必须】用 concatWith，不能用 then：

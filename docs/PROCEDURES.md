@@ -3408,7 +3408,140 @@ OPTIONS /api/chat/sessions（Origin: http://localhost:5173）
 ⇒ 判据：**中文落库异常时，先用 `HEX()` 看字节，并检查"发出去的那一侧"**，
 不要直接怀疑服务端编码。
 
-### 10.9 本阶段**没有**做成的事（诚实清单）
+### 10.9 真机联调修掉的两个 bug（都不是"没写对"，而是"跑错了地方"）
+
+前端联调时暴露了两个问题：**问年假、问差旅，检索全部返回"未找到"**；而库里明明有这些资料。
+两个 bug 的共同点是——**代码逻辑本身是对的，错的是它运行的位置/降级的层级**。
+
+#### 坑 41：阻塞调用跑在 Reactor 事件循环上 → 检索每次都"没命中"
+
+**证据（真机日志，不是推断）**：
+
+```
+线程名：[ctor-http-nio-4]              ← reactor-netty 的 IO 事件循环
+I/O error on POST http://localhost:11434/api/embed:
+  block()/blockFirst()/blockLast() are blocking,
+  which is not supported in thread reactor-http-nio-4
+Caused by: BlockingSingleSubscriber.blockingGet ← ReactorClientHttpRequest.executeInternal
+栈底：FluxConcatArray$ConcatArraySubscriber.onComplete ← FluxReceive.onInboundNext
+```
+
+**因果链**：
+
+```
+真实 WebClient 在 Netty 线程上发完模型流
+  → onComplete 也在那条线程上触发
+    → concatWith(Flux.defer(handleToolCalls)) 就在那里被订阅
+      → 工具里同步调 Ollama embedding（RestClient 底层要 Mono.block()）
+        → Reactor 拒绝在非阻塞线程上 block  → 抛 IllegalStateException
+          → Service catch 住 → 返回空列表 → 工具说"没命中" → 模型答"知识库中未找到"
+```
+
+**同一个根因还压着两处更隐蔽的**：`writeBack`（JDBC）与 `recordAudit`（JDBC）也在那条线程上。
+它们**不报错**（普通阻塞驱动，不经过 Reactor 的 block 检查），只是**静默堵住事件循环**。
+⇒ 表现是"高并发时所有 SSE 一起变慢"，日志里什么都看不到。
+
+```mermaid
+flowchart LR
+    subgraph NETTY["reactor-http-nio-*（非阻塞线程：不许 block）"]
+        A["模型流式响应<br/>逐片 onNext"]
+        B["onComplete"]
+    end
+
+    C{"线程边界<br/>publishOn(boundedElastic)"}
+
+    subgraph WORK["boundedElastic-*（允许阻塞）"]
+        D["handleToolCalls<br/>检索：embedding + pgvector"]
+        E["writeBack（JDBC）"]
+        F["recordAudit（JDBC）"]
+        G["下一轮 loop（递归）"]
+    end
+
+    X["❌ IllegalStateException<br/>→ 空列表 → 答『未找到』"]
+
+    A --> B --> C
+    C -->|"修前：就在这里执行"| X
+    C -->|"修后：搬到 worker"| D
+    D --> E --> F --> G
+    G -->|"每一轮都经过同一个边界"| A
+```
+
+**修法**：`loop()` 里、`concatWith(Flux.defer(handleToolCalls))` **之前**加
+`.publishOn(Schedulers.boundedElastic())`。
+
+**★ 位置为什么必须在这里，而不是加在 `run()` 的返回链上**（第一次就是加错了，仍然红）：
+`publishOn` 只影响它**下游**的操作符；`handleToolCalls` 是由 `loop()` 里的 `concatWith` 订阅的，
+加在外层等于把 `publishOn` 放在"订阅源头"的**下游**，管不到那里的订阅。
+
+**为什么 282 个用例都没抓到**：所有假模型都是 `Flux.just(...)`，元素在**调用线程**上发出。
+bug 正好长在 mock 边界之外 —— 见 HANDOFF §十 第 5 条。
+
+**机制化**（这是本次最有价值的产出）：`AgentPipelineToolLoopTest#toolExecutionMustNotRunOnNonBlockingThread`
+用 `publishOn(Schedulers.parallel())` 假装"元素来自非阻塞线程"，再让假工具断言
+`Schedulers.isInNonBlockingThread()` 为 `false`。**先红后绿**都验证过：
+修前跑在 `parallel-1` 上（红），`publishOn` 挪对位置后绿。
+
+> ⚠️ 工具里**不能**直接抛断言异常 —— 框架会把工具异常翻成文本结果，测试就假绿了。
+> 必须在工具外断言（记录下线程名，跑完之后再断）。
+
+**已知上限**：`boundedElastic` 默认约 `10 × CPU核数` 个线程，且**每路 SSE 会话占用一个 worker
+直到流结束**。本项目的并发量级远低于此；真要撑更高并发，得自定义 Scheduler 或改成
+"只把阻塞段搬过去"（那时的代价是逐点打补丁，容易漏）。
+
+#### 坑 42：降级发生在"看不到原因"的那一层 → 系统把故障说成了"资料不存在"
+
+**现象**：每次提问都被回答"知识库中未找到相关内容"，而用户问的年假就在 `员工手册.md` 里。
+
+**根因**：`KnowledgeRetrievalService.retrieve` 失败时 `return List.of()`。
+于是上层只看到"空列表"，而"空列表"的含义是"查过了、没有"：
+
+```
+   失败   → return List.of()   ← 与"没命中"完全同形
+   没命中 → return List.of()
+```
+
+工具于是回"知识库中没有找到与该问题相关的内容"，模型据此作答 —— **它在诚实地撒谎**。
+
+**更刺眼的是**：该类的注释当时已经写着"'检索失败'与'检索没命中'必须能区分"，
+理由是"日志里不同"。但**调用方看不到日志**：能区分的不算区分，**能被上层据以改变行为的才算**。
+
+**修法（A 方案）**：失败**抛** `RetrievalUnavailableException`（携带 `ErrorCode.RETRIEVAL_FAILED`），
+工具**接住**它，返回一句完全不同的话：
+
+```
+【检索不可用】知识库检索这次失败了（系统故障，不是「没有相关资料」）。
+请如实告知用户「知识库检索暂时不可用，请稍后重试」；不要据此断言知识库中没有相关内容，也不要凭常识代答。
+```
+
+"对话不 500"这条性质一点没丢 —— **降级的位置从 Service 上移到了工具**，
+而工具是**唯一能说出"为什么降级"**的那一层。
+
+**可迁移的判据**：**降级要发生在"能说出原因"的那一层。**
+在只看得到 `List` 的层里降级，原因就永久丢失了（与坑 34「affected rows 同形」、坑 16「过滤坏掉返回空」是同一类）。
+
+**顺带修掉阶段 9.7 留的账**：那时说"无法判定工具成功/失败，正解是让工具自己返回结构化结果"。
+本次就是那么做的 —— 工具自己知道失败了，于是**不再需要从文本猜**。
+
+#### 为什么"两个 retrieveKnowledge"不是重复渲染
+
+联调时用户看到执行轨迹里"每一步都有两个 retrieveKnowledge"。日志证明**不是前端重复**：
+
+```
+第 1 步：query=新员工入职礼包可以领取哪些物品
+        query=新员工入职流程 报到需要办理哪些手续
+        → [AgentPipeline] 第 1 步：执行了 2 个工具
+```
+
+两条 query **不同** —— 模型在同一步里发了**两个并行工具调用**（自己在做查询改写），
+`DefaultToolCallingManager` 串行执行两次，前端忠实地渲染成两步下的两个工具。
+代价是 2 次 embedding + 2 次向量查询、串行 ≈ 双倍延迟；但召回更好，**决定接受**。
+
+真正的问题是**可读性**：两行都只显示工具名，所以看起来一模一样。
+修法：执行轨迹里显示 `「query」`（实时流有 `arguments`；历史回放仍无参数，见决策 A）。
+
+
+
+### 10.10 本阶段**没有**做成的事（诚实清单）
 
 | # | 没做 | 为什么 |
 |---|---|---|

@@ -660,4 +660,70 @@ class AgentPipelineToolLoopTest {
                         + "否则每一行历史里都会多一行格式噪音")
                 .isEqualTo("想清楚了");
     }
+
+    @Test
+    @DisplayName("★★ 工具执行【不允许】跑在 Reactor 的非阻塞线程上 —— 否则真机上检索必崩")
+    void toolExecutionMustNotRunOnNonBlockingThread() {
+        // ★★ 这条断言来自一次真机事故（阶段 10 联调）：接真实 WebClient 时，
+        //    模型流的元素在 reactor-http-nio-*（Netty 事件循环）上发出，
+        //    于是 handleToolCalls 也在那条线程上被订阅 ——
+        //    而检索工具内部是【阻塞】调用（Ollama embedding 的 RestClient 底层要 Mono.block()），
+        //    Reactor 会直接拒绝在非阻塞线程上 block：
+        //      IllegalStateException: block()/blockFirst()/blockLast() are blocking,
+        //      which is not supported in thread reactor-http-nio-4
+        //    结果每次检索都抛异常 → 被降级成"没命中" → 模型回答"知识库中未找到相关内容"。
+        //
+        // ★ 为什么 279 个用例全绿还是漏了：所有假模型都用 Flux.just(...)，
+        //    元素在调用线程（允许阻塞）上发出。这条用例刻意用 publishOn(Schedulers.parallel())
+        //    模拟"元素来自非阻塞线程"，把那条边补上。
+        java.util.concurrent.atomic.AtomicBoolean nonBlocking =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        java.util.concurrent.atomic.AtomicReference<String> threadName =
+                new java.util.concurrent.atomic.AtomicReference<>("");
+
+        ToolCallback probe = new ToolCallback() {
+            @Override
+            public org.springframework.ai.tool.definition.ToolDefinition getToolDefinition() {
+                return DefaultToolDefinition.builder()
+                        .name("probeTool")
+                        .description("测试用：记录自己跑在什么线程上")
+                        .inputSchema("{\"type\":\"object\",\"properties\":{}}")
+                        .build();
+            }
+
+            @Override
+            public String call(String toolInput) {
+                // ★ 这里【不能抛异常】：框架会把工具异常翻成文本塞进结果，
+                //   测试就会"通过"——那是假绿。改为记下来，出了工具再断言。
+                nonBlocking.set(reactor.core.scheduler.Schedulers.isInNonBlockingThread());
+                threadName.set(Thread.currentThread().getName());
+                return "ok";
+            }
+        };
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger modelCalls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> {
+            Flux<ChatResponse> chunks = modelCalls.getAndIncrement() == 0
+                    ? Flux.just(toolCallChunk("probeTool", "{}"))
+                    : Flux.just(finalChunk("好了"));
+            // ★ 关键：模拟真实 WebClient —— 元素在 Reactor 的非阻塞调度器上发出
+            return chunks.publishOn(reactor.core.scheduler.Schedulers.parallel());
+        });
+
+        new AgentPipeline(chatModel, new RecordingMemory(), TestToolCallbackProvider.of(probe),
+                TestAudit.disabled(), new TraceProperties(), new PromptProperties(),
+                memoryProperties(5),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)))
+                .run("随便问问", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(nonBlocking.get())
+                .as("工具在非阻塞线程 [%s] 上执行了。真机上任何阻塞调用（HTTP 检索 / JDBC 写回 / 审计）"
+                        + "都会抛 IllegalStateException，或被静默地堵在事件循环里。"
+                        + "修法是在 AgentPipeline 里把阻塞段搬到 Schedulers.boundedElastic()",
+                        threadName.get())
+                .isFalse();
+    }
 }

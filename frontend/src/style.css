@@ -730,6 +730,20 @@ select {
   word-break: break-all;
 }
 
+/* 工具参数里"这次查的是什么" —— 同一步里同名工具靠它区分 */
+.task-tool-query {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+}
+
 .task-empty {
   padding: 8px;
   font-size: 12px;

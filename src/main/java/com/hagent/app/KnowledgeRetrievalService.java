@@ -1,6 +1,7 @@
 package com.hagent.app;
 
 import com.hagent.config.RetrievalProperties;
+import com.hagent.exception.RetrievalUnavailableException;
 import com.hagent.retrieval.RetrievalFilterBuilder;
 import com.hagent.retrieval.RetrievedChunk;
 import com.hagent.security.UserContext;
@@ -26,27 +27,30 @@ import java.util.List;
  * 而<b>本类不接触 prompt、不参与编排</b>，
  * 它是纯函数式的一步："检索"。
  *
- * <h2>★ 检索失败为什么降级而不是抛出</h2>
+ * <h2>★ 阶段 10 修：检索失败<b>抛出</b>，不再降级成空列表</h2>
  *
- * <p>与"记忆写回"同一条推理：<b>知识检索不在关键路径上</b>。
- * 它的失败意味着"这轮回答没有企业资料可依据"，而不是"这轮请求失败"。
- * 若向上抛，一次向量库抖动就会让整个对话 500 ——
- * 而模型完全有能力在没有片段时给出通用回答，提示词里也已经写明
- * "知识库中没有相关内容时明确说未找到"。
+ * <p><b>旧做法</b>：失败 → 记 ERROR → {@code return List.of()}。
+ * 理由是"检索不在关键路径上，抛了会让整个对话 500"。
+ * 那条理由本身没错，但它<b>换错了地方降级</b>：空列表到了上层，
+ * 与"真的没命中"完全同形，于是工具回"没找到"、模型答"知识库中未找到相关内容" ——
+ * <b>把系统故障说成了"资料不存在"</b>。实测时用户问的年假就在库里，却被答"未找到"。
  *
- * <p>但<b>必须记 ERROR</b>：否则就是"静默地没有知识库"，
- * 用户无感、运维也查不到。这一点与 {@code AgentPipeline#writeBack} 的容错处理一致 ——
- * 写回失败同样是"降级但不静默"：只记 ERROR、不向上抛（失败分级在
- * {@code LayeredConversationMemory} 里，见该类的说明）。
+ * <p><b>现在</b>：失败 → 记 ERROR → 抛 {@link RetrievalUnavailableException}。
+ * "对话不 500"这条性质<b>一点没丢</b>，因为降级的位置从本类上移到了
+ * {@code KnowledgeRetrievalTool}：它接住异常，回一句
+ * "检索不可用（系统故障，不是没有相关资料）"给模型，对话照常继续。
  *
- * <h2>★ "检索失败"与"检索没命中"必须能区分</h2>
+ * <p>⇒ 可迁移的判据：<b>降级要发生在"能说出降级原因"的那一层。</b>
+ * 在只看得到 {@code List} 的层里降级，原因就永久丢失了。
  *
- * <p>两者都返回空列表，但在日志里完全不同：
+ * <h2>★ "检索失败"与"检索没命中"的两条通道</h2>
+ *
  * <ul>
- *   <li><b>失败</b> → 本类打 {@code ERROR} 带堆栈（基础设施问题）；</li>
- *   <li><b>没命中</b> → 只有 {@code DEBUG} 一行（正常结果，用户问的确实不在库里）。</li>
+ *   <li><b>没命中</b> → 返回<b>空列表</b>（这是结果，DEBUG 一行）；</li>
+ *   <li><b>失败</b> → <b>抛异常</b>（这是故障，ERROR 带堆栈；异常自己也带着查询串）。</li>
  * </ul>
- * 若两者都只打同一行日志，排查"为什么没检索到"时会误判方向。
+ * 早先的版本说"两者在日志里能区分"，但<b>调用方看不到日志</b> ——
+ * 能区分的不算区分，<b>能被上层据以改变行为的才算</b>。
  *
  * <h2>★ 单次调用，不含幂等</h2>
  *
@@ -116,13 +120,15 @@ public class KnowledgeRetrievalService {
 
             return chunks;
         } catch (Exception e) {
-            // 见类注释：降级但不静默。ERROR 是这里唯一正确的级别 ——
-            // 用户会拿到一个"没有企业资料依据"的回答，运维必须能从日志看出原因。
-            log.error("[检索] 知识库检索失败，本轮不注入任何片段（对话会继续，但回答不基于企业资料）。"
+            // ★ 先记 ERROR（带堆栈、带查询串）：异常马上会被工具接住，
+            //   之后就没有人会再打印它的堆栈了 —— 这里是唯一的诊断入口。
+            log.error("[检索] 知识库检索失败【不是「没命中」】—— 将向上抛 RetrievalUnavailable，"
+                            + "由工具翻译成「检索不可用」告知模型（避免它把故障说成「资料不存在」）。"
                             + "【排查方向】① pgvector 容器是否可用；② Ollama embedding 是否可用；"
-                            + "③ 过滤表达式是否与 pgvector 版本兼容。查询={}",
+                            + "③ 调用是否发生在 Reactor 非阻塞线程上（会让阻塞调用直接抛错）；"
+                            + "④ 过滤表达式是否与 pgvector 版本兼容。查询={}",
                     query, e);
-            return List.of();
+            throw new RetrievalUnavailableException("知识库检索失败（查询=" + query + "）", e);
         }
     }
 

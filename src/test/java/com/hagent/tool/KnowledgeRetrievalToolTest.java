@@ -151,6 +151,49 @@ class KnowledgeRetrievalToolTest {
                 .contains("没有找到");
     }
 
+    @Test
+    @DisplayName("★★ 检索【失败】必须与『没命中』给出完全不同的说明 —— 否则系统在诚实地撒谎")
+    void retrievalFailureIsNotRenderedAsNoHit() {
+        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        when(service.retrieve(any(), any())).thenThrow(
+                new com.hagent.exception.RetrievalUnavailableException(
+                        "知识库检索失败（查询=年假几天）", new RuntimeException("pgvector 不可达")));
+        KnowledgeRetrievalTool tool = new KnowledgeRetrievalTool(service);
+
+        String result = tool.retrieveKnowledge("年假几天", contextWith(UserContext.ANONYMOUS));
+
+        assertThat(result)
+                .as("★ 实测事故：检索每次抛异常都被降级成『没命中』，"
+                        + "模型于是回答『知识库中未找到』—— 而用户问的年假就在库里。"
+                        + "失败必须让模型知道『没查成』，而不是『没有』")
+                .contains("检索不可用")
+                .contains("不是")
+                .doesNotContain("没有找到");
+    }
+
+    @Test
+    @DisplayName("★ 检索失败时不发 Retrieved 事件 —— 发了就等于告诉前端『检索成功、命中 0 条』")
+    void failureDoesNotEmitRetrievedEvent() {
+        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        when(service.retrieve(any(), any())).thenThrow(
+                new com.hagent.exception.RetrievalUnavailableException(
+                        "失败", new RuntimeException("pgvector 不可达")));
+        KnowledgeRetrievalTool tool = new KnowledgeRetrievalTool(service);
+
+        java.util.List<com.hagent.app.PipelineEvent> emitted = new java.util.ArrayList<>();
+        com.hagent.app.ToolEventSink sink = emitted::add;
+        UserContext employee = new UserContext("zhangsan", Role.EMPLOYEE);
+
+        tool.retrieveKnowledge("年假几天", new ToolContext(Map.of(
+                KnowledgeRetrievalTool.TOOL_CONTEXT_USER, employee,
+                KnowledgeRetrievalTool.TOOL_CONTEXT_SINK, sink)));
+
+        assertThat(emitted)
+                .as("Retrieved 的含义是『检索跑完了，结果是这几条』。"
+                        + "失败时发一个空列表的 Retrieved，前端会显示『已返回』—— 又是一次同形")
+                .isEmpty();
+    }
+
     // ========================================================================
     // 三、工具注册（@Tool 内省是否真的产出了可用的 ToolCallback）
     // ========================================================================

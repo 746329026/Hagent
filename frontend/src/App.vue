@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 /**
  * 应用根组件 —— 状态都在这里，子组件只负责渲染与发事件。
  *
@@ -222,6 +222,30 @@ function stop() {
   controller?.abort()
 }
 
+/**
+ * 从工具参数里取出"这次查的是什么"。
+ *
+ * <p><b>为什么需要它</b>：模型可能在同一歩里发<b>多个</b> retrieveKnowledge
+ * （实测：一次提问里它会用两种表述各查一次，以提高召回）。
+ * 而执行轨迹里原来只显示工具名，于是两行长得一模一样 ——
+ * 看起来像"重复渲染"，其实两次的 query 完全不同。
+ *
+ * <p>只取 {@code query} 字段：它是目前唯一对用户有意义的参数；
+ * 其它参数硬编码成文本只会变成噪声。解析失败返回空串（不显示），
+ * 而不是把原始 JSON 糊到界面上。
+ */
+function queryOf(argumentsJson) {
+  if (!argumentsJson) {
+    return ''
+  }
+  try {
+    const parsed = JSON.parse(argumentsJson)
+    return typeof parsed?.query === 'string' ? parsed.query : ''
+  } catch {
+    return ''
+  }
+}
+
 /** 把一条 SSE 事件分派到对应的数据结构。 */
 function handleEvent(name, data, assistant) {
   switch (name) {
@@ -277,6 +301,7 @@ function handleEvent(name, data, assistant) {
         step.tools.push({
           id: data?.id ?? `tool-${step.tools.length}`,
           name: data?.name ?? '工具',
+          query: queryOf(data?.arguments),
           state: 'running',
           resultPreview: '',
         })

@@ -102,6 +102,25 @@ public class KnowledgeRetrievalTool {
      */
     private static final String FRAGMENT_HEADER = "【知识库片段】";
 
+    /**
+     * 检索<b>不可用</b>时返回给模型的说明。
+     *
+     * <p><b>它必须与"没命中"的说明长得完全不一样</b>，因为两者对应的事实相反：
+     * <pre>
+     *   没命中   → "知识库中没有找到…"      ← 事实：查过了，确实没有
+     *   不可用   → "检索暂时失败…"          ← 事实：没查成，不能说有没有
+     * </pre>
+     * 措辞上刻意做了三件事：
+     * <ol>
+     *   <li>开头就写【检索不可用】，模型一眼能看出这不是结果；</li>
+     *   <li>明确写出"<b>不是</b>没有相关资料" —— 直接堵住模型最可能的错误推断；</li>
+     *   <li>给出它会照做的一句话（"请如实告知用户…稍后重试"），而不是只让它别做什么。</li>
+     * </ol>
+     */
+    static final String RETRIEVAL_UNAVAILABLE_TEXT = """
+            【检索不可用】知识库检索这次失败了（系统故障，不是「没有相关资料」）。
+            请如实告知用户「知识库检索暂时不可用，请稍后重试」；不要据此断言知识库中没有相关内容，也不要凭常识代答。""";
+
     private final KnowledgeRetrievalService retrievalService;
 
     /**
@@ -129,18 +148,39 @@ public class KnowledgeRetrievalTool {
             ToolContext toolContext) {
 
         UserContext user = resolveUser(toolContext);
-        List<RetrievedChunk> chunks = retrievalService.retrieve(query, user);
+
+        List<RetrievedChunk> chunks;
+        try {
+            chunks = retrievalService.retrieve(query, user);
+        } catch (com.hagent.exception.RetrievalUnavailableException e) {
+            // ★★ 阶段 10：失败【不再】伪装成"没命中"。
+            //
+            //   旧做法是 Service 吞掉异常返回空列表，于是下面那段"没命中"的分支
+            //   把系统故障渲染成"知识库中没有找到与该问题相关的内容"，
+            //   模型据此答"知识库中未找到" —— 实测时用户问的年假就在库里。
+            //
+            //   现在两条路分开走：没命中 → 空列表（结果）；失败 → 异常（故障）。
+            //   这里把故障翻译成一句【给模型看的】明确说明，让它去说"稍后重试"，
+            //   而不是断言"资料不存在"。
+            //
+            //   注意：本方法【不抛出去】。工具抛异常会被框架翻成一段文本结果，
+            //   那等于又把"故障"降级成了一段没人读的字符串 —— 而且丢失了这句针对性的话。
+            log.warn("[工具-检索] ★ 检索不可用（这是【故障】，不是没命中）：query={} 视角={} 原因={}",
+                    query, user.userId(), e.getMessage());
+            return RETRIEVAL_UNAVAILABLE_TEXT;
+        }
 
         // ★ 把"参考了哪几篇"作为【结构化事件】发给前端。
         //   为什么放在这里而不是让管线从返回字符串里解析：
         //   返回字符串是【给模型看的】，结构化出处是【给前端看的】——
         //   两件事走两条通道（协议第 7 条）。
+        //
+        //   ⚠️ 失败时【不发】这个事件：发了就等于告诉前端"检索成功、命中 0 条"，
+        //   而那正是本次要消灭的"失败与没命中同形"。
         emitRetrieved(toolContext, chunks, query);
 
-        // ★ 检索"没命中"与"失败"在 Service 内部已被区分（前者 DEBUG、后者 ERROR 带堆栈）。
-        //   这里把"没命中"渲染成一句给模型看的明确说明 ——
-        //   让模型知道"我查过了、但没有"，而不是"工具坏了"，从而按提示词约束
-        //   回答"知识库中未找到相关内容"而不是凭常识编造。
+        // ★ 真正"没命中"的出口：查了、通了、但没有相关内容。
+        //   这是一条【正常结果】，所以给模型的是一句陈述，不是告警。
         if (chunks.isEmpty()) {
             log.debug("[工具-检索] 未命中：query={} 视角={}（已按权限过滤）", query, user.userId());
             return "知识库中没有找到与该问题相关的内容。";

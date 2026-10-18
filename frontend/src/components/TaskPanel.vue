@@ -74,6 +74,9 @@ function stateLabel(step) {
           <span class="task-tool-state" :class="tool.state">
             {{ tool.state === 'running' ? '调用中' : '已返回' }}
           </span>
+          <!-- ★ 显示"这次查了什么"：同一步里可能有多个同名工具（模型会改写多个 query），
+               只显示工具名的话两行完全一样，看起来像重复渲染 -->
+          <div v-if="tool.query" class="task-tool-query">「{{ tool.query }}」</div>
           <div v-if="tool.resultPreview" class="task-tool-result">{{ tool.resultPreview }}</div>
         </div>
       </div>
