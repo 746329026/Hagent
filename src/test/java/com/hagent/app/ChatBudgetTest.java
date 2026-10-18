@@ -92,7 +92,8 @@ class ChatBudgetTest {
                 new TraceProperties(),
                 new PromptProperties(),
                 props,
-                new ByteArrayResource("测试用约束".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                new ByteArrayResource("测试用约束".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                TestLongTermMemory.empty());
     }
 
     /**

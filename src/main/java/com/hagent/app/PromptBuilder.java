@@ -136,16 +136,18 @@ public class PromptBuilder {
      *
      * @param original 进入 pipeline 时的原始 prompt（含 system 与本次用户消息）
      * @param history  历史消息，时间正序
+     * @param memoryDigest 长期记忆的索引块（可能为空串/ null）——
+     *                     <b>由调用方读好再传进来</b>，本类<b>不做任何 IO</b>（见下）
      * @return 拼装后的 prompt
      */
-    public Prompt assemble(Prompt original, List<Message> history) {
+    public Prompt assemble(Prompt original, List<Message> history, String memoryDigest) {
         List<Message> originalMessages = original.getInstructions();
         List<SystemMessage> systems = collectSystemMessages(originalMessages);
         UserMessage userMessage = original.getUserMessage();
         List<Message> unknown = collectUnknown(originalMessages, systems, userMessage);
 
         List<Message> safeHistory = history == null ? List.of() : history;
-        String systemText = buildSystemText(systems);
+        String systemText = buildSystemText(systems, memoryDigest);
 
         List<Message> assembled = new ArrayList<>();
         if (!systemText.isBlank()) {
@@ -157,7 +159,7 @@ public class PromptBuilder {
             assembled.add(userMessage);
         }
 
-        logAssembled(assembled, systems.size(), safeHistory);
+        logAssembled(assembled, systems.size(), safeHistory, memoryDigest);
 
         // ★ 用构造器显式重建 Prompt，但【不带 options】—— 理由见方法注释。
         return new Prompt(assembled);
@@ -225,17 +227,24 @@ public class PromptBuilder {
     // ========================================================================
 
     /**
-     * 组装 system 正文：原有 system（全部）→ 回答约束。
+     * 组装 system 正文：原有 system（全部）→ 回答约束 → 长期记忆索引。
      *
      * <p>顺序的理由：先立"角色与规则"，再给"资料"。反过来会让模型在读规则之前
      * 先看到一堆文档，更容易把文档里的语气当成指令。
      *
      * <p><b>★ 阶段 9：这里不再拼检索片段</b>。片段现在由 {@code retrieveKnowledge}
      * 工具作为**工具结果**送回模型 —— 它不再是 system 的一部分。
-     * 渲染片段的代码随职责搬到了 {@code KnowledgeRetrievalTool#render}
-     * （模型只能看到工具返回的字符串，所以"来源/相关度"必须由工具自己拼好）。
+     *
+     * <p><b>★ 阶段 11：长期记忆的索引在这里注入</b>。它放在最后，因为它是
+     * "关于这个人的背景"—— 角色、规则都该在它之前立好。
+     *
+     * <p><b>引号为什么由调用方读好再传进来</b>：本类自阶段 8 起是<b>纯函数</b>
+     * （不读存储、不做 IO，只拼装）。把"读记忆"塞进来会让它同时承担
+     * "唯一重建者"与"存储访问者"两个身份，而后者会让<br/>
+     * "拼错了"与"读不到"变成同一种症状。<b>存储失败由 {@code AgentPipeline} 兜住</b>，
+     * 传进来的是空串 —— 于是本类不需要 try/catch。
      */
-    private String buildSystemText(List<SystemMessage> systems) {
+    private String buildSystemText(List<SystemMessage> systems, String memoryDigest) {
         StringBuilder sb = new StringBuilder();
 
         for (SystemMessage system : systems) {
@@ -246,6 +255,9 @@ public class PromptBuilder {
         }
         if (promptProperties.isIncludeConstraint() && !constraintText.isBlank()) {
             appendBlock(sb, constraintText.trim());
+        }
+        if (memoryDigest != null && !memoryDigest.isBlank()) {
+            appendBlock(sb, memoryDigest.trim());
         }
         return sb.toString();
     }
@@ -273,7 +285,8 @@ public class PromptBuilder {
      */
     private void logAssembled(List<Message> assembled,
                               int systemCount,
-                              List<Message> history) {
+                              List<Message> history,
+                              String memoryDigest) {
         if (!traceProperties.isEnabled()) {
             return;
         }
@@ -285,12 +298,13 @@ public class PromptBuilder {
         boolean hasSystem = !assembled.isEmpty() && assembled.get(0) instanceof SystemMessage;
 
         log.info("[{}] ← 模型收到的 prompt | 总条数={} | system={}（合并了 {} 条原有 system）"
-                        + " | 历史={} 条 | 内容={}",
+                        + " | 历史={} 条 | 长期记忆={} 字 | 内容={}",
                 LOG_TAG,
                 assembled.size(),
                 hasSystem ? "有" : "无",
                 systemCount,
                 history.size(),
+                memoryDigest == null ? 0 : memoryDigest.length(),
                 PromptLogFormat.truncate(contents, traceProperties));
     }
 

@@ -53,7 +53,7 @@ class KnowledgeRetrievalToolTest {
     }
 
     private ToolContext contextWith(UserContext user) {
-        return new ToolContext(Map.of(KnowledgeRetrievalTool.TOOL_CONTEXT_USER, user));
+        return new ToolContext(Map.of(ToolContextSupport.USER, user));
     }
 
     // ========================================================================
@@ -97,7 +97,7 @@ class KnowledgeRetrievalToolTest {
         KnowledgeRetrievalTool tool = new KnowledgeRetrievalTool(service);
 
         tool.retrieveKnowledge("年假几天",
-                new ToolContext(Map.of(KnowledgeRetrievalTool.TOOL_CONTEXT_USER, "我是个字符串")));
+                new ToolContext(Map.of(ToolContextSupport.USER, "我是个字符串")));
 
         verify(service).retrieve(any(), eq(UserContext.ANONYMOUS));
     }
@@ -185,8 +185,8 @@ class KnowledgeRetrievalToolTest {
         UserContext employee = new UserContext("zhangsan", Role.EMPLOYEE);
 
         tool.retrieveKnowledge("年假几天", new ToolContext(Map.of(
-                KnowledgeRetrievalTool.TOOL_CONTEXT_USER, employee,
-                KnowledgeRetrievalTool.TOOL_CONTEXT_SINK, sink)));
+                ToolContextSupport.USER, employee,
+                ToolContextSupport.EVENT_SINK, sink)));
 
         assertThat(emitted)
                 .as("Retrieved 的含义是『检索跑完了，结果是这几条』。"
@@ -242,7 +242,7 @@ class KnowledgeRetrievalToolTest {
         //   这条约束本身是好事 —— 它让"忘了传身份"在框架层就被拒绝，
         //   而不是静默降级成匿名（那会表现为"检索结果莫名其妙地少"）。
         String result = callbacks[0].call("{\"query\":\"年假几天\"}",
-                new ToolContext(Map.of(KnowledgeRetrievalTool.TOOL_CONTEXT_USER,
+                new ToolContext(Map.of(ToolContextSupport.USER,
                         new UserContext("zhangsan", Role.EMPLOYEE))));
 
         assertThat(result)
@@ -258,30 +258,37 @@ class KnowledgeRetrievalToolTest {
     // ========================================================================
 
     @Test
-    @DisplayName("★ retrieval.enabled=false → 注册 0 个工具（检索能力整体拔掉）")
-    void retrievalDisabledRegistersNoTools() {
+    @DisplayName("★ retrieval.enabled=false → 没有 retrieveKnowledge，但长期记忆工具照常在")
+    void retrievalDisabledRemovesOnlyTheRetrievalTool() {
         RetrievalProperties off = new RetrievalProperties();
         off.setEnabled(false);
 
         ToolCallback[] tools = new ToolRegistration()
-                .allTools(mock(KnowledgeRetrievalService.class), off);
+                .allTools(mock(KnowledgeRetrievalService.class), off,
+                        mock(com.hagent.memory.longterm.LongTermMemoryStore.class));
 
         assertThat(tools)
-                .as("关掉检索 = 模型看不到 retrieveKnowledge = 不会发起检索。"
-                        + "这是阶段 9 对该开关的语义调整（原为『切面不产片段』）")
-                .isEmpty();
+                .as("关掉检索 = 模型看不到 retrieveKnowledge = 不会发起检索（阶段 9 的语义）")
+                .noneMatch(tool -> "retrieveKnowledge".equals(tool.getToolDefinition().name()));
+        assertThat(tools)
+                .as("★ 阶段 11 起：记忆工具与检索开关【无关】—— 记忆是跨会话的事实，"
+                        + "不是知识库的一部分。关掉检索不该顺带让人失忆")
+                .extracting(tool -> tool.getToolDefinition().name())
+                .containsExactlyInAnyOrder("saveMemory", "readMemory", "forgetMemory");
     }
 
     @Test
-    @DisplayName("★ retrieval.enabled=true → 注册 1 个工具，名字是 retrieveKnowledge")
-    void retrievalEnabledRegistersTheTool() {
+    @DisplayName("★ retrieval.enabled=true → 4 个工具（检索 1 + 长期记忆 3）")
+    void retrievalEnabledRegistersAllTools() {
         RetrievalProperties on = new RetrievalProperties();
         on.setEnabled(true);
 
         ToolCallback[] tools = new ToolRegistration()
-                .allTools(mock(KnowledgeRetrievalService.class), on);
+                .allTools(mock(KnowledgeRetrievalService.class), on,
+                        mock(com.hagent.memory.longterm.LongTermMemoryStore.class));
 
-        assertThat(tools).hasSize(1);
-        assertThat(tools[0].getToolDefinition().name()).isEqualTo("retrieveKnowledge");
+        assertThat(tools)
+                .extracting(tool -> tool.getToolDefinition().name())
+                .containsExactlyInAnyOrder("retrieveKnowledge", "saveMemory", "readMemory", "forgetMemory");
     }
 }

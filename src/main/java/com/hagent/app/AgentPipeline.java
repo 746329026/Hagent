@@ -8,8 +8,9 @@ import com.hagent.memory.MemoryProperties;
 import com.hagent.memory.MessageCodec;
 import com.hagent.memory.ReasoningTrace;
 import com.hagent.memory.TokenBudget;
+import com.hagent.memory.longterm.LongTermMemoryStore;
 import com.hagent.security.UserContext;
-import com.hagent.tool.KnowledgeRetrievalTool;
+import com.hagent.tool.ToolContextSupport;
 import com.hagent.tool.audit.ToolInvocationStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -156,6 +157,14 @@ public class AgentPipeline {
      */
     private final ToolInvocationStore auditStore;
 
+    /**
+     * 长期记忆（阶段 11）—— <b>只用来读索引</b>；写由模型通过工具完成。
+     *
+     * <p>为什么在管线里读：索引必须进 system，而拼装只发生在 {@code PromptBuilder}。
+     * 管线在"读历史"之后、"拼装"之前把索引读好交给它，保持 PromptBuilder 是<b>纯函数</b>。
+     */
+    private final LongTermMemoryStore longTermMemory;
+
     public AgentPipeline(ChatModel chatModel,
                          ConversationMemory memory,
                          ToolCallbackProvider toolCallbackProvider,
@@ -163,7 +172,8 @@ public class AgentPipeline {
                          TraceProperties traceProperties,
                          PromptProperties promptProperties,
                          MemoryProperties memoryProperties,
-                         Resource ragAnswerPromptResource) {
+                         Resource ragAnswerPromptResource,
+                         LongTermMemoryStore longTermMemory) {
         this.chatModel = chatModel;
         this.memory = memory;
         this.memoryProperties = memoryProperties;
@@ -171,6 +181,7 @@ public class AgentPipeline {
         this.toolCallbacks = toolCallbackProvider.getToolCallbacks();
         this.toolCallingManager = ToolCallingManager.builder().build();
         this.auditStore = auditStoreProvider.getIfAvailable();
+        this.longTermMemory = longTermMemory;
 
         // ★★ 启动自检：模型必须是 DeepSeek，否则"克隆配置 + 加工具"这条路走不通
         //    （getOptions() 返回的不是 DeepSeekChatOptions 就无法 mutate 出带工具的 DeepSeek options）。
@@ -246,8 +257,11 @@ public class AgentPipeline {
             //     于是"这次要不要查知识库"从代码决定变成了模型决定 ——
             //     这正是 RAG 与 agent 的实质差别。
 
-            // ---------- ④ 拼装（只剩 system + 历史 + 本次提问） ----------
-            Prompt assembled = promptBuilder.assemble(original, history);
+            // ---------- ④ 拼装（system + 历史 + 长期记忆索引 + 本次提问） ----------
+            //   ★ 阶段 11：长期记忆的索引在这一步注入。读失败不能影响对话 ——
+            //     拿不到索引最坏只是"模型不知道用户的偏好"，而不是这轮请求失败。
+            String memoryDigest = readMemoryDigest(user);
+            Prompt assembled = promptBuilder.assemble(original, history, memoryDigest);
 
             // 本轮循环状态：从拼装好的 prompt 开始，随工具结果不断增长
             LoopState state = new LoopState(new ArrayList<>(assembled.getInstructions()),
@@ -256,10 +270,31 @@ public class AgentPipeline {
         });
     }
 
+    /**
+     * 读长期记忆的索引块 —— <b>失败只降级成本轮不注入</b>。
+     *
+     * <p>与 {@code ConversationMemory#load} 同一立场：记忆是"让回答更好"的东西，
+     * 不是"让回答成立"的东西。目录读不到、文件坏了、权限问题 —— 都不该让对话 500。
+     *
+     * <p>但<b>必须 WARN</b>：否则"记忆忽然不生效"会被当成模型变笨，
+     * 而真正原因是磁盘/权限。
+     */
+    private String readMemoryDigest(UserContext user) {
+        try {
+            String digest = longTermMemory.renderIndexFor(user);
+            log.debug("[{}] ④ 长期记忆索引：{} 字（用户={}）",
+                    LOG_TAG, digest == null ? 0 : digest.length(), user.userId());
+            return digest == null ? "" : digest;
+        } catch (Exception e) {
+            log.warn("[{}] 长期记忆索引读取失败，本轮不注入任何记忆（对话继续）：{}",
+                    LOG_TAG, e.toString());
+            return "";
+        }
+    }
+
     // ========================================================================
     // ⑤⑥⑦ 工具循环 —— 本阶段的核心
     // ========================================================================
-
     /**
      * 工具循环的可变状态。
      *
@@ -581,9 +616,9 @@ public class AgentPipeline {
         var builder = DeepSeekChatOptions.class.cast(baseOptions)
                 .mutate()
                 .toolCallbacks(toolCallbacks)
-                .toolContext(KnowledgeRetrievalTool.TOOL_CONTEXT_USER, user);
+                .toolContext(ToolContextSupport.USER, user);
         if (sink != null) {
-            builder = builder.toolContext(KnowledgeRetrievalTool.TOOL_CONTEXT_SINK, sink);
+            builder = builder.toolContext(ToolContextSupport.EVENT_SINK, sink);
         }
         return builder.build();
     }

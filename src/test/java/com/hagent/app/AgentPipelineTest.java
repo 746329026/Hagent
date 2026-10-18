@@ -98,6 +98,13 @@ class AgentPipelineTest {
      * 所以这里必须真的把它 stub 出来 —— 否则构造期就失败。
      */
     private AgentPipeline pipeline(RecordingMemory memory, List<ChatResponse> chunks) {
+        return pipeline(memory, chunks, TestLongTermMemory.empty());
+    }
+
+    /** 带长期记忆桩的版本 —— 用来验证"记忆索引确实进了 system"。 */
+    private AgentPipeline pipeline(RecordingMemory memory,
+                                   List<ChatResponse> chunks,
+                                   com.hagent.memory.longterm.LongTermMemoryStore longTermMemory) {
         ChatModel chatModel = mock(ChatModel.class);
         when(chatModel.getOptions()).thenReturn(deepSeekOptions());
         when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.fromIterable(chunks));
@@ -110,7 +117,62 @@ class AgentPipelineTest {
                 new TraceProperties(),
                 new PromptProperties(),
                 memoryProperties(),
-                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)));
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
+                longTermMemory);
+    }
+
+    // ========================================================================
+    // 六、阶段 11：长期记忆索引进 system
+    // ========================================================================
+
+    @Test
+    @DisplayName("★★ 长期记忆索引必须进 system 消息，且排在回答约束【之后】")
+    void longTermMemoryIndexIsInjectedIntoSystem() {
+        String digest = "【长期记忆】\n- 称呼偏好 — 用户希望我称呼他张工";
+
+        // 用"抓模型真正收到的 prompt"比读日志更硬（日志可能被截断）
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        List<Prompt> seen = new java.util.ArrayList<>();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> {
+            seen.add(invocation.getArgument(0));
+            return Flux.just(textChunk("好"));
+        });
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(), TestToolCallbackProvider.none(),
+                TestAudit.disabled(), new TraceProperties(), new PromptProperties(),
+                memoryProperties(),
+                new ByteArrayResource("【约束内容】".getBytes(StandardCharsets.UTF_8)),
+                TestLongTermMemory.withIndex(digest));
+
+        pipeline.run("我叫什么", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        String system = seen.get(0).getSystemMessage().getText();
+        assertThat(system)
+                .as("记忆索引没进 system ⇒ 模型根本不知道有这些记忆，等于没做（这是 Q2=A 的全部意义）")
+                .contains("称呼偏好")
+                .contains("张工");
+        assertThat(system.indexOf("【约束内容】"))
+                .as("顺序：角色与规则在前，关于用户的背景在后 —— 反过来会让模型先看到'人设'再用规则去纠正")
+                .isLessThan(system.indexOf("【长期记忆】"));
+    }
+
+    @Test
+    @DisplayName("★ 读记忆失败不能拖垮对话 —— 降级成'本轮不注入'")
+    void memoryReadFailureDoesNotBreakTheTurn() {
+        com.hagent.memory.longterm.LongTermMemoryStore broken =
+                org.mockito.Mockito.mock(com.hagent.memory.longterm.LongTermMemoryStore.class);
+        when(broken.renderIndexFor(any())).thenThrow(new RuntimeException("磁盘炸了"));
+
+        List<PipelineEvent> events = pipeline(new RecordingMemory(), List.of(textChunk("照常回答")), broken)
+                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(events)
+                .as("记忆是'让回答更好'的东西，不是'让回答成立'的东西 —— 它坏了不该让这轮 500")
+                .anyMatch(PipelineEvent.ModelOutput.Final.class::isInstance);
     }
 
     /** 模型"配置好的" options —— 必须是真的 DeepSeekChatOptions，否则管线启动自检会拒绝。 */

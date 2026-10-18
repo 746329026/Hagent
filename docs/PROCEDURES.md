@@ -3558,12 +3558,173 @@ bug 正好长在 mock 边界之外 —— 见 HANDOFF §十 第 5 条。
 
 ---
 
+## 11. 长期记忆（`.md` + 索引）
+
+### 11.1 本阶段要解决的问题
+
+会话记忆只覆盖"最近 N 条"。跨天、跨会话的事实与偏好<b>必然丢失</b>：
+用户每次都要重复"我是张三维、我用 Java、我在杭州"。
+
+| | 会话记忆（阶段 7） | 长期记忆（本阶段） |
+|---|---|---|
+| 回答的问题 | 这次聊了什么 | **这个人是怎样的** |
+| 谁写 | 管线自动（每轮落库问+答） | **模型**（它判断什么值得记） |
+| 生命周期 | 跟着一个会话 | **跨会话** |
+| 存储 | MySQL / 文件（结构化） | 人可读的 `.md` |
+
+⇒ 两者的分工不是"同一份数据的两种存法"，而是**两个不同的能力**。
+
+### 11.2 主要新增 / 修改 / 删除
+
+| 动作 | 文件 |
+|---|---|
+| 新增 | `memory/longterm/`：`LongTermMemoryProperties` / `MemoryEntry` / `LongTermMemoryStore` / `FileLongTermMemoryStore` / `LongTermMemoryConfig` |
+| 新增 | `tool/LongTermMemoryTools`（save / read / forget 三个 `@Tool`） |
+| 新增 | `tool/ToolContextSupport`（身份键与"缺身份→匿名"的唯一出处） |
+| 新增 | `common/Texts`（按码点截断的唯一实现，两处复用） |
+| 改 | `AgentPipeline`（读索引并传给拼装；构造器 +1 参数） |
+| 改 | `PromptBuilder`（`assemble(...)` 多一个 `memoryDigest`；本类仍然**不做 IO**） |
+| 改 | `ToolRegistration`（记忆工具与检索开关**解耦**） |
+| 改 | `KnowledgeRetrievalTool`（两个 context key 与身份解析搬走） |
+| 改 | `application.yml`（把 `long-term` 从"死配置"变成真配置 + 三个上限） |
+| 改 | `ConversationCatalog.titleOf`（截断改用 `Texts`，消除第二份实现） |
+
+### 11.3 本阶段数据流向
+
+```mermaid
+flowchart TD
+    subgraph PIPE["AgentPipeline.run"]
+        A["② 读历史（会话记忆）"]
+        B["④a readMemoryDigest(user)<br/>失败 → WARN + 空串"]
+        C["④b PromptBuilder.assemble<br/>system + 历史 + 记忆索引 + 提问"]
+    end
+
+    subgraph TOOLS["工具循环里（模型自己决定）"]
+        T1["saveMemory(title, content)<br/>同名即覆盖 UPSERT"]
+        T2["readMemory(title)"]
+        T3["forgetMemory(title)"]
+    end
+
+    subgraph STORE["FileLongTermMemoryStore"]
+        D["{dir}/{userId}/MEMORY.md<br/>索引（物化产物）"]
+        E["mem-{sha256(title)前8位}.md<br/>frontmatter + 正文"]
+    end
+
+    M[("DeepSeek")]
+    P["prompt（system 里带记忆索引）"]
+
+    A --> B --> C --> P
+    P -->|"模型看到有哪些记忆"| M
+    M -->|"决定记/看/忘"| TOOLS
+    T1 --> E
+    T2 --> E
+    T3 --> E
+    T1 --> D
+    T3 --> D
+    D -.->|"下次请求读索引"| B
+    E -.->|"按 AccessLevel.visibleTo 过滤"| B
+```
+
+### 11.4 为什么"索引常驻 + 明细按需"
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant PL as AgentPipeline
+    participant S as LongTermMemoryStore
+    participant M as DeepSeek
+
+    U->>PL: 我叫什么？
+    PL->>S: renderIndexFor(user)
+    S->>S: 读 {userId}/*.md 的 frontmatter
+    S-->>PL: "- 称呼偏好 — 叫他张工 …"（≤1000 字）
+    PL->>M: system 里带这段索引
+    Note over M: 模型由此【知道】有这条记忆
+    M->>S: readMemory("称呼偏好")
+    S-->>M: 正文（2000 字上限）
+    M-->>U: 你让我称呼你张工
+
+    Note over PL,S: 若不注入索引：模型根本不会想到去 readMemory（Q2 的 A 方案的全部意义）
+    Note over PL,S: 若全量注入：记忆一多就吃光会话预算（5000 token）
+```
+
+### 11.5 坑 43：`mvnw test-compile` 不带 `clean` 会**假绿**
+
+**现象**：给 `AgentPipeline` 的构造器加了一个参数后，跑
+
+```
+.\mvnw.cmd -B -ntp test-compile     →  BUILD SUCCESS
+```
+
+而实际上**11 个测试里的 `new AgentPipeline(8 个参数)` 全部编译不过**。加上 `clean` 之后才暴露：
+
+```
+.\mvnw.cmd -B -ntp clean test-compile  →  BUILD FAILURE（15 个 `.java:[` 错误）
+```
+
+**根因**：maven-compiler-plugin 的增量编译以**源文件时间戳**为主要判据。
+这次改的是 `AgentPipeline.java`，而调用方（测试）自身的源文件没变 ——
+它判断"这些类没变，不必重编"，于是**依赖方的新签名没有被检查到**。
+
+**危害**：这正是本项目最怕的那种绿 —— **构建说成功，而代码根本编译不过**。
+如果这次没有顺手 `clean`，我会以为改完了、直接跑全量测试（那时才会红），
+中间任何"看起来没问题"的结论都是错的。
+
+**判据**：**凡是"改了签名/删了类"的改动，跑测试前必须 `clean`**。
+（`mvn test` 默认会做增量；本项目 `HANDOFF §6.2` 的全量命令本来就带 `clean`，
+这次是我在手工做局部验证时偷懒漏了 —— 所以这也是一条**操作纪律**，不是配置问题。）
+
+### 11.6 阶段结果与验证证据
+
+**测试**：`306 用例全绿，2 skipped`（本阶段新增 24 个）。
+
+| 测试 | 盯住什么 |
+|---|---|
+| `FileLongTermMemoryStoreTest`（14） | upsert 不产生重复、密级过滤（同 userId 不同角色）、索引上限**拒绝写**、标题穿越**构造不出**、奇怪 userId 不越界、跨实例可见、用户隔离 |
+| `LongTermMemoryToolsTest`（6） | "已新增/已覆盖/没写入"三句话不同、"索引满"要说清下一步、**无权与不存在同形** |
+| `AgentPipelineTest`（+2） | 索引**真的进了 system** 且排在约束之后；读记忆抛异常**不影响本轮** |
+| `PromptBuilderTest`（+2） | 记忆块拼在最后；`null` 与空串给出**逐字相同**的 system |
+| `KnowledgeRetrievalToolTest`（改 2） | 关掉检索后**记忆工具照在**（两者解耦） |
+
+**启动日志证据**（真机跑过一次，只是为了看装配）：
+
+```
+[长期记忆] 根目录=C:\...\Hagent\tmp\agent-memory  索引上限=1000 字  单条正文上限=2000 字
+[工具] 已注册 4 个工具：[retrieveKnowledge, forgetMemory, readMemory, saveMemory]
+[管道] AgentPipeline 已就绪：直连 DeepSeekChatModel（不经 ChatClient）；已注册工具 4 个
+[记忆-记录-mysql] 启动自检通过：表=chat_message content 字符集=utf8mb4 索引=idx_conv_id 列=reasoning
+```
+
+⇒ `hagent.memory.long-term.*` **绑定成功**（不再是"配了没人读"），
+Spring 也给 +1 参数的 `AgentPipeline` 正常注入了。
+
+> ⚠️ 一次踩过的操作坑（顺手记）：`mvnw spring-boot:run` 会 fork 子进程，
+> **杀掉 wrapper 不会杀掉那个 java 进程** —— 下次启动就报"端口 8123 已占用"。
+> 清理方法见 `HANDOFF §6.2`（按端口找 PID 再 stop）。
+
+### 11.7 本阶段**没有**做成的事（诚实清单）
+
+| # | 没做 | 为什么 |
+|---|---|---|
+| 1 | `updateMemory` | `saveMemory` 是 upsert，**同名即覆盖** —— 更新就是它。再给一个 `update` 只会让模型在两个同义工具间犹豫，而 `forget+save` 是两步非原子操作（中间失败 = 丢记忆） |
+| 2 | 记忆的向量检索 | 条目只有几十个，索引 + 关键词足够；上向量是过度设计 |
+| 3 | 记忆自动过期 | 什么时候该忘是**业务规则**，不是技术规则 |
+| 4 | 跨用户共享记忆 | 记忆是"关于这个人的事实"，共享会串号 |
+| 5 | 冲突消解（两条矛盾记忆） | 先靠"同名覆盖 + 模型自己整理"；真正的消解需要业务定义"哪个更可信" |
+| 6 | 记忆的前端展示 | 目前只在执行轨迹里看到工具调用的结果文本；"记忆管理页"没有消费者 |
+
+---
+
 ## 待推进
 
-- ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`279 用例全绿`）
-- **阶段 11：长期记忆**（`.md` + 索引）
-  - 与会话记忆的分工：会话记忆由**管线自动**存取；长期记忆由**模型通过工具**自主读写
-  - ★ `.md` 读写必须显式 `UTF_8`（协议 §9.4 第 3 条）
+- ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`282 用例全绿`）
+- ✅ **阶段 11：长期记忆（`.md` + 索引）** —— 已完成，见第 11 节（`306 用例全绿`）
+  - 三个工具：`saveMemory`（upsert）/ `readMemory` / `forgetMemory`；索引 ≤1000 字常驻注入
+  - 密级**直接复用 `AccessLevel`**，注入前用 `visibleTo` 过滤（与检索同一条规则）
+  - ★ 欠的验证：**新会话问"我叫什么"能否答出** —— 这需要真实 API Key，
+    它同时就是 `STAGE5-VERIFICATION.md` 第 2.4 步欠的那条
+
 - **阶段 12：可观测性** —— 关键路径耗时 / 成功率 / 工具调用计数 / **token 用量**
   - ⚠️ **流式路径的 token 用量实测未观察到**（`Final.usage` 可能拿到 `EmptyUsage`）——
     做成本统计前必须**先测**，别假设

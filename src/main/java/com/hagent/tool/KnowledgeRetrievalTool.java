@@ -82,16 +82,10 @@ import java.util.List;
 @RequiredArgsConstructor
 public class KnowledgeRetrievalTool {
 
-    /** 放进 {@code ToolContext} 的键 —— 身份。 */
-    public static final String TOOL_CONTEXT_USER = "hagentToolUser";
-
-    /**
-     * 放进 {@code ToolContext} 的键 —— 事件出口（{@code ToolEventSink}）。
-     *
-     * <p>用途：把"本次参考了哪几篇"作为<b>结构化事件</b>发给前端。
-     * 见 {@link com.hagent.app.ToolEventSink} 的类注释（为什么不塞进返回字符串）。
-     */
-    public static final String TOOL_CONTEXT_SINK = "hagentToolEventSink";
+    // ★ 阶段 11：{@code TOOL_CONTEXT_USER} / {@code TOOL_CONTEXT_SINK} 两个键
+    //   已搬进 {@link ToolContextSupport} —— 长期记忆的三个工具也要读同一个身份键，
+    //   继续挂在"检索工具"名下就是名字指向别处（协议第 12 条）。
+    //   身份解析的三条分支同理收进了那里，避免两个工具对"缺身份"给出不同的处理方向。
 
     /**
      * 片段块的起始标记 —— 提示词里的约束引用它。
@@ -206,7 +200,7 @@ public class KnowledgeRetrievalTool {
         if (toolContext == null || toolContext.getContext() == null) {
             return;
         }
-        Object sink = toolContext.getContext().get(TOOL_CONTEXT_SINK);
+        Object sink = toolContext.getContext().get(ToolContextSupport.EVENT_SINK);
         if (sink instanceof com.hagent.app.ToolEventSink eventSink) {
             try {
                 eventSink.emit(new com.hagent.app.PipelineEvent.Retrieved(chunks, query));
@@ -243,34 +237,11 @@ public class KnowledgeRetrievalTool {
     /**
      * 从 {@link ToolContext} 取出调用方身份。
      *
-     * <p>三种情况各有明确处理（与阶段 6 的切面取值逻辑同构）：
-     * <ul>
-     *   <li><b>没有 ToolContext 或没有这个键</b> → 匿名 + <b>WARN</b>。
-     *       这是"调用方漏传"，必须可见，否则表现为"检索结果莫名其妙地少"；</li>
-     *   <li><b>类型不对</b> → 匿名 + WARN，并逐字报出实际类型。
-     *       静默当匿名会让"我明明传了 ADMIN"变成谜；</li>
-     *   <li><b>正常</b> → 用它。</li>
-     * </ul>
+     * <p>阶段 11 起<b>委托给 {@link ToolContextSupport#resolveUser}</b>：
+     * 长期记忆的工具也要做同一件事，两处各写一份必然在"缺身份怎么办"上漂移。
+     * 三条分支（没有上下文 / 没有键 / 类型不对）的说明见那个类。
      */
     private UserContext resolveUser(ToolContext toolContext) {
-        if (toolContext == null || toolContext.getContext() == null) {
-            log.warn("[工具-检索] 没有 ToolContext —— 已按【匿名】处理（仅可见 PUBLIC）。"
-                    + "正确用法：ToolCallingChatOptions.toolContext({}, userContext)",
-                    TOOL_CONTEXT_USER);
-            return UserContext.ANONYMOUS;
-        }
-        Object value = toolContext.getContext().get(TOOL_CONTEXT_USER);
-        if (value instanceof UserContext user) {
-            return user;
-        }
-        if (value == null) {
-            log.warn("[工具-检索] ToolContext 里没有 {} —— 已按【匿名】处理（仅可见 PUBLIC）。"
-                            + "正确用法：ToolCallingChatOptions.toolContext({}, userContext)",
-                    TOOL_CONTEXT_USER, TOOL_CONTEXT_USER);
-        } else {
-            log.warn("[工具-检索] ToolContext 里的 {} 类型不是 UserContext 而是 {} —— 已按【匿名】处理",
-                    TOOL_CONTEXT_USER, value.getClass().getName());
-        }
-        return UserContext.ANONYMOUS;
+        return ToolContextSupport.resolveUser(toolContext, "工具-检索");
     }
 }

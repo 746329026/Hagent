@@ -89,14 +89,12 @@ public interface ConversationCatalog {
             return null;
         }
         // 换行会把侧栏一行撑成多行，且标题本来就是"一句话摘要"
-        String oneLine = seed.replaceAll("\\s+", " ").trim();
+        String oneLine = com.hagent.common.Texts.singleLine(seed);
         if (oneLine.isEmpty()) {
             return null;
         }
-        if (oneLine.codePointCount(0, oneLine.length()) <= TITLE_MAX_LENGTH) {
-            return oneLine;
-        }
-        return oneLine.substring(0, oneLine.offsetByCodePoints(0, TITLE_MAX_LENGTH));
+        // ★ 按码点截断的实现在 Texts 里（阶段 11 抽出去的，长期记忆的摘要也用同一份）
+        return com.hagent.common.Texts.truncateByCodePoints(oneLine, TITLE_MAX_LENGTH, "");
     }
 
     /**

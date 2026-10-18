@@ -66,22 +66,27 @@ public class ToolRegistration {
     /**
      * 注册模型可用的全部工具。
      *
-     * <p>返回空数组是合法状态（检索被关掉时就是如此）——
-     * 此时管线照常工作，只是模型没有任何工具可调，退化成"纯对话"。
+     * <p>★ 阶段 11 起<b>返回空数组不再是关掉检索的结果</b>：长期记忆的 3 个工具与检索无关，
+     * 检索关掉时它们照常在。空数组只可能出现在"一个工具类都没注册"的编程错误里。
      *
      * @param retrievalProperties 检索开关；关掉则不注册检索工具
      */
     @Bean
     public ToolCallback[] allTools(KnowledgeRetrievalService retrievalService,
-                                   RetrievalProperties retrievalProperties) {
-        if (!retrievalProperties.isEnabled()) {
-            log.info("[工具] 已注册 0 个工具 —— hagent.rag.retrieval.enabled=false，"
-                    + "检索能力整体关闭（模型看不到 retrieveKnowledge，不会发起检索）");
-            return new ToolCallback[0];
+                                   RetrievalProperties retrievalProperties,
+                                   com.hagent.memory.longterm.LongTermMemoryStore longTermMemoryStore) {
+        java.util.List<Object> toolObjects = new java.util.ArrayList<>(2);
+        if (retrievalProperties.isEnabled()) {
+            toolObjects.add(new KnowledgeRetrievalTool(retrievalService));
+        } else {
+            log.warn("[工具] hagent.rag.retrieval.enabled=false —— 检索能力整体关闭"
+                    + "（模型看不到 retrieveKnowledge，不会发起检索）；长期记忆工具照常注册");
         }
+        // ★ 长期记忆工具与检索开关无关：记忆是"跨会话的事实"，不是知识库的一部分
+        toolObjects.add(new LongTermMemoryTools(longTermMemoryStore));
 
         ToolCallback[] tools = MethodToolCallbackProvider.builder()
-                .toolObjects(new KnowledgeRetrievalTool(retrievalService))
+                .toolObjects(toolObjects.toArray())
                 .build()
                 .getToolCallbacks();
 

@@ -333,10 +333,24 @@ hagent:
 
 
     long-term:
-      # 长期记忆目录（阶段 12 使用）：.md 文件 + MEMORY.md 索引。
-      # 与会话记忆是【两种不同的数据】：会话记忆是"刚才聊了什么"，
-      # 长期记忆是"跨会话沉淀的事实与偏好"，由模型自主读写。
+      # 长期记忆目录（阶段 11）：{dir}/{userId}/MEMORY.md 是索引，mem-*.md 是每条记忆。
+      # ★ 阶段 11 之前这个键是"死的"—— yml 里写着，但没有任何 Java 字段绑定它
+      #   （全项目搜不到 longTerm）。改了它以为记忆换地方了，实际什么都没发生。
+      #   现在它绑定到 LongTermMemoryProperties，并在启动时校验非空。
       dir: "${user.dir}/tmp/agent-memory"
+
+      # ★ 注入 prompt 的【索引块】最大字符数。索引是每轮都注入 system 的，
+      #   它直接吃会话历史预算（conversation-max-tokens=5000）。
+      #   1000 字 ≈ 15%~20%，再大就会把"最近几轮对话"挤掉 —— 那不是省钱问题，是模型忘上下文。
+      #   超限时【拒绝写新记忆】（让模型自己整理），而不是静默淘汰最旧的条目。
+      index-max-chars: 1000
+
+      # 单条记忆正文的上限。【不占】prompt 预算（正文只在 readMemory 时才进上下文），
+      # 它的意义是"防止一条记忆大到荒谬"。
+      content-max-chars: 2000
+
+      # 记忆标题上限。标题会进索引，所以必须短。
+      title-max-chars: 60
 
   # pgvector 专用数据源。独立前缀，不与 spring.datasource（业务主库 MySQL）混用，
   # 这是"spring.datasource 永远留给业务主库，其它库各用自有前缀"的落地。

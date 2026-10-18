@@ -76,7 +76,7 @@ class PromptBuilderTest {
                 new UserMessage("我叫张三"),
                 new AssistantMessage("你好张三"));
 
-        Prompt assembled = builder().assemble(original("我叫什么？"), history);
+        Prompt assembled = builder().assemble(original("我叫什么？"), history, null);
 
         List<Message> messages = assembled.getInstructions();
         assertThat(messages).hasSize(1 + history.size() + 1);
@@ -91,7 +91,7 @@ class PromptBuilderTest {
     @Test
     @DisplayName("★ 约束与原有 system 合并进【同一条】 system 消息，而不是多条")
     void constraintAndSystemShareOneSystemMessage() {
-        Prompt assembled = builder().assemble(original("年假几天"), List.of());
+        Prompt assembled = builder().assemble(original("年假几天"), List.of(), null);
 
         long systemCount = assembled.getInstructions().stream()
                 .filter(SystemMessage.class::isInstance).count();
@@ -136,7 +136,7 @@ class PromptBuilderTest {
                 unknown,
                 new UserMessage("本次提问")));
 
-        Prompt assembled = builder().assemble(original, List.of());
+        Prompt assembled = builder().assemble(original, List.of(), null);
 
         assertThat(assembled.getInstructions())
                 .as("旧实现只挑 system / history / user 三类、其余全丢 —— 它丢的是别人的东西。"
@@ -154,7 +154,7 @@ class PromptBuilderTest {
                 sameContentAsUser,
                 new UserMessage("一样的话")));
 
-        Prompt assembled = builder().assemble(original, List.of());
+        Prompt assembled = builder().assemble(original, List.of(), null);
 
         assertThat(assembled.getInstructions())
                 .as("内容相同但引用不同的消息必须被保留")
@@ -172,7 +172,7 @@ class PromptBuilderTest {
         SystemMessage second = new SystemMessage("第二段 system（阶段 9 的工具说明之类）");
         Prompt original = new Prompt(List.of(first, second, new UserMessage("提问")));
 
-        Prompt assembled = builder().assemble(original, List.of());
+        Prompt assembled = builder().assemble(original, List.of(), null);
 
         String systemText = ((SystemMessage) assembled.getInstructions().get(0)).getText();
         assertThat(systemText)
@@ -194,7 +194,7 @@ class PromptBuilderTest {
         PromptProperties off = new PromptProperties();
         off.setIncludeConstraint(false);
 
-        Prompt assembled = builder(off).assemble(original("你好"), List.of());
+        Prompt assembled = builder(off).assemble(original("你好"), List.of(), null);
 
         assertThat(assembled.getInstructions())
                 .allMatch(m -> m instanceof UserMessage,
@@ -208,12 +208,45 @@ class PromptBuilderTest {
         PromptProperties off = new PromptProperties();
         off.setIncludeConstraint(false);
 
-        Prompt assembled = builder(off).assemble(original("你好"), List.of());
+        Prompt assembled = builder(off).assemble(original("你好"), List.of(), null);
 
         assertThat(assembled.getInstructions())
                 .allMatch(m -> m instanceof UserMessage)
                 .as("关掉约束的用途是【对照实验】，不是『让模型自由发挥』")
                 .isNotEmpty();
+    }
+
+    // ========================================================================
+    // 三·二、阶段 11：长期记忆索引
+    // ========================================================================
+
+    @Test
+    @DisplayName("★ 长期记忆索引拼进 system 末尾，且与约束之间有空行分隔")
+    void memoryDigestIsAppendedToSystem() {
+        Prompt assembled = builder().assemble(original("我叫什么"), List.of(),
+                "【长期记忆】\n- 称呼偏好 — 叫他张工");
+
+        String system = assembled.getSystemMessage().getText();
+        assertThat(system).contains("【长期记忆】").contains("称呼偏好");
+        assertThat(system.indexOf("【长期记忆】"))
+                .as("记忆在约束之后：先立规则，再给'关于这个人的背景'")
+                .isGreaterThan(system.indexOf("【约束"));
+        assertThat(system).contains("\n\n【长期记忆】");
+    }
+
+    @Test
+    @DisplayName("★ 没有记忆（null / 空串）时不产生空白段落 —— 空段落也会花 token")
+    void blankMemoryDigestProducesNoExtraBlock() {
+        String withoutNull = builder().assemble(original("你好"), List.of(), null)
+                .getSystemMessage().getText();
+        String withoutBlank = builder().assemble(original("你好"), List.of(), "   ")
+                .getSystemMessage().getText();
+
+        assertThat(withoutNull)
+                .as("null 与空串必须给出完全相同的 system —— 否则'有没有记忆'会改变 prompt 的字节数，"
+                        + "让缓存/对比测试出现莫名其妙的差异")
+                .isEqualTo(withoutBlank)
+                .doesNotContain("长期记忆");
     }
 
     // ========================================================================
@@ -241,7 +274,7 @@ class PromptBuilderTest {
                 new TraceProperties(), new PromptProperties(),
                 new ClassPathResource("prompts/rag-answer-prompt.md"));
 
-        Prompt assembled = real.assemble(original("你好"), List.of());
+        Prompt assembled = real.assemble(original("你好"), List.of(), null);
         String systemText = ((SystemMessage) assembled.getInstructions().get(0)).getText();
 
         assertThat(systemText)
@@ -256,7 +289,7 @@ class PromptBuilderTest {
     @Test
     @DisplayName("★ 空历史与 null 片段都不报错 —— 新会话是最常见的路径")
     void emptyHistoryAndNullFragmentsAreSafe() {
-        Prompt assembled = builder().assemble(original("第一句话"), List.of());
+        Prompt assembled = builder().assemble(original("第一句话"), List.of(), null);
 
         assertThat(assembled.getInstructions()).isNotEmpty();
         assertThat(assembled.getInstructions().get(assembled.getInstructions().size() - 1))
@@ -266,7 +299,7 @@ class PromptBuilderTest {
     @Test
     @DisplayName("★ 不传 ChatOptions —— 让框架自动填入已配置的默认值")
     void doesNotCarryChatOptions() {
-        Prompt assembled = builder().assemble(original("你好"), List.of());
+        Prompt assembled = builder().assemble(original("你好"), List.of(), null);
 
         assertThat(assembled.getOptions())
                 .as("实测字节码：DeepSeekChatModel.buildRequestPrompt 在 options 为 null 时"

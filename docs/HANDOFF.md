@@ -3,9 +3,9 @@
 > **用途**：新开对话时先读本文件，即可在**不重读历史对话**的前提下继续推进。
 > 本文件是"当前状态 + 已定决策 + 全部待办 + 踩坑红线"的**唯一权威快照**。
 >
-> **最后更新**：阶段 10 已完成（**前端页面 + 会话目录 + 思考落库**：`282 用例全绿` + 真实 HTTP 联调取证），
-> 并在**真机联调**中修掉两个"逻辑对、位置错"的 bug（检索跑在 Reactor 事件循环上 / 失败被降级成"没命中"）。
-> ★ 下一步是**阶段 11（长期记忆 `.md` + 索引）** —— 动手前先按协议第 1 条走五步，等明确放行。
+> **最后更新**：阶段 11 已完成（**长期记忆**：`.md` + 索引常驻注入 + 三个记忆工具，`306 用例全绿`）。
+> 阶段 10（前端 + 会话目录 + 思考落库）已在真机联调中修掉两个"逻辑对、位置错"的 bug。
+> ★ 下一步是**阶段 12（工作流模式：真实编排）** —— 动手前先按协议第 1 条走五步，等明确放行。
 
 ---
 
@@ -441,6 +441,19 @@ boolean memInside = advisors.stream()
 | 49 | **删除 `InMemoryConversationMemory`** | 死代码：无 Bean、无配置入口、无任何测试引用。新设计下它的位置由 `context-cache: none` 覆盖 |
 | 50 | **保留 `file` 作为记录层实现** | 零基础设施兜底 + 人可读的成长记录；生产记录层是 MySQL |
 
+### 阶段 10 / 11 新增（本轮拍板）
+
+| # | 决策 | 理由摘要 |
+|---|---|---|
+| 51 | **思考落库到 `chat_message.reasoning`，用 `@@step:N` 文本标记** | 第一消费者是人（SQL 直查 / 前端折叠）。JSON 在 `SELECT` 里是一坨转义；而每步只有三件事实（步号、这步之后调了什么工具、想了什么），一行文本足够 |
+| 52 | **思考存 `AssistantMessage.properties`，绝不存 `reasoningContent`** | 后者会被 `createRequest` **回填进请求**（`reasoning_content` 是输出专用字段）→ 轻则白烧 token，重则 400。症状会是"下一轮莫名失败"，几乎不可能被联想到"历史里带了思考" |
+| 53 | **`mode` 落 `chat_conversation.mode`，首建后不再由请求改变** | 否则客户端能每轮换模式，让历史预算在 5k/50k 间来回跳，且事后查不到原因 |
+| 54 | **SSE 文本载荷用 JSON（`{"text":"…"}`）** | `SseEmitter` **不转义换行**（字节码可证），token 里的 `\n` 会切断帧 —— 而段落空行被当成帧分隔符吃掉，症状是"排版偶发错乱"（坑 38） |
+| 55 | **长期记忆：索引常驻注入 + 明细按需**；索引 ≤1000 字，超限**拒绝写** | 记忆不读=没存；全量注入会吃光会话预算；静默淘汰=悄悄丢用户数据 |
+| 56 | **`saveMemory` 是 upsert，不加 `updateMemory`** | 对 LLM 来说"步数"和"歧义"都是成本：`forget+save` 是两步非原子（中间失败=丢记忆），`update` 与 `save` 语义重叠只会让它犹豫 |
+| 57 | **记忆文件名 = `sha256(title)` 前 8 位** | 标题来自模型 ⇒ 直接当文件名就是目录穿越入口。哈希后**根本构造不出**越界路径；顺带让 upsert 天然成立（同名→同文件） |
+| 58 | **记忆密级复用 `AccessLevel`**（`visibleTo`），不引入新概念 | 协议第 13 条的正例：与检索同一个枚举、同一条规则 ⇒ "记忆永远不会比检索更宽松" |
+
 ## 五、已撤回的设计（**红线：不要再做**）
 
 ### 前置意图提取层（intent）—— 整体删除
@@ -498,7 +511,8 @@ $h = "C:\Users\Rong\Desktop\实习准备\Hagent"
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 Set-Location $h
 
-# 全量测试（282 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
+# 全量测试（306 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
+# ⚠️ 改了签名/删了类时，本地验证也必须带 clean —— 不带 clean 的 test-compile 会【假绿】（坑 43）
 .\mvnw.cmd -B -ntp clean test
 
 # 启动（需要 DEEPSEEK_API_KEY；IDEA 运行配置里已配好）
@@ -564,7 +578,58 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 ## 七、待办（按优先级，新对话从这里开始）
 
-### ✅ 优先级 1：阶段 10 已完成（前端页面 + 会话目录 + 思考落库）
+### ✅ 优先级 1：阶段 11 已完成（长期记忆 `.md` + 索引）
+
+**结果**：`306 用例全绿（2 skipped）`；详细记录见 `docs/PROCEDURES.md` 第 11 节（两张 Mermaid + 坑 43）。
+
+#### 拍板结果（本次讨论定下的五条，别再重新论证）
+
+| # | 问题 | 结论 |
+|---|---|---|
+| 1 | 谁能写记忆 | **只有模型通过工具**（与"检索由模型决定"同源） |
+| 2 | 怎么读 | **索引常驻注入 system** + 明细按需 `readMemory` |
+| 3 | 归属 | **`{dir}/{userId}/`**（记忆是"关于这个人的事实"，共享会串号） |
+| 4 | 索引上限 | **1000 字**；超限**拒绝写**（不静默淘汰旧条目） |
+| 5 | 工具数量 | **3 个**：`saveMemory`（**upsert**）/ `readMemory` / `forgetMemory`。**不加 `updateMemory`** |
+
+#### 实际做出来的形状
+
+```
+{dir}/{userId}/
+  MEMORY.md                       索引（物化产物，每次写后重生成，供人看）
+  mem-{sha256(title)前8位}.md      一条记忆（frontmatter + 正文，正文 ≤2000 字）
+```
+
+| 决策 | 理由 |
+|---|---|
+| 文件名 = 标题哈希 | 标题来自模型 ⇒ 直接当文件名就是目录穿越入口。用前 8 位十六进制后，**不是被校验挡住，而是根本构造不出来**；顺带让 upsert 天然成立 |
+| 密级存 **`AccessLevel`** | **复用**（协议第 13 条）：写入取 `user.clearance()`，注入前 `entry.level().visibleTo(当前密级)` —— 与检索同一个枚举、同一条规则 |
+| 不加 `updateMemory` | upsert 就是更新；`forget+save` 是两步非原子操作（中间失败 = 丢记忆），而 `save` 是单步幂等 |
+| 记忆工具与检索开关**解耦** | 关掉检索不该顺带让人失忆 |
+| `MEMORY.md` 是物化产物 | 真相是那些 `mem-*.md`；索引每次重生成 ⇒ **不可能与条目漂移** |
+
+#### 本阶段换来的可迁移认知
+
+1. **"配了没人读"要主动查**：`hagent.memory.long-term.dir` 从阶段 5 就写在 yml 里，
+   而没有任何 Java 字段绑定它 —— 改了它以为换目录了，其实什么都没发生（坑 #12 的又一个实例）。
+   本阶段绑定并加了启动校验。
+2. **降级要发生在能说出原因的那一层**（沿用阶段 10 的判据）：记忆读失败 → WARN + 本轮不注入，
+   而不是让请求失败，也不是静默空。
+3. **`test-compile` 不带 `clean` 会假绿**（坑 43）：改了构造器签名，增量编译**不重编依赖方**，
+   于是"BUILD SUCCESS"而测试根本编译不过。
+
+#### 留下的诚实清单
+
+`updateMemory` / 记忆向量检索 / 自动过期 / 跨用户共享 / 冲突消解 / 记忆管理页 —— 理由见 `PROCEDURES.md` 11.7。
+
+#### ★ 还欠一条验证（需要真实 API Key）
+
+**新会话问"我叫什么" → 能否答出**。它同时就是 `STAGE5-VERIFICATION.md` 第 2.4 步欠的那条。
+做到这一步，"长期记忆"才算**被证明生效**，而不只是"装配正确 + 单测全绿"。
+
+---
+
+### ✅ 优先级 1（历史）：阶段 10 已完成（前端页面 + 会话目录 + 思考落库）
 
 **结果**：`279 用例全绿（2 skipped）` + 真实 HTTP 联调取证；
 详细记录见 `docs/PROCEDURES.md` 第 10 节（含两张 Mermaid 图 + 坑 38/39/40）。
@@ -924,7 +989,8 @@ Hagent/
 │                                     Composer / MarkdownText（marked + DOMPurify）
 ├── src/main/java/com/hagent/
 │   ├── HagentApplication.java     ← ★ 含 exclude = ChatMemoryAutoConfiguration（阶段 8）
-│   ├── common/       BaseResponse / ErrorCode / GlobalResponseBodyAdvice
+│   ├── common/       BaseResponse / ErrorCode / GlobalResponseBodyAdvice /
+│   │                 Texts（按码点截断的唯一实现，阶段 11 抽出复用）
 │   ├── exception/    AgentException / GlobalExceptionHandler / FailureMapper / FailureMapping /
 │   │                 RetrievalUnavailableException（★ 阶段 10 联调："查不了" ≠ "没查到"）
 │   ├── config/       AiConfig（阶段 8 起几乎空）/ WebConfig / StreamProperties /
@@ -938,8 +1004,7 @@ Hagent/
 │   │                 SessionDtos（★ 阶段 10：四个嵌套 record 组成一套契约）
 │   ├── security/     Role / UserContext / UserTokenResolver / UserContextInterceptor
 │   ├── retrieval/    检索侧领域：RetrievedChunk / RelevanceBand / RetrievalFilterBuilder
-│   ├── memory/       ConversationMemory 门面 + LayeredConversationMemory（组合两层）
-│   │                 ├── record/   记录层（权威·完整）：ConversationRecordStore + Mysql/File 实现
+│   ├── memory/       ConversationMemory 门面 + LayeredConversationMemory（组合两层）│   │                 ├── record/   记录层（权威·完整）：ConversationRecordStore + Mysql/File 实现
 │   │                 └── context/  上下文层（有损·可重建）：ConversationContextCache + Redis/NoOp 实现
 │   │                 共用：MemoryTrimmer / MessageCodec / TokenBudget /
 │   │                       FailureCircuit / LayerStatus / 装配与守卫
@@ -947,6 +1012,9 @@ Hagent/
 │   │                 ★ 阶段 10 新增：session/（会话目录 ConversationCatalog +
 │   │                                Mysql/File 实现，与记录层共用同一开关）
 │   │                               ReasoningTrace（思考标记格式的唯一出处，写读两侧）
+│   │                 ★ 阶段 11 新增：longterm/（长期记忆）
+│   │                               LongTermMemoryStore + FileLongTermMemoryStore
+│   │                               MemoryEntry / LongTermMemoryProperties / Config
 │   ├── document/     入库领域模型（AccessLevel / DocumentKind / DocumentMetadata /
 │   │                 SourceLoader / HashingSupport / IngestOutcome 等 9 个）
 │   ├── document/chunking/  TextChunker + 三策略 + ChunkingSupport + ChunkingDispatch
@@ -959,9 +1027,13 @@ Hagent/
 │   │                 ★ 阶段 8 删除：整个 advisor/ 包（8 个类）
 │   ├── stream/       StreamEventType（STEP / REASONING / TOOL_CALL / TOOL_RESULT /
 │   │                 RETRIEVED / MESSAGE / DONE / ERROR）/ SseSupport
+│   ├── tool/         ToolRegistration（唯一装配点）/ KnowledgeRetrievalTool /
+│   │                 ★ 阶段 11：LongTermMemoryTools（save/read/forget）/
+│   │                 ToolContextSupport（身份键与"缺身份→匿名"的唯一出处）/
+│   │                 audit/（ToolInvocationStore + Mysql 实现）
 │   └── observability/ StartupProbe（含框架 ChatMemory 启动自检）
 ├── src/main/resources/prompts/rag-answer-prompt.md   ← 5 条回答约束（缺失即启动失败）
-└── src/test/java/com/hagent/       ← 279 个用例，30 个测试类
+└── src/test/java/com/hagent/       ← 306 个用例，32 个测试类
                                        （另有 1 个抽象契约类 ConversationMemoryContractTest，
                                          由 3 个组合子类继承，本身不出现在报告里）
 ```
@@ -1032,6 +1104,13 @@ Hagent/
 | 36 | ★★★ **每次都被答"知识库中未找到相关内容"** | `retrieve` 失败 `return List.of()` → 与"没命中"**同形** → 工具回"没找到" → 模型照说。**系统在诚实地撒谎** | **降级要发生在"能说出原因"的那一层。** 在只看得到 `List` 的层里降级，原因永久丢失。修法：失败**抛**（`RetrievalUnavailableException`），由工具翻成"检索不可用（**不是**没有资料）"。★ 与坑 #16（过滤坏掉→返回空）、#34（affected rows）**是同一类** |
 | 37 | ★ **282 个用例全绿，而真机每次都失败** | 假模型都是 `Flux.just(...)`：元素在**调用线程**（允许阻塞）上发出；真机元素来自 Netty 线程 | **bug 长在 mock 边界之外**。补的机制化用例：`publishOn(Schedulers.parallel())` 假装"元素来自非阻塞线程" + 假工具**在工具外**断言 `isInNonBlockingThread()==false`（★ 工具内抛断言会被框架翻成文本，测试**假绿**）。先红后绿都验证过 |
 
+### 阶段 11 新增
+
+| # | 现象 | 根因 | 认知 |
+|---|---|---|---|
+| 38 | ★★★ **`mvnw test-compile` 报 BUILD SUCCESS，而 11 个测试根本编译不过** | 增量编译以**源文件时间戳**为判据：改了 `AgentPipeline.java`（加构造器参数），调用方（测试）自己的源文件没变 → 判"不必重编" → **依赖方的新签名没被检查**。加 `clean` 后立刻暴露 15 个错误 | **构建说成功 ≠ 代码能编译。** 判据：**凡"改签名/删类"的验证必须 `clean`**（全量命令本来就带，是我手工局部验证时偷懒）。这类"假绿"比红灯危险 —— 它会让人把错误结论继续往下推 |
+| 39 | ★ **一个配置键从阶段 5 就写着，却没有任何 Java 字段绑定它**（`hagent.memory.long-term.dir`） | 全项目搜不到 `longTerm`；改了它以为记忆换目录了，实际什么都没发生 | **"配了没人读"要靠专门找**：新增/接手一个配置段时，`grep` 一下有没有字段绑定它（这是坑 #12 的第三个实例） |
+
 #### 两条"假警报"（排错方向比结论更值得记）
 
 | 现象 | 真相 | 判据 |
@@ -1046,20 +1125,26 @@ Hagent/
 ```
 读 docs/HANDOFF.md 和 docs/WORKING-AGREEMENT.md。
 
-当前状态：阶段 10 已完成（前端页面 + 会话目录 + 思考落库，279 用例全绿，已提交）；
-★ 下一步是**阶段 11：长期记忆（.md + 索引）**。
+当前状态：阶段 11 已完成（长期记忆 .md + 索引，306 用例全绿，已提交）；
+★ 下一步是**阶段 12：工作流模式（真实编排）**。
 
-阶段 11 的第一件事：按协议第 1 条走五步，**等明确放行再写代码**。
+阶段 12 的第一件事：按协议第 1 条走五步，**等明确放行再写代码**。
 动手前必须先拍板（都属于"业务设计"，不许替你决定）：
-  1) 长期记忆由**模型通过工具**读写，还是由管线**自动抽摘要**写？
-  2) 索引文件（MEMORY.md）的格式，以及"它什么时候被更新"？
-  3) 与会话记忆的**边界**：什么该沉淀成长期记忆，什么只属于这次对话？
+  1) "工作流"到底做什么？是【先把任务拆成若干步再逐步执行】，
+     还是【让模型自己边做边决定】（那样与现在的 chat 没区别）？
+  2) 拆解结果要不要**让用户看见并确认**（计划确认），还是直接开跑？
+  3) 失败/偏离计划时：重新规划、跳过、还是停下来问用户？
+  4) 步数预算用哪个（现在是 chat 10 步 / workflow 10 步 —— 两者要不要分开）？
 
 已定的前提（不要再重新论证）：
   · 模式只有 chat / workflow；它已落库（chat_conversation.mode），**首次确定后不再由请求改变**
   · 思考**永不上送模型**（存 AssistantMessage.properties，不是 reasoningContent —— 后者会被框架回填进请求）
   · 前端只有**一条** SSE 连接；文本载荷是 JSON（`{"text":"…"}`），因为 `data:` 行放不下裸换行（坑 38）
   · 工具状态只到"已返回" —— 没有成功/失败信号，**不画绿勾**
+  · **阻塞调用一律在 boundedElastic 上**（`AgentPipeline.loop()` 里的 `publishOn`，坑 35）；
+    新增工具时不用管线程，但**别在别处再加一条绕过它的链**
+  · 长期记忆：索引常驻注入（≤1000 字）+ 明细按需；三个工具 `saveMemory`(upsert)/`readMemory`/`forgetMemory`；
+    密级**复用 `AccessLevel`**
 ```
 
 **记住三件最容易被违反的事**：
