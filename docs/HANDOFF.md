@@ -955,15 +955,16 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 - (b) 加一个 `tools/run-tests.ps1`（带 BOM），内部设好环境变量再调 `mvnw`
 - (c) 在 `docs` 里写清楚（**这不算机制化**，协议第 6 条明确反对）
 
-### 后续阶段（`docs/PROCEDURES.md` 的「待推进」）
+### 后续阶段（`docs/PROCEDURES.md` 的「待推进」，编号以此处为准）
 
 - ✅ **阶段 9：工具调用与多步 Agent** —— 已完成（工具循环 + 事件 + 审计表）
-- ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成（`frontend/` + `chat_conversation` + `chat_message.reasoning`）
-- ✅ **会话记忆的 MySQL 实现** —— 阶段 7 已完成（`chat_message` 两层结构）
-- **阶段 11：长期记忆（`.md` + 索引）** ← ★ 下一步
-- **阶段 12：工作流模式（真实编排）** —— 通道已通电，行为仍与 `chat` 一致
-- 可观测性（耗时 / 成功率 / 工具调用计数 / token 用量）—— ★ 注意 `Final.usage` 在流式路径**可能拿不到**，
-  做成本统计前必须先测；工具调用计数可直接查 `chat_tool_invocation`
+- ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成
+- ✅ **阶段 11：长期记忆（`.md` + 索引）** —— 已完成
+- **阶段 12：工作流模式（真实编排）** ← ★ 下一步 —— 通道已通电，行为仍与 `chat` 一致
+- **阶段 13：可观测性** —— 耗时 / 成功率 / 工具调用计数 / token 用量
+  - ★ 注意 `Final.usage` 在流式路径**可能拿不到**，做成本统计前必须先测；
+    工具调用计数可直接查 `chat_tool_invocation`
+- **阶段 14（提议，未拍板）：工程收尾** —— README / 演示脚本 / token 预算与限流 / 部署说明
 
 ---
 
