@@ -3,7 +3,7 @@
 > **用途**：新开对话时先读本文件，即可在**不重读历史对话**的前提下继续推进。
 > 本文件是"当前状态 + 已定决策 + 全部待办 + 踩坑红线"的**唯一权威快照**。
 >
-> **最后更新**：阶段 11 已完成（**长期记忆**：`.md` + 索引常驻注入 + 三个记忆工具，`306 用例全绿`）。
+> **最后更新**：阶段 11 已完成（**长期记忆**：`.md` + 索引常驻注入 + 三个记忆工具，`310 用例全绿`）。
 > 阶段 10（前端 + 会话目录 + 思考落库）已在真机联调中修掉两个"逻辑对、位置错"的 bug。
 > ★ 下一步是**阶段 12（工作流模式：真实编排）** —— 动手前先按协议第 1 条走五步，等明确放行。
 
@@ -28,11 +28,31 @@
 | 5 | 会话记忆（memory 抽象 + 切面）+ 上游失败分类 + 撤回意图层 | ✅ 已提交（`6e5600e`） |
 | **6** | **RAG 企业知识库**（入库链路 + 检索链路 + 权限过滤 + 切面拆分） | ✅ 已提交（`0338493`） |
 | **7** | **会话记忆双层重构**（MySQL 记录层 + Redis 上下文层）<br>★ 顺带修掉两个潜伏的数据源装配缺陷 | ✅ 已提交（`468413e`） |
-| **8** | **结构重构：advisor 链 → `AgentPipeline`**（工具调用顺延阶段 9） | ✅ **已完成，234 用例全绿**（见 `PROCEDURES.md` 第 8 节） |
-| **9** | **工具调用与多步 Agent**（工具循环 + `ToolCall`/`ToolResult` 事件 + 审计表） | ✅ **已完成，251 用例全绿**（见 `PROCEDURES.md` 第 9 节） |
-| **10** | **前端极简页面**（`EventSource` 消费 SSE）—— ★ **待讨论** | ❌ 未开始 |
+| **8** | **结构重构：advisor 链 → `AgentPipeline`**（直连 `ChatModel`，工具调用顺延阶段 9） | ✅ 已完成（当时 234 用例；见第 8 节） |
+| **9** | **工具调用与多步 Agent**（工具循环 + `ToolCall`/`ToolResult` 事件 + 审计表） | ✅ 已完成（当时 251 用例；见第 9 节） |
+| **10** | **前端页面 + 会话目录 + 思考落库**（Vue3 前端 / 3 个会话接口 / `@@step:` 落进 `reasoning` / 真机联调修掉 2 个 bug） | ✅ 已完成（当时 282 用例；见第 10 节） |
+| **11** | **长期记忆**（`{dir}/{userId}/MEMORY.md` + 索引常驻注入 + `saveMemory`/`readMemory`/`forgetMemory` + 包归属守卫） | ✅ 已完成（见第 11 节） |
+| **12** | **工作流模式（真实编排）**：计划 → 逐步执行 → 汇总 | ⏳ **下一步**（四个拍板点已出，待你选） |
+| **13** | 可观测性（耗时 / 成功率 / 工具计数 / token 成本） | 未开始 |
+| **14** | 工程收尾（README / 演示脚本 / 限流 / 部署说明） | 未拍板（提议） |
 
-**当前测试状态**：`251 个用例全绿`（`mvnw.cmd -B -ntp clean test`）
+**当前测试状态**：`310 个用例全绿，2 skipped`（`mvnw.cmd -B -ntp clean test`；
+35 个测试类 + 1 个抽象契约类由 3 个子类继承）
+
+**能力现状（这个项目现在能做什么）**：
+
+| 能力 | 状态 |
+|---|---|
+| 静/流式对话（SSE，带思考过程） | ✅ |
+| RAG 检索 —— **由模型自主决定何时调工具**（不是每轮必跑） | ✅ |
+| 密级过滤（PUBLIC / INTERNAL / CONFIDENTIAL，SQL 层拦截） | ✅ |
+| 会话记忆（MySQL 权威 + Redis 缓存，双层） | ✅ |
+| 思考过程落库（`@@step:` 标记）+ 历史回放 | ✅ |
+| 会话列表 / 改名 / 全部历史（前端可用） | ✅ |
+| 长期记忆（跨会话的事实与偏好，模型自主读写） | ✅ |
+| 工作流编排 | ⏳ 阶段 12 |
+| 可观测性 / 成本统计 | ⏳ 阶段 13 |
+| 鉴权（当前只有明文 token 的身份传递，**没有真正的鉴权**） | ❌ 缺口，见 §七 优先级 2 |
 
 > ⚠️ **跑测试前必须设 `DEEPSEEK_API_KEY`**（任意非空值即可，测试不调真模型 ——
 > 启动期只做 `Assert.hasText` 校验）。本轮的跑法：
@@ -299,7 +319,7 @@ CREATE TABLE hagent_knowledge (
 （`schema-validation` 默认也是 false，校验是空操作）→ 表永远不存在，直到第一次写入才报错。
 **这是阶段 6 踩过的坑，已修（改为 true + 启动自检失败即中止）。**
 
-### 3.8 切面机制（已实测的语义）
+### 3.8 切面机制（⚠️ **历史记录**：阶段 1–7 用过，阶段 8 已整体删除）
 
 | 事实 | 证据 |
 |---|---|
@@ -310,7 +330,13 @@ CREATE TABLE hagent_knowledge (
 | `ChatMemory.CONVERSATION_ID` = **`"chat_memory_conversation_id"`** | javap -constants |
 | 框架的 `MessageChatMemoryAdvisor.before()` 用 `addAll(instructions)` **保留原有消息**，且有 `isMemoryAlreadyInPrompt()` 防重复注入 | 反编译 |
 
-**当前自定义切面（阶段 6 后半定型 —— 全部在工具循环之外）**：
+> ⚠️ **本节是历史记录，别照着它改现在的代码。**
+> 阶段 8 已把整条 advisor 链（7 个自定义切面）删除，现在只有一个编排者
+> `AgentPipeline`，**顺序就是代码行序**。
+> 保留本节的两个理由：① 这些**框架机制本身仍是事实**（将来若改用 `ChatClient` 会再遇到）；
+> ② 踩坑 #17 / #19 / #22 都是从这条链上换来的。
+
+**当时的自定义切面（阶段 6 后半 – 阶段 7；阶段 8 已全部删除）**：
 
 | order | 切面 | 职责 | before / after |
 |---|---|---|---|
@@ -325,7 +351,7 @@ CREATE TABLE hagent_knowledge (
 **order 常量集中在 `com.hagent.advisor.AdvisorOrders`**（具名常量，不写裸数字 ——
 因为 `order` 会进框架的 observation 标签，裸数字会污染监控）。
 
-### 3.8.1 ★★ 三条"必须先知道"的切面机制（本轮字节码实证）
+### 3.8.1 ★★ 三条"必须先知道"的切面机制（阶段 7 字节码实证；**本项目阶段 8 起不再有切面链**）
 
 **① 外层切面看不到内层注入的内容（方向上曾被写反）**
 
@@ -339,8 +365,9 @@ after  顺序：order 降序        模型 → … → 3 → 2 → 1   ← ★ �
 ```
 
 → **要记"模型真正收到的 prompt"，切面必须放最内层（order 最大）**，
-不是最外层。当前由 `PromptAssemblyAdvisor`（`MIN+250`，最后一个改 prompt 的人）负责。
-→ 断言固化在 `AdvisorOrderTest#outerAdvisorCannotSeeInnerInjection`。
+不是最外层。当时由 `PromptAssemblyAdvisor`（`MIN+250`，最后一个改 prompt 的人）负责；
+**现在没有切面了，这件事由 `PromptBuilder` 做**（它仍是"唯一重建消息列表者"）。
+→ 当时的断言固化在 `AdvisorOrderTest#outerAdvisorCannotSeeInnerInjection`（该测试已随切面链一起删除）。
 
 **② 框架探测"记忆切面是否在工具循环内层"，据此关掉它自己的内部历史**
 
@@ -370,6 +397,10 @@ boolean memInside = advisors.stream()
 ---
 
 ## 四、已定的设计决策（不要再重新论证）
+
+> ⚠️ **本节是"决策流水账"**：记录的是**每次为什么那样选**，不是"现在代码长什么样"。
+> 早期条目描述的结构有些已被后续阶段推翻 —— 凡是这样的，条目里都标了 **⚠️ 已被阶段 N 推翻**。
+> **当前真实结构以 §三（技术事实）与 §八（目录结构）为准**；本节与它们冲突时，以 §三/§八 为准。
 
 | # | 决策 | 理由摘要 |
 |---|---|---|
@@ -403,12 +434,12 @@ boolean memInside = advisors.stream()
 |---|---|---|
 | 24 | **保留全部切面形态**（不在 app 层写顺序 pipeline） | 与框架的扩展模型对齐（框架自带 `SafeGuard`/`SimpleLogger`/`StructuredOutputValidation` 等**都带位置要求**，不在链里就无法表达相对位置）；切面**自带 observation**（`order` 会进标签）；顺序是可被一个测试整体断言的**声明式数据**。代价是 `context` 字符串 key + order 常量 |
 | 25 | **全部自定义切面放工具循环之外**（`MIN+100…250`） | 一次请求只被调用一次 → 写回一次、检索一次、拼装唯一。检索的"幂等"从**必须**降级为**防御**（协议第 10 条：靠结构而非靠检查） |
-| 26 | **`ConversationMemoryAdvisor` 拆成 `MemoryReadAdvisor` + `MemoryWritebackAdvisor`** | 两者位置要求相反（读要在拼装前、写要在链收尾），一个 order 装不下 |
+| 26 | **`ConversationMemoryAdvisor` 拆成 `MemoryReadAdvisor` + `MemoryWritebackAdvisor`**<br>⚠️ 两个切面**已随阶段 8 的切面链一起删除**（读/写变成 `AgentPipeline` 里的两行） | 两者位置要求相反（读要在拼装前、写要在链收尾），一个 order 装不下 |
 | 27 | **只有"拼装切面"改 prompt**，其余只写 context | "谁重建消息列表，只有一个人" —— 把决策 17/18 的**实质**保留，形式改成"唯一且最后执行"（不再是"order 最大的切面"） |
 | 28 | **鉴权走拦截器，不做成切面**；`UserContext` 走请求属性 + 方法参数 | 三条判据：粒度（每请求 vs 每模型调用）、能否拿到 `HttpServletRequest`、失败该表达成 401/403 而非模型错误。切面在 Controller 之后 → 放它会"先花掉检索成本再发现身份有问题" |
 | 29 | **token 缺失 = 匿名（只看 PUBLIC）；token 非法 = 抛异常** | 缺失是合法状态（决策 21 不拒绝）；**写错不是** —— 静默降级成匿名会让"我是管理员却查不到东西"毫无线索（决策 8） |
 | 30 | **阈值单位用"距离"**（配置 `max-distance` / `high-max-distance` / `medium-max-distance`） | 与校准证据（HANDOFF 3.5 的距离表）同单位；配置键名里带 `distance` 杜绝歧义；换算只在 `RetrievalProperties` 两处，且启动日志同时打两个单位 |
-| 31 | **不建 `PromptFragment` 类** | 它是 `RetrievedChunk` 的纯透传，没有第二个使用者（协议第 7 条 → 不建）。片段格式化直接放在 `PromptAssemblyAdvisor#renderFragments` |
+| 31 | **不建 `PromptFragment` 类** | 它是 `RetrievedChunk` 的纯透传，没有第二个使用者（协议第 7 条 → 不建）。片段格式化当时放在 `PromptAssemblyAdvisor#renderFragments`（现为 `PromptBuilder`） |
 | 32 | **不实现 `MemoryAdvisor` 标记接口** | 实现它会让框架关掉自己的循环历史、把多步历史交给我们 —— 而我们的记忆只存"问 + 最终答"，**不存中间工具轮次**（阶段 8 会缺 `tool_result`） |
 | 33 | **`AccessLevel.visibleLevels()` 放在枚举内部**（而非检索代码里） | 让"比较式判定"与"枚举式过滤"是**同一条规则的两个形态**，由前者派生后者 —— 规则只有一个出处 |
 
@@ -416,9 +447,9 @@ boolean memInside = advisors.stream()
 
 | # | 决策 | 理由摘要 |
 |---|---|---|
-| 34 | **保留 `ChatMemoryAdapter` 与 `chatMemory` Bean（★ 不可删）** | 它是框架边界的 **闸门 + 占位**：`ChatMemoryAutoConfiguration` 的两个 `@Bean` 都是 `@ConditionalOnMissingBean`，我们的 Bean 一删，框架会装 `MessageWindowChatMemory` + `InMemoryChatMemoryRepository` —— **纯内存、重启即丢、无 token 预算**。这正是 `MemoryProperties` 自己警告过的失败模式。详见 `PROCEDURES.md` 阶段 5"坑 4 的复核补充" |
-| 35 | **"模式→预算"抽成 `MemoryBudgets` 共用值对象**（而非两处各建一份） | 原先是 `MemoryReadAdvisor` 与 `ChatMemoryAdapter` 各抄一份 `Map.of(...)`：① 手写列举**没有任何机制**保证覆盖全部模式 → 新增模式漏改会在 `budgets.get(mode).maxTokens()` 上 **NPE**；② 两处各自演化，会让同一会话在两条路径下拿到**不同预算**且不报错。现在用**穷尽 `switch` + 遍历 `MemoryMode.values()` 建表**，把 ① 变成**编译期错误** |
-| 36 | **回归防线要「植入缺陷验证过」** | `MemoryBudgetsTest#advisorAndAdapterAgreeOnTheSameBudget` 不只是"跑了就过"—— 已**临时把主链路的预算改歪、确认它真的失败**，再恢复。`test passes` 不能证明防线有效，**只有"bug 在时会失败"才能** |
+| 34 | **保留 `ChatMemoryAdapter` 与 `chatMemory` Bean（★ 不可删）**<br>⚠️ **已被阶段 8 推翻：`ChatMemoryAdapter` 已删除**（启动自检反向断言取代它，见第 8 节） | 它是框架边界的 **闸门 + 占位**：`ChatMemoryAutoConfiguration` 的两个 `@Bean` 都是 `@ConditionalOnMissingBean`，我们的 Bean 一删，框架会装 `MessageWindowChatMemory` + `InMemoryChatMemoryRepository` —— **纯内存、重启即丢、无 token 预算**。这正是 `MemoryProperties` 自己警告过的失败模式。详见 `PROCEDURES.md` 阶段 5"坑 4 的复核补充" |
+| 35 | **"模式→预算"抽成 `MemoryBudgets` 共用值对象**（而非两处各建一份）<br>⚠️ **阶段 8 已删除这个类**（`switch` 搬进 `AgentPipeline#budgetOf`），本条只保留"为什么曾经抽它"的记录 | 原先是 `MemoryReadAdvisor` 与 `ChatMemoryAdapter` 各抄一份 `Map.of(...)`：① 手写列举**没有任何机制**保证覆盖全部模式 → 新增模式漏改会在 `budgets.get(mode).maxTokens()` 上 **NPE**；② 两处各自演化，会让同一会话在两条路径下拿到**不同预算**且不报错。现在用**穷尽 `switch` + 遍历 `MemoryMode.values()` 建表**，把 ① 变成**编译期错误** |
+| 36 | **回归防线要「植入缺陷验证过」** | `MemoryBudgetsTest#advisorAndAdapterAgreeOnTheSameBudget`（**已随阶段 8 删除**，但这条纪律留下了）不只是"跑了就过"—— 已**临时把主链路的预算改歪、确认它真的失败**，再恢复。`test passes` 不能证明防线有效，**只有"bug 在时会失败"才能** |
 
 ---
 
@@ -511,7 +542,7 @@ $h = "C:\Users\Rong\Desktop\实习准备\Hagent"
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 Set-Location $h
 
-# 全量测试（306 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
+# 全量测试（310 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
 # ⚠️ 改了签名/删了类时，本地验证也必须带 clean —— 不带 clean 的 test-compile 会【假绿】（坑 43）
 .\mvnw.cmd -B -ntp clean test
 
@@ -580,7 +611,7 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 ### ✅ 优先级 1：阶段 11 已完成（长期记忆 `.md` + 索引）
 
-**结果**：`306 用例全绿（2 skipped）`；详细记录见 `docs/PROCEDURES.md` 第 11 节（两张 Mermaid + 坑 43）。
+**结果**：`310 用例全绿（2 skipped）`；详细记录见 `docs/PROCEDURES.md` 第 11 节（两张 Mermaid + 坑 43）。
 
 #### 拍板结果（本次讨论定下的五条，别再重新论证）
 
@@ -921,9 +952,9 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 | # | 问题 | 背景 | AI 倾向 |
 |---|---|---|---|
 | 1 | ~~**`UserContext` 的传递方式**~~ ✅ **阶段 8 已解决**（pipeline 无 context，身份是方法参数） | 曾经：拦截器 → request attribute → Controller 的 `@RequestAttribute` → **方法参数** → app 层放进 context（切面从 context 读）。四段里前两段是编译期检查，**最后一段仍是字符串 key** | ✅ 阶段 8 删掉切面链后，"最后一段字符串 key"随之消失 |
-| 2 | **`PromptFragment` 这个类没有建** | 计划里有它，但它是 `RetrievedChunk` 的纯透传（没有第二个使用者）→ 按协议第 7 条不建，片段格式化直接放在 `PromptAssemblyAdvisor#renderFragments` | 不建。若将来出现第二种片段来源（例如长期记忆注记），那时再抽 |
-| 3 | **默认 system prompt 现在是"约束文件"** | `AiConfig` 旧注释说 system 留到"工具就位后用 `ToolCapabilityAdvisor` 校验"—— 那个切面已撤回。现在 system 由 `PromptAssemblyAdvisor` 从 `prompts/rag-answer-prompt.md` 拼出（角色 + 5 条约束） | 保持。若要加"通用办公助手"人格描述，改那个 `.md` 即可 |
-| 4 | ~~**方式一/二的记忆语义**~~ ★ **已解决**（端点将在阶段 8 删除） | `/stream` 与 `/stream-flux` 是"流式机制对照实验"，**不传 `conversationId`** → 落到兜底会话 `"default"`，与"所有没传会话 ID 的调用"共享历史。**这是原实现就有的行为，本轮只是把它写进了注释**（此前"读代码看不出来"） | 建议**给这两条路径传一个请求内唯一 ID**，让它们不落进共享会话。但那会改变对照实验的行为，**等本人定** |
+| 2 | **`PromptFragment` 这个类没有建** | 计划里有它，但它是 `RetrievedChunk` 的纯透传（没有第二个使用者）→ 按协议第 7 条不建，片段格式化当时放在 `PromptAssemblyAdvisor#renderFragments`（现为 `PromptBuilder`） | 不建。若将来出现第二种片段来源（例如长期记忆注记），那时再抽 |
+| 3 | **默认 system prompt 现在是"约束文件"** | `AiConfig` 旧注释说 system 留到"工具就位后用 `ToolCapabilityAdvisor` 校验"—— 那个切面已撤回。现在 system 由 `PromptBuilder` 从 `prompts/rag-answer-prompt.md` 拼出（角色 + 5 条约束 + 可选的长期记忆索引） | 保持。若要加"通用办公助手"人格描述，改那个 `.md` 即可 |
+| 4 | ~~**方式一/二的记忆语义**~~ ★ **已解决**（两个对照端点已在阶段 8 删除，现在只有 `/stream-sse`） | `/stream` 与 `/stream-flux` 是"流式机制对照实验"，**不传 `conversationId`** → 落到兜底会话 `"default"`，与"所有没传会话 ID 的调用"共享历史。**这是原实现就有的行为，本轮只是把它写进了注释**（此前"读代码看不出来"） | 建议**给这两条路径传一个请求内唯一 ID**，让它们不落进共享会话。但那会改变对照实验的行为，**等本人定** |
 | 5 | **非法凭证要不要 401 语义的错误码？** | 当前用 `INVALID_PARAM(40001)` → HTTP 400。语义上"凭证无效"更接近 **401 Unauthorized**，但 `ErrorCode` 的 4xxxx 段只有参数/协议类错误，**新增 401 = 契约变更** | 保持 400。理由：400 已足以让调用方知道"该改凭证、别重试"；要不要加 401 是契约问题，不是技术问题 |
 | 6 | **★ 把"异常必须有着落"机制化（协议第 6 条）** | 踩坑 #10（协议级异常被报成 500）的教训是"按类补分支"，但**没机制化** → 本轮换个异常类型又踩一次（177 用例全绿但非法 token 报 500） | 二选一：<br>(a) 写一个测试，**扫描所有自定义异常类**，断言每个都在 `GlobalExceptionHandler` 里有分支或明确归入兜底；<br>(b) 在 `GlobalExceptionHandler` 的 `Exception.class` 兜底分支里**打一条 WARN 带上异常类名**（让它"报出缺口"—— 该类的注释里其实已经写了这个原则） |
 
@@ -1043,7 +1074,7 @@ Hagent/
 │   │                 audit/（ToolInvocationStore + Mysql 实现）
 │   └── observability/ StartupProbe（含框架 ChatMemory 启动自检）
 ├── src/main/resources/prompts/rag-answer-prompt.md   ← 5 条回答约束（缺失即启动失败）
-└── src/test/java/com/hagent/       ← 306 个用例，32 个测试类
+└── src/test/java/com/hagent/       ← 310 个用例，35 个测试类
                                        （另有 1 个抽象契约类 ConversationMemoryContractTest，
                                          由 3 个组合子类继承，本身不出现在报告里）
 ```
@@ -1153,7 +1184,7 @@ Hagent/
 ```
 读 docs/HANDOFF.md 和 docs/WORKING-AGREEMENT.md。
 
-当前状态：阶段 11 已完成（长期记忆 .md + 索引，306 用例全绿，已提交）；
+当前状态：阶段 11 已完成（长期记忆 .md + 索引，310 用例全绿，已提交）；
 ★ 下一步是**阶段 12：工作流模式（真实编排）**。
 
 阶段 12 的第一件事：按协议第 1 条走五步，**等明确放行再写代码**。

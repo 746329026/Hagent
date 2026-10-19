@@ -6,72 +6,76 @@
 
 一个**高扩展性的企业办公 Agent**，以 Spring Boot + Spring AI 为底座，按"能力可替换、配置可切换"的方式组织代码。
 
-当前已完成：
-- 工程骨架 + 启动探针（自动核对模型/密钥/存储装配是否符合预期）
-- 模型接入（chat 用 DeepSeek 云端，embedding 用 Ollama 本地）
-- 同步对话与流式对话（SSE）两条链路
-- 统一契约（统一响应包装 / 全局异常 / 错误码）
+**已经能做的事**（阶段 0–11）：
 
-规划中：
-- RAG 企业知识库（手工检索链路 + 可替换向量存储）
-- 工具调用与多步 Agent（状态机 + 中断续跑）
-- 双层记忆（会话记忆多实现可切换 + .md 长期记忆）
-- 过程可视化与办公产出（PPT / 邮件）
+- 静/流式对话（SSE，带思考过程）；前端可用：会话列表 / 改名 / 历史回放
+- RAG 知识库：**由模型自主决定何时检索**（工具化，不是每轮必跑）+ 密级过滤在 SQL 层完成
+- 会话记忆：MySQL 权威层 + Redis 缓存层（派生关系，不是"两种存法"）
+- 长期记忆：`{dir}/{userId}/MEMORY.md` + 索引常驻注入，模型通过三个工具自主读写
+- 思考过程按步落库（`@@step:` 标记），刷新页面仍能回看
+- 工具循环 + 工具调用审计表；启动探针自动核对装配
+- 配置类归位由 `PackagePlacementTest` 强制（5 条规则、零例外）
 
----
+**还没做**（阶段 12–14）：
 
-## 目录结构（当前）
+- 工作流模式：计划 → 逐步执行 → 汇总（现在 `mode=workflow` 只差预算）
+- 可观测性：耗时 / 成功率 / 工具计数 / token 成本（`Final.usage` 已实测可用）
+- 工程收尾：README / 演示脚本 / 限流 / 部署说明
+- ❌ **鉴权**：现在只有明文 `X-Hagent-Token` 的身份传递，**没有真正的认证授权**
+  （"我的会话"其实是"所有会话"）—— 这是已知缺口，不是疏忽
+
+## 阶段总览
+
+> 每个阶段的**详细记录**（目标 / 文件 / 踩坑 / 结果）在本文件对应小节；
+> **当前状态与待办**以 `HANDOFF.md` 为准。这张表只做索引。
+
+| 阶段 | 主题 | 这一阶段换来的最大认知 | 全量用例 |
+|---|---|---|---|
+| 0 | 工程骨架 + 启动探针 + 依赖版本 | "配了有没有生效"要看**有没有代码走那条路** | — |
+| 1 | 模型接入 + 同步对话 + 日志切面 | 增量 ≠ 累计；空片必须过滤 | — |
+| 2 | 流式三实现对照 + SSE 放行 | 流响应绝不能被统一响应包装器包住 | — |
+| 3 | 结构化输出（**任务意图层已整体撤回**） | "我描述过它"≠"我做了它" | — |
+| 4 | （有意跳过：手册里的阶段 4 已在阶段 1 完成） | — | — |
+| 5 | 会话记忆 + 上游失败分类 + 撤回意图层 | **失败与正常同形的地方，必须有正向断言** | 177 |
+| 6 | RAG 入库 + 检索 + 权限过滤 | 重载 + 泛型不变 = **静默降级** | 189 |
+| 7 | 会话记忆双层重构 | 为一个**没人消费**的属性付了锁与死锁的代价 | 239 |
+| 8 | advisor 链 → `AgentPipeline` | 删掉"占位 Bean"后，框架会**立刻补位** | 234 |
+| 9 | 工具调用与多步 Agent | `then()` 会**丢弃上游所有事件** | 251 |
+| 10 | 前端 + 会话目录 + 思考落库 | ① SSE 的 `data:` 行**放不下裸换行**；② **阻塞调用不能在事件循环上跑** | 282 |
+| 11 | 长期记忆（`.md` + 索引） | ① **降级要发生在"能说出原因"的那一层**；② 同类错误第 2 次必须**机制化** | 310 |
+
+> ★ 阶段 8 的用例数**回落**（239 → 234）不是退步：删掉了 12 个"纯框架切面行为"的测试，
+> 换来的是不再维护一条已经不存在的链路。详见第 8 节。
+
+## 目录结构
+
+> **完整目录树**（每个包的职责、关键类、已删除项的说明）见 `HANDOFF.md` §八。
+> 这里只列顶层骨架 —— 两份文档各写一份完整树，只会各自过时
+> （本节此前就停在阶段 2 的样子：还列着 `advisor/` 和 `TaskIntentAppService`）。
 
 ```text
 Hagent/
-├── docs/
-│   ├── PROCEDURES.md                    本文件（按阶段记录目标/文件/踩坑/结果）
-│   └── WORKING-AGREEMENT.md             协作协议（推进流程、汇报格式、验证原则）
-├── src/main/java/com/hagent/
-│   ├── HagentApplication.java           启动类
-│   ├── advisor/
-│   │   └── PromptTraceAdvisor.java      调用链日志切面
-│   ├── app/
-│   │   ├── ChatAppService.java          对话业务编排（同步 + 流式）
-│   │   ├── TaskIntentAppService.java    任务意图理解（结构化输出）
-│   │   └── HealthAppService.java        健康检查业务
-│   ├── common/
-│   │   ├── BaseResponse.java            统一响应体
-│   │   ├── ErrorCode.java               错误码枚举（分段 + 预留）
-│   │   └── GlobalResponseBodyAdvice.java 统一响应包装器（含 SSE 放行）
-│   ├── config/
-│   │   ├── AdvisorProperties.java       切面参数（日志截断等）
-│   │   ├── AiConfig.java                ChatClient 装配 + 提示词资源 Bean
-│   │   ├── StreamProperties.java        SSE 参数（超时/心跳/重连间隔）
-│   │   ├── VectorStoreConfig.java       向量库装配（含表名自检）
-│   │   ├── VectorStoreDataSourceProperties.java
-│   │   ├── VectorStoreProperties.java
-│   │   ├── WebConfig.java               CORS 白名单
-│   │   └── WebProperties.java
-│   ├── controller/
-│   │   ├── ChatController.java          同步 + 流式对话接口
-│   │   └── HealthController.java        健康检查接口
-│   ├── dto/
-│   │   ├── ChatRequest.java
-│   │   ├── ChatResponse.java
-│   │   └── TaskIntent.java              任务意图（含 Deliverable 枚举）
-│   ├── exception/
-│   │   ├── AgentException.java          业务异常基类
-│   │   └── GlobalExceptionHandler.java  全局异常处理器
-│   ├── observability/
-│   │   └── StartupProbe.java            启动探针
-│   └── stream/
-│       ├── StreamEventType.java         SSE 事件名唯一出处
-│       └── SseSupport.java              流式放行判定
-├── src/main/resources/
-│   ├── application.yml                  主配置（进仓库）
-│   ├── application-local.yml.example    私有配置模板
-│   ├── prompts/
-│   │   └── task-intent-prompt.md        任务意图的业务语义提示词
-│   └── static/
-│       └── stream-demo.html             流式三种实现的对比页
-└── src/test/java/com/hagent/
-    └── stream/SseSupportTest.java       放行判定回归测试
+├── docs/          PROCEDURES（本文件）/ HANDOFF / WORKING-AGREEMENT /
+│                  STAGE5-VERIFICATION / KNOWLEDGE-SAMPLE-DATA
+├── frontend/      Vue3 + Vite（:5173）：会话侧栏 / 对话区 / 思考区 / 执行轨迹
+├── knowledge/     4 份示例知识文档（进版本库）
+├── tools/         sql.ps1（查库）/ hagent-test.ps1（真实 HTTP）/ change-list.ps1（改动清单）
+└── src/
+    ├── main/java/com/hagent/
+    │   ├── app/          AgentPipeline（唯一编排者）/ PromptBuilder / PipelineEvent /
+    │   │                 ChatAppService / ConversationQueryService /
+    │   │                 KnowledgeRetrievalService / DocumentIngestService
+    │   ├── config/       ★ 全部配置与装配类（13 个 *Properties + 8 个 @Configuration）
+    │   ├── controller/   ChatController / ConversationController / HealthController
+    │   ├── memory/       会话记忆（record/ + context/ + session/）+ longterm/ + 共用工具
+    │   ├── tool/         ToolRegistration（唯一装配点）/ KnowledgeRetrievalTool /
+    │   │                 LongTermMemoryTools / ToolContextSupport / audit/
+    │   ├── document/     入库领域模型 + chunking/
+    │   ├── retrieval/    RetrievedChunk / RelevanceBand / RetrievalFilterBuilder
+    │   ├── security/     Role / UserContext / UserTokenResolver / UserContextInterceptor
+    │   └── dto/ common/ exception/ stream/ observability/ + HagentApplication
+    ├── main/resources/   application.yml / db/*.sql（显式 DDL）/ prompts/
+    └── test/java/com/hagent/   310 个用例（35 个测试类 + 1 个抽象契约类）
 ```
 
 ---
@@ -3678,7 +3682,7 @@ sequenceDiagram
 
 ### 11.6 阶段结果与验证证据
 
-**测试**：`306 用例全绿，2 skipped`（本阶段新增 24 个）。
+**测试**：`310 用例全绿，2 skipped`（本阶段新增 28 个）。
 
 | 测试 | 盯住什么 |
 |---|---|
@@ -3720,7 +3724,7 @@ Spring 也给 +1 参数的 `AgentPipeline` 正常注入了。
 ## 待推进
 
 - ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`282 用例全绿`）
-- ✅ **阶段 11：长期记忆（`.md` + 索引）** —— 已完成，见第 11 节（`306 用例全绿`）
+- ✅ **阶段 11：长期记忆（`.md` + 索引）** —— 已完成，见第 11 节（`310 用例全绿`）
   - 三个工具：`saveMemory`（upsert）/ `readMemory` / `forgetMemory`；索引 ≤1000 字常驻注入
   - 密级**直接复用 `AccessLevel`**，注入前用 `visibleTo` 过滤（与检索同一条规则）
   - ★ 欠的验证：**新会话问"我叫什么"能否答出** —— 这需要真实 API Key，
