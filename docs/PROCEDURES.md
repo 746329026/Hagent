@@ -3578,7 +3578,8 @@ bug 正好长在 mock 边界之外 —— 见 HANDOFF §十 第 5 条。
 
 | 动作 | 文件 |
 |---|---|
-| 新增 | `memory/longterm/`：`LongTermMemoryProperties` / `MemoryEntry` / `LongTermMemoryStore` / `FileLongTermMemoryStore` / `LongTermMemoryConfig` |
+| 新增 | `config/LongTermMemoryProperties` + `config/LongTermMemoryConfig`（★ 配置类一律住 `config/`，见坑 44） |
+| 新增 | `memory/longterm/`：`MemoryEntry` / `LongTermMemoryStore` / `FileLongTermMemoryStore` |
 | 新增 | `tool/LongTermMemoryTools`（save / read / forget 三个 `@Tool`） |
 | 新增 | `tool/ToolContextSupport`（身份键与"缺身份→匿名"的唯一出处） |
 | 新增 | `common/Texts`（按码点截断的唯一实现，两处复用） |

@@ -1,6 +1,7 @@
 package com.hagent.memory.longterm;
 
 import com.hagent.common.Texts;
+import com.hagent.config.LongTermMemoryProperties;
 import com.hagent.document.AccessLevel;
 import com.hagent.security.UserContext;
 import lombok.extern.slf4j.Slf4j;

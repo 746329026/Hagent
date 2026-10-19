@@ -1,4 +1,4 @@
-package com.hagent.memory.longterm;
+package com.hagent.config;
 
 import lombok.Getter;
 import lombok.Setter;
@@ -28,6 +28,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *
  * <p>它们决定的是<b>成本</b>（索引每轮都注入 prompt）与<b>安全性</b>（单条记忆多大），
  * 而不是"代码结构"。按项目一贯的做法，能算成本/可调的数字一律外置。
+ *
+ * <h2>★ 为什么它在 {@code com.hagent.config}</h2>
+ *
+ * <p>协议第 13 条：项目里 8 个 {@code @ConfigurationProperties} 类有 7 个在
+ * {@code com.hagent.config}，配置类的既定归属就是那里。本类最初放进了
+ * {@code com.hagent.memory.longterm}（"它讲记忆，就跟记忆走"）——
+ * 那正是踩坑 #25 的同一种错：**判据看的是"它是什么种类"，不是"它讲什么业务"**。
+ * 现已挪回，并由 {@code PackagePlacementTest} 守着。
  */
 @Getter
 @Setter

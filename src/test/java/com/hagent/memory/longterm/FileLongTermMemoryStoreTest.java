@@ -1,5 +1,6 @@
 package com.hagent.memory.longterm;
 
+import com.hagent.config.LongTermMemoryProperties;
 import com.hagent.document.AccessLevel;
 import com.hagent.security.Role;
 import com.hagent.security.UserContext;
