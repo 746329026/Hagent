@@ -1,4 +1,4 @@
-package com.hagent.memory;
+package com.hagent.config;
 
 import lombok.Getter;
 import lombok.Setter;

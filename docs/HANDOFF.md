@@ -623,8 +623,8 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 `updateMemory` / 记忆向量检索 / 自动过期 / 跨用户共享 / 冲突消解 / 记忆管理页 —— 理由见 `PROCEDURES.md` 11.7。
 
 ★ 另一笔**本轮付清又添新账**：配置类放错包（踩坑 #40）已挪正并由 `PackagePlacementTest` 守住；
-但 `MemoryProperties` / `MemoryConfig` / `ToolRegistration` 三个**历史例外**仍在原处（名单在测试里，带理由），
-搬迁牵动十几处 import，属独立改动。
+随后把 3 个**历史例外**也一并归位（`MemoryProperties` / `MemoryConfig` → `config`，
+`ToolRegistration` → `config`），现在是**零例外**。
 
 #### ★ 还欠一条验证（需要真实 API Key）
 
@@ -997,10 +997,12 @@ Hagent/
 │   │                 Texts（按码点截断的唯一实现，阶段 11 抽出复用）
 │   ├── exception/    AgentException / GlobalExceptionHandler / FailureMapper / FailureMapping /
 │   │                 RetrievalUnavailableException（★ 阶段 10 联调："查不了" ≠ "没查到"）
-│   ├── config/       AiConfig（阶段 8 起几乎空）/ WebConfig / StreamProperties /
-│   │                 TraceProperties（原 AdvisorProperties）/ VectorStoreConfig /
-│   │                 VectorStoreProperties / VectorStoreDataSourceProperties /
-│   │                 ChunkingProperties / IngestProperties / RagConfig / PromptProperties
+│   ├── config/       ★ 所有配置/装配类都在这儿（由 PackagePlacementTest 守着）：
+│   │                 AiConfig（阶段 8 起几乎空）/ WebConfig / RagConfig /
+│   │                 VectorStoreConfig / BusinessDataSourceConfig /
+│   │                 MemoryConfig（★ 阶段 11 从 memory 搬来）/ ToolRegistration（同上）/
+│   │                 LongTermMemoryConfig（阶段 11）/
+│   │                 *Properties ×13（含 MemoryProperties / LongTermMemoryProperties）
 │   ├── controller/   ChatController（3 个对话端点）/
 │   │                 ConversationController（★ 阶段 10：会话列表 / 历史 / 改名）/
 │   │                 HealthController
@@ -1011,14 +1013,14 @@ Hagent/
 │   ├── memory/       ConversationMemory 门面 + LayeredConversationMemory（组合两层）│   │                 ├── record/   记录层（权威·完整）：ConversationRecordStore + Mysql/File 实现
 │   │                 └── context/  上下文层（有损·可重建）：ConversationContextCache + Redis/NoOp 实现
 │   │                 共用：MemoryTrimmer / MessageCodec / TokenBudget /
-│   │                       FailureCircuit / LayerStatus / 装配与守卫
+│   │                       FailureCircuit / LayerStatus / MemoryConfigValidator（唯一例外）
 │   │                 ★ 阶段 8 删除：ChatMemoryAdapter、MemoryBudgets
 │   │                 ★ 阶段 10 新增：session/（会话目录 ConversationCatalog +
 │   │                                Mysql/File 实现，与记录层共用同一开关）
 │   │                               ReasoningTrace（思考标记格式的唯一出处，写读两侧）
 │   │                 ★ 阶段 11 新增：longterm/（长期记忆）
 │   │                               LongTermMemoryStore + FileLongTermMemoryStore
-│   │                               MemoryEntry / LongTermMemoryProperties / Config
+│   │                               MemoryEntry（配置类在 config/）
 │   ├── document/     入库领域模型（AccessLevel / DocumentKind / DocumentMetadata /
 │   │                 SourceLoader / HashingSupport / IngestOutcome 等 9 个）
 │   ├── document/chunking/  TextChunker + 三策略 + ChunkingSupport + ChunkingDispatch
@@ -1054,12 +1056,17 @@ Hagent/
 > 由 `PackagePlacementTest` 强制（`src/test/java/com/hagent/config/`）。
 > 放错包会直接测试失败，报错里写明该放哪 —— 不用再靠谁记得。
 >
-> | 规则 | 已记录的例外（搬迁属独立改动） |
+> | 规则 | 现状 |
 > |---|---|
-> | `*Properties` → `config` | `com.hagent.memory.MemoryProperties` |
-> | `@Configuration` → `config` | `com.hagent.memory.MemoryConfig`、`com.hagent.tool.ToolRegistration` |
+> | `*Properties` → `config` | **13/13，零例外** |
+> | `@Configuration` → `config` | **8/8，零例外**（`MemoryConfig`、`ToolRegistration` 已于阶段 11 末尾归位） |
+> | `*Controller` → `controller` | 3/3 |
+> | `*Service` → `app` | 6/6 |
+> | `*Tool` / `*Tools` → `tool` | 2/2 |
 >
-> 例外名单里每一项都**必须仍然存在**（测试会核对）—— 否则名单会慢慢变成"什么都不拦"的废纸。
+> **零例外**是刻意保持的：有过白名单就会有"再加一个也没什么"的下一次。
+> 唯一还在原处的是 `MemoryConfigValidator`（全项目唯一的 `EnvironmentPostProcessor`，
+> 由 `spring.factories` 按**全限定名**注册，没有既定归属包）—— 它不在上面五条规则里。
 
 ---
 
@@ -1117,7 +1124,7 @@ Hagent/
 | # | 现象 | 根因 | 认知 |
 |---|---|---|---|
 | 35 | ★★★ **问年假/差旅，检索一律返回"未找到"，而库里就有** | 检索跑在 **Reactor 的 Netty 事件循环**（`reactor-http-nio-*`）上；工具里的阻塞调用（Ollama embedding 的 RestClient 底要 `Mono.block()`）被 Reactor 拒绝 → 异常被吞 → 空列表 → "没命中" | **整条管道允许阻塞，所以整条管道都不该在事件循环上跑**（`publishOn(boundedElastic)`）。★ 加的位置很关键：`publishOn` 只影响**下游**，必须加在 `concatWith(handleToolCalls)` **之前**；加在外层仍然红（实测过）。★ 同根因还压着 `writeBack`/`recordAudit`：JDBC 不报错，只**静默堵事件循环** —— 更隐蔽 |
-| 40 | ★★ **新写的两个配置类又放错了包**（`config/` 里已有 7 个 `*Properties`、4 个 `*Config`，我却把它们放进了 `memory.longterm`） | 判据又用了"它讲什么业务"（装配记忆 → 跟记忆走），而不是"它是什么种类"。**这是踩坑 #25 的同一种错，第 2 次** | 协议第 6 条：重复 ≥2 次**必须机制化**。已加 `PackagePlacementTest`：`*Properties` 与任何 `@Configuration` 必须在 `com.hagent.config`，放错包直接测试失败。★ 机制本身也验证过"会红"：植入两个违规类 → 报 2 条 → 删掉后绿。★ 植入时还发现守卫第一版漏了**全限定注解写法**（`@org.springframework...Configuration`），已修 |
+| 40 | ★★ **新写的两个配置类又放错了包**（`config/` 里已有 7 个 `*Properties`、4 个 `*Config`，我却把它们放进了 `memory.longterm`） | 判据又用了"它讲什么业务"（装配记忆 → 跟记忆走），而不是"它是什么种类"。**这是踩坑 #25 的同一种错，第 2 次** | 协议第 6 条：重复 ≥2 次**必须机制化**。已加 `PackagePlacementTest`，现在守 **5 条规则零例外**：`*Properties`/`@Configuration`→`config`、`*Controller`→`controller`、`*Service`→`app`、`*Tool(s)`→`tool`。★ 机制验证过"会红"：先后植入 4 个违规类（Properties/Config/Controller/Service/Tool），**每条规则都抓到**；删掉后绿。★ 植入时还发现守卫第一版漏了**全限定注解写法**（`@org.springframework...Configuration`），已修。★ 随后把 3 个历史例外（`MemoryProperties`/`MemoryConfig`/`ToolRegistration`）也一并归位 —— **零例外**比"白名单带理由"更可靠 |
 | 36 | ★★★ **每次都被答"知识库中未找到相关内容"** | `retrieve` 失败 `return List.of()` → 与"没命中"**同形** → 工具回"没找到" → 模型照说。**系统在诚实地撒谎** | **降级要发生在"能说出原因"的那一层。** 在只看得到 `List` 的层里降级，原因永久丢失。修法：失败**抛**（`RetrievalUnavailableException`），由工具翻成"检索不可用（**不是**没有资料）"。★ 与坑 #16（过滤坏掉→返回空）、#34（affected rows）**是同一类** |
 | 37 | ★ **282 个用例全绿，而真机每次都失败** | 假模型都是 `Flux.just(...)`：元素在**调用线程**（允许阻塞）上发出；真机元素来自 Netty 线程 | **bug 长在 mock 边界之外**。补的机制化用例：`publishOn(Schedulers.parallel())` 假装"元素来自非阻塞线程" + 假工具**在工具外**断言 `isInNonBlockingThread()==false`（★ 工具内抛断言会被框架翻成文本，测试**假绿**）。先红后绿都验证过 |
 

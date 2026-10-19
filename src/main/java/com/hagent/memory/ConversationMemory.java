@@ -1,5 +1,7 @@
 package com.hagent.memory;
 
+import com.hagent.config.MemoryProperties;
+
 import org.springframework.ai.chat.messages.Message;
 
 import java.util.List;

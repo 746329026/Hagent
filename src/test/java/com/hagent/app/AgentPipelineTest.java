@@ -4,7 +4,7 @@ import com.hagent.config.PromptProperties;
 import com.hagent.config.TraceProperties;
 import com.hagent.memory.ConversationMemory;
 import com.hagent.memory.MemoryMode;
-import com.hagent.memory.MemoryProperties;
+import com.hagent.config.MemoryProperties;
 import com.hagent.memory.TokenBudget;
 import com.hagent.retrieval.RetrievedChunk;
 import com.hagent.security.UserContext;

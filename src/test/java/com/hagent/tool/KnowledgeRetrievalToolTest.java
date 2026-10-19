@@ -1,5 +1,7 @@
 package com.hagent.tool;
 
+import com.hagent.config.ToolRegistration;
+
 import com.hagent.app.KnowledgeRetrievalService;
 import com.hagent.config.RetrievalProperties;
 import com.hagent.document.AccessLevel;

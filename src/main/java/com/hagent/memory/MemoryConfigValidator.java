@@ -1,5 +1,7 @@
 package com.hagent.memory;
 
+import com.hagent.config.MemoryProperties;
+
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.EnvironmentPostProcessor;
 import org.springframework.boot.SpringApplication;

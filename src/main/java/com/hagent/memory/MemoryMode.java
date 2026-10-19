@@ -1,5 +1,7 @@
 package com.hagent.memory;
 
+import com.hagent.config.MemoryProperties;
+
 /**
  * 记忆的<b>使用模式</b> —— 决定"本次调用愿意为历史付出多少预算"。
  *

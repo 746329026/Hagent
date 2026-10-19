@@ -1,7 +1,7 @@
 package com.hagent.memory.record;
 
 import com.hagent.memory.LayerStatus;
-import com.hagent.memory.MemoryProperties;
+import com.hagent.config.MemoryProperties;
 import com.hagent.memory.MessageCodec;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;

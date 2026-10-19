@@ -1,5 +1,7 @@
 package com.hagent.memory;
 
+import com.hagent.config.MemoryProperties;
+
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.Message;

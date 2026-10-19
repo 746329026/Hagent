@@ -1,7 +1,7 @@
 package com.hagent.memory.session;
 
 import com.hagent.memory.MemoryMode;
-import com.hagent.memory.MemoryProperties;
+import com.hagent.config.MemoryProperties;
 import lombok.extern.slf4j.Slf4j;
 import tools.jackson.databind.ObjectMapper;
 

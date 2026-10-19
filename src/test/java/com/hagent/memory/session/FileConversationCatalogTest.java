@@ -1,7 +1,7 @@
 package com.hagent.memory.session;
 
 import com.hagent.memory.MemoryMode;
-import com.hagent.memory.MemoryProperties;
+import com.hagent.config.MemoryProperties;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;

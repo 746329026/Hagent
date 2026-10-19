@@ -1,4 +1,7 @@
-package com.hagent.memory;
+package com.hagent.config;
+
+import com.hagent.memory.ConversationMemory;
+import com.hagent.memory.LayeredConversationMemory;
 
 import com.hagent.memory.context.ConversationContextCache;
 import com.hagent.memory.context.NoOpContextCache;

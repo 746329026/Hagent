@@ -1,5 +1,7 @@
 package com.hagent.memory;
 
+import com.hagent.config.MemoryProperties;
+
 import com.hagent.memory.context.NoOpContextCache;
 import com.hagent.memory.record.FileConversationRecordStore;
 import org.junit.jupiter.api.io.TempDir;

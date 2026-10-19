@@ -1,8 +1,8 @@
-package com.hagent.tool;
+package com.hagent.config;
 
 import com.hagent.app.KnowledgeRetrievalService;
-import com.hagent.config.RetrievalProperties;
-import com.hagent.config.ToolAuditProperties;
+import com.hagent.tool.KnowledgeRetrievalTool;
+import com.hagent.tool.LongTermMemoryTools;
 import com.hagent.tool.audit.MysqlToolInvocationStore;
 import com.hagent.tool.audit.ToolInvocationStore;
 import lombok.extern.slf4j.Slf4j;
