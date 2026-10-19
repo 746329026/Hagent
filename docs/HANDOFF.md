@@ -626,10 +626,12 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 随后把 3 个**历史例外**也一并归位（`MemoryProperties` / `MemoryConfig` → `config`，
 `ToolRegistration` → `config`），现在是**零例外**。
 
-#### ★ 还欠一条验证（需要真实 API Key）
+#### ✅ 那条验证已经跑通（2026-10-19，真实 Key）
 
-**新会话问"我叫什么" → 能否答出**。它同时就是 `STAGE5-VERIFICATION.md` 第 2.4 步欠的那条。
-做到这一步，"长期记忆"才算**被证明生效**，而不只是"装配正确 + 单测全绿"。
+**新会话（历史=0）问"我是谁" → 答"你是李四（管理员）"**。
+链条：`长期记忆索引 140 字` 注入 system → 模型调 `readMemory` → 答对。
+它同时就是 `STAGE5-VERIFICATION.md` 第 2.4 步欠的那条 —— **两条一起结清**。
+证据见 `docs/STAGE5-VERIFICATION.md` 末尾「验证记录」（含库里的回答原文）。
 
 ---
 
@@ -934,16 +936,17 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 用于验证"匿名只能看到 PUBLIC"与"相关度分档的区分度"。
 **⚠️ 文件名可能被当成"让用户编辑真实内容的模板"** → 用 `example-` 前缀规避。
 
-### 优先级 4：两个欠着的验证（不是新功能，是**缺的证据**）
+### ✅ 优先级 4：两条欠着的验证 —— **2026-10-19 已补完**
 
-| # | 缺什么 | 为什么重要 | 怎么补 |
-|---|---|---|---|
-| 1 | `docs/STAGE5-VERIFICATION.md` 第 2.4 步："下一轮能否答出名字" **至今未跑** | 现在只能证明"记忆能装配、能落盘"，**不能证明"注入后模型真的用上了"** | 需真实 API Key |
-| 2 | **检索链路只验到"片段拼进了 prompt"，没验到"模型真的依据片段作答"** | `PromptAssemblyAdvisor` 的日志能证明片段进了 prompt（本轮已有），但"模型照不照做"是另一件事 | 需真实 API Key，问一个只有知识库能答的问题（如"年假几天"），看是否引用来源、是否拒绝编造 |
+| # | 缺什么 | 结果 |
+|---|---|---|
+| 1 | `STAGE5-VERIFICATION.md` 第 2.4 步："下一轮能否答出名字" | ✅ **成立**，而且是更强的形式：**全新会话（历史=0）**问"我是谁" → 索引注入 → 模型 readMemory → 答"你是李四（管理员）" |
+| 2 | "模型是否真的依据检索片段作答" | ✅ **成立**：答"出差怎么报销"时引用了《员工手册 第四章 差旅与报销》，并给出片段里的"一线城市 600 元/晚" |
 
-> ★ 这两条可以**一次跑完**：同一会话里先"我叫张三"再问"我叫什么"（验记忆），
-> 再问"年假要提前几天申请"（验 RAG）。**都必须带 token 才有 INTERNAL 内容** ——
-> 不带 token 是匿名，只能看到 PUBLIC。
+> 完整证据（日志片段 + 库里的回答原文）见 `docs/STAGE5-VERIFICATION.md` 末尾的「验证记录」。
+> ★ 顺带纠正一条旧结论：**流式路径的 token 用量是拿得到的**
+> （实测 `usage=DefaultUsage{promptTokens=2591, completionTokens=446, totalTokens=3037}`），
+> 阶段 13 可直接用 `Final.usage`。
 
 ### 优先级 5：机制化 `DEEPSEEK_API_KEY`（协议第 6 条）
 
@@ -962,8 +965,8 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 - ✅ **阶段 11：长期记忆（`.md` + 索引）** —— 已完成
 - **阶段 12：工作流模式（真实编排）** ← ★ 下一步 —— 通道已通电，行为仍与 `chat` 一致
 - **阶段 13：可观测性** —— 耗时 / 成功率 / 工具调用计数 / token 用量
-  - ★ 注意 `Final.usage` 在流式路径**可能拿不到**，做成本统计前必须先测；
-    工具调用计数可直接查 `chat_tool_invocation`
+  - ★ `Final.usage` 在流式路径**已实测拿得到**（2026-10-19：`promptTokens/completionTokens/totalTokens` 都有值），
+  可直接用于成本统计；但换模型提供方要重测。工具调用计数可直接查 `chat_tool_invocation`
 - **阶段 14（提议，未拍板）：工程收尾** —— README / 演示脚本 / token 预算与限流 / 部署说明
 
 ---
