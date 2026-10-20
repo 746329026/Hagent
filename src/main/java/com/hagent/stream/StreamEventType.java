@@ -124,11 +124,28 @@ public final class StreamEventType {
      */
     public static final String RETRIEVED = "retrieved";
 
+    /**
+     * <b>工作流编排事件</b>（阶段 13 新增）—— 计划与步骤的骨架，<b>与模型输出无关</b>。
+     *
+     * <p>数据是一个 JSON 对象，{@code type} 字段区分三种：
+     * <pre>
+     *   {"type":"plan",       "goal":"…", "steps":[{"index":1,"goal":"…","doneWhen":"…"}]}
+     *   {"type":"plan_skipped","reason":"…"}      ← 规划失败，已退回普通循环
+     *   {"type":"step_finished","step":2,"ok":true,"summary":"…"}
+     * </pre>
+     *
+     * <p><b>为什么三种共用一个事件名</b>：它们同属"这次运行的编排骨架"，
+     * 前端要么整块渲染（计划面板），要么整块忽略。拆成三个事件名会让"忽略"变成
+     * "忽略三个"，而没有额外好处。{@code type} 是本事件内的<b>次级判别</b>，
+     * 与 {@code STEP} 的 {@code {"step":2}} 不冲突。
+     */
+    public static final String WORKFLOW = "workflow";
+
     // ==========================================================================
     // 扩展位（未来阶段启用，当前不定义，见类注释）：
     //   QUESTION  —— 阶段 10 之后：中断续跑（模型停下来问用户）
     //   TODO      —— 阶段 11：任务列表更新
-    // ★ STEP 已在阶段 10 启用，见上方常量。
+    // ★ STEP 已在阶段 10 启用；WORKFLOW 已在阶段 13 启用，见上方常量。
     // ==========================================================================
 
     private StreamEventType() {

@@ -1,5 +1,12 @@
 package com.hagent.app;
 
+import com.hagent.workflow.InvalidPlanException;
+import com.hagent.workflow.PlanStep;
+import com.hagent.workflow.WorkflowPlan;
+import com.hagent.workflow.WorkflowPlanParser;
+import org.springframework.ai.chat.messages.SystemMessage;
+import reactor.core.publisher.FluxSink;
+
 import com.hagent.agent.PipelineEvent;
 import com.hagent.agent.ToolEventSink;
 
@@ -284,6 +291,10 @@ public class AgentPipeline {
             // 本轮循环状态：从拼装好的 prompt 开始，随工具结果不断增长
             LoopState state = new LoopState(new ArrayList<>(assembled.getInstructions()),
                     original.getUserMessage(), maxSteps);
+            // ★ 阶段 13：workflow 走"先拆解 → 逐步执行"；chat 的路径一个字都没动。
+            if (safeMode == MemoryMode.WORKFLOW) {
+                return runWorkflow(state, cid, user, startNanos);
+            }
             return loop(state, cid, user, startNanos);
         });
     }
@@ -365,10 +376,31 @@ public class AgentPipeline {
          */
         private final int maxSteps;
 
+        /**
+         * 是否为<b>终点</b>（阶段 13）：{@code false} 表示这是工作流里"某一步"的内层循环 ——
+         * 它结束时<b>不写回记忆、也不产出 Final</b>，因为整轮还没结束。
+         */
+        private final boolean terminal;
+
+        /**
+         * 是否发 {@link PipelineEvent.StepStarted}（阶段 13）。
+         *
+         * <p>工作流的"步"是<b>计划步</b>，由外层发；内层每次模型调用再发一层步号，
+         * 会让前端把"第 2 个计划步里的第 3 次模型调用"显示成"第 3 步"。
+         */
+        private final boolean stepEvents;
+
         private LoopState(List<Message> messages, Message userMessage, int maxSteps) {
+            this(messages, userMessage, maxSteps, true, true);
+        }
+
+        private LoopState(List<Message> messages, Message userMessage, int maxSteps,
+                          boolean terminal, boolean stepEvents) {
             this.messages = messages;
             this.userMessage = userMessage;
             this.maxSteps = maxSteps;
+            this.terminal = terminal;
+            this.stepEvents = stepEvents;
         }
     }
 
@@ -423,7 +455,9 @@ public class AgentPipeline {
                                 + "② 工具返回内容是否让模型以为【还没做完】；"
                                 + "③ hagent.agent.chat-max-steps / workflow-max-steps 是否需要调整",
                         LOG_TAG, state.maxSteps, state.text.length());
-                return Flux.just(finish(state, conversationId, startNanos, "maxSteps"));
+                return state.terminal
+                        ? Flux.just(finish(state, conversationId, startNanos, "maxSteps"))
+                        : Flux.empty();
             }
             state.steps++;
 
@@ -438,8 +472,10 @@ public class AgentPipeline {
             // ---------- 用"克隆配置 + 挂工具 + 带身份"的 options 调模型 ----------
             Prompt prompt = new Prompt(state.messages, optionsFor(user, null));
 
-            return Flux.<PipelineEvent>just(new PipelineEvent.StepStarted(step))
-                    .concatWith(chatModel.stream(prompt)
+            Flux<PipelineEvent> stepHead = state.stepEvents
+                    ? Flux.just(new PipelineEvent.StepStarted(step))
+                    : Flux.empty();
+            return stepHead.concatWith(chatModel.stream(prompt)
                             .doOnNext(chunk -> {
                                 state.lastChunk = chunk;
                                 String text = textOf(chunk);
@@ -510,8 +546,10 @@ public class AgentPipeline {
             ChatResponse response = state.lastChunk;
             if (response == null || !response.hasToolCalls()) {
                 // ---------- ① 正常出口 ----------
-                return Flux.just(finish(state, conversationId, startNanos,
-                        response == null ? null : finishReasonOf(response)));
+                return state.terminal
+                        ? Flux.just(finish(state, conversationId, startNanos,
+                                response == null ? null : finishReasonOf(response)))
+                        : Flux.empty();
             }
 
             // ---------- ② 执行工具并把结果回灌 ----------
@@ -863,6 +901,298 @@ public class AgentPipeline {
             return null;
         }
         return response.getMetadata().getUsage();
+    }
+
+    // ========================================================================
+    // 阶段 13：工作流编排 —— 先拆解 → 逐步执行 → 失败重试 → 重规划一次
+    // ========================================================================
+
+    /**
+     * 规划调用的系统提示词。
+     *
+     * <p>★ <b>它和 {@link WorkflowPlanParser} 是一对契约</b>：这里承诺的 JSON 形状，
+     * 解析器必须能读；解析器拒绝的（步数超限、编号不连续），这里也要提前约束。
+     * 改一处必须改另一处 —— 否则表现为"规划总是失败"，而日志里看不出为什么。
+     *
+     * <p>为什么要求"不要用代码块"：解析器虽然能从围栏里抠出 JSON，但那是<b>兜底</b>，
+     * 不是许可。让模型少做一步，成功率更高。
+     */
+    private static final String PLANNING_SYSTEM = """
+            你是任务规划器。把用户的任务拆成 1 到 8 个可按顺序执行的步骤。
+            只输出一个 JSON 对象，不要输出任何解释，不要用 Markdown 代码块。
+
+            格式：
+            {"goal":"这次要解决的问题","steps":[{"goal":"这一步要做什么","doneWhen":"怎样算做完"}]}
+
+            要求：
+            1) 步骤之间有先后依赖，后一步能用到前一步的产出；
+            2) 每一步都是"一次可以独立完成的事"，不要写"继续思考"这类空话；
+            3) doneWhen 写可验证的判据（如"拿到条款原文"），拿不准就留空串；
+            4) 步骤数不要超过 8。
+            """;
+
+    /**
+     * 工作流：<b>先拆解，再逐步执行</b>（阶段 13 的核心）。
+     *
+     * <h2>★ 为什么整段是"阻塞跑在一个 boundedElastic 线程上"</h2>
+     *
+     * <p>规划是一次<b>同步</b>的模型调用，每一步又是"D 一次阻塞工具循环"。
+     * Reactor 里把阻塞调用放在事件循环上会直接抛
+     * {@code block() ... not supported in thread reactor-http-nio-*}（阶段 9 的真实事故）。
+     * 所以这里用 {@code Flux.create + boundedElastic}：<b>订阅返回后由池里的线程推进</b>，
+     * 事件仍通过 sink 逐条吐给下游（SSE/聚合口径都不变）。
+     *
+     * <h2>★ 降级：规划失败 <b>不</b>让请求失败</h2>
+     *
+     * <p>模型写不出合法 JSON 是可预期的失败（不像配置写错），而"用户拿不到任何回答"
+     * 是更坏的结果。所以退回普通循环 —— 但<b>必须发 {@link PipelineEvent.PlanSkipped}</b>，
+     * 否则用户会以为工作流跑过了。
+     */
+    private Flux<PipelineEvent> runWorkflow(LoopState seed,
+                                            String conversationId,
+                                            UserContext user,
+                                            long startNanos) {
+        return Flux.<PipelineEvent>create(sink -> Schedulers.boundedElastic().schedule(() -> {
+            try {
+                WorkflowPlan plan;
+                try {
+                    plan = WorkflowPlanParser.parse(
+                            draftPlanText(seed.userMessage, null, null));
+                } catch (InvalidPlanException e) {
+                    log.warn("[{}] ★ 规划失败，退回普通循环（回答照常，但不保证按计划执行）：{}",
+                            LOG_TAG, e.getMessage());
+                    sink.next(new PipelineEvent.PlanSkipped(e.getMessage()));
+                    loop(seed, conversationId, user, startNanos).doOnNext(sink::next).blockLast();
+                    return;
+                }
+                log.info("[{}] 工作流计划：{} 步（{}）", LOG_TAG, plan.size(), plan.goal());
+                sink.next(new PipelineEvent.PlanCreated(plan));
+
+                WorkflowRun run = new WorkflowRun(plan);
+                String failure = executeWithRetry(run, seed, conversationId, user, startNanos, sink);
+                finishWorkflow(run, seed, conversationId, startNanos, failure, sink);
+            } catch (RuntimeException e) {
+                log.error("[{}] 工作流执行异常", LOG_TAG, e);
+                sink.error(e);
+            } finally {
+                sink.complete();
+            }
+        }), FluxSink.OverflowStrategy.BUFFER);
+    }
+
+    /**
+     * 两次重试的编排：<b>①同步重试同一步 → ②重规划一次 → 仍失败就放弃</b>。
+     *
+     * <p>放弃时<b>不静默</b>：返回的失败原因会写进最终回答（第几步、为什么）。
+     * 刻意<b>不选"跳过"</b> —— 跳过会让"少做了一件事"看起来像"做完了"。
+     */
+    private String executeWithRetry(WorkflowRun run, LoopState seed, String conversationId,
+                                    UserContext user, long startNanos, FluxSink<PipelineEvent> sink) {
+        boolean replanned = false;
+        while (true) {
+            String failure = runPlan(run, seed, conversationId, user, startNanos, sink);
+            if (failure == null) {
+                return null;
+            }
+            if (replanned) {
+                return failure;
+            }
+            replanned = true;
+            log.warn("[{}] 工作流第 1 次重试后仍失败，重规划一次：{}", LOG_TAG, failure);
+            WorkflowPlan next;
+            try {
+                next = WorkflowPlanParser.parse(
+                        draftPlanText(seed.userMessage, run.plan.goal(), failure));
+            } catch (InvalidPlanException e) {
+                return failure + "；重规划失败：" + e.getMessage();
+            }
+            sink.next(new PipelineEvent.PlanCreated(next));
+            run.restart(next);
+        }
+    }
+
+    /** 执行当前计划里尚未完成的步骤；返回 null 表示全部完成。 */
+    private String runPlan(WorkflowRun run, LoopState seed, String conversationId,
+                           UserContext user, long startNanos, FluxSink<PipelineEvent> sink) {
+        while (run.index <= run.plan.size()) {
+            PlanStep step = run.plan.step(run.index);
+            StepResult first = runStep(run, step, seed, conversationId, user, startNanos, sink);
+            StepResult result = first;
+            if (!first.ok()) {
+                sink.next(new PipelineEvent.StepFinished(step.index(), false, first.summary()));
+                log.warn("[{}] 第 {} 步失败，同步重试一次：{}", LOG_TAG, step.index(), first.summary());
+                result = runStep(run, step, seed, conversationId, user, startNanos, sink);
+            }
+            if (!result.ok()) {
+                sink.next(new PipelineEvent.StepFinished(step.index(), false, result.summary()));
+                return "第 " + step.index() + " 步（" + step.goal() + "）失败：" + result.summary();
+            }
+            sink.next(new PipelineEvent.StepFinished(step.index(), true, result.summary()));
+            run.completed.add(new CompletedStep(step.index(), step.goal(), result.summary()));
+            run.narrative.append("### 第 ").append(step.index()).append(" 步：")
+                    .append(step.goal()).append("\n\n").append(result.summary()).append("\n\n");
+            run.index++;
+        }
+        return null;
+    }
+
+    /**
+     * 跑<b>一步</b>：发 StepStarted → 用一个"非终点"的内层循环跑工具循环 → 收集这一步的产出。
+     *
+     * <p>内层循环的失败判定是<b>"有没有产出"</b>，而不是"调了几次模型"：
+     * 模型可能正常收尾但什么都不说（工具失败后常见的形态），那一步等于没做成。
+     */
+    private StepResult runStep(WorkflowRun run, PlanStep step, LoopState seed, String conversationId,
+                               UserContext user, long startNanos, FluxSink<PipelineEvent> sink) {
+        sink.next(new PipelineEvent.StepStarted(step.index()));
+        int remaining = Math.max(1, seed.maxSteps - run.used);
+        List<Message> stepMessages = new ArrayList<>(2);
+        stepMessages.add(new SystemMessage(systemMessageOf(seed)));
+        stepMessages.add(new UserMessage(stepInstruction(run, step)));
+        LoopState stepState = new LoopState(stepMessages, null, remaining, false, false);
+        try {
+            loop(stepState, conversationId, user, startNanos)
+                    .doOnNext(sink::next)
+                    .blockLast();
+        } catch (RuntimeException e) {
+            log.warn("[{}] 第 {} 步执行异常：{}", LOG_TAG, step.index(), e.toString());
+            return new StepResult(false, e.toString());
+        }
+        run.used += stepState.steps;
+        String text = stepState.text.toString().trim();
+        if (text.isEmpty()) {
+            return new StepResult(false, "这一步没有产出任何内容（模型未给出该步的结果）");
+        }
+        log.info("[{}] 第 {} 步完成：{} 字（累计模型调用 {} 次）",
+                LOG_TAG, step.index(), text.length(), run.used);
+        return new StepResult(true, text);
+    }
+
+    /** 该步的指令：总目标 + 第 k/N 步 + 完成判据 + 已完成的部分。 */
+    private String stepInstruction(WorkflowRun run, PlanStep step) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("总目标：").append(run.plan.goal()).append('\n');
+        sb.append("当前第 ").append(step.index()).append('/').append(run.plan.size())
+                .append(" 步：").append(step.goal()).append('\n');
+        if (!step.doneWhen().isEmpty()) {
+            sb.append("完成判据：").append(step.doneWhen()).append('\n');
+        }
+        if (!run.completed.isEmpty()) {
+            sb.append("已完成的部分：\n");
+            for (CompletedStep done : run.completed) {
+                sb.append("- 第 ").append(done.index()).append(" 步（").append(done.goal())
+                        .append("）：").append(brief(done.summary())).append('\n');
+            }
+        }
+        sb.append("只做当前这一步，做完直接给出这一步的结果，不要提前做后面的步骤。");
+        return sb.toString();
+    }
+
+    /** 汇总：把每步结论拼成最终回答；失败时<b>写清在哪一步停下</b>。 */
+    private void finishWorkflow(WorkflowRun run, LoopState seed, String conversationId,
+                                long startNanos, String failure, FluxSink<PipelineEvent> sink) {
+        StringBuilder reply = new StringBuilder(run.narrative);
+        if (failure != null) {
+            reply.append("### 未完成\n\n").append(failure).append("\n\n已完成的步骤：\n");
+            if (run.completed.isEmpty()) {
+                reply.append("- 无\n");
+            } else {
+                for (CompletedStep done : run.completed) {
+                    reply.append("- 第 ").append(done.index()).append(" 步：")
+                            .append(done.goal()).append('\n');
+                }
+            }
+        }
+        String text = reply.toString().trim();
+        if (text.isEmpty()) {
+            text = "（工作流没有产出任何内容）";
+        }
+        try {
+            writeBackTurn(conversationId, seed.userMessage, text);
+        } catch (RuntimeException e) {
+            // 写回失败不影响本次回答（失败分级本就在 LayeredConversationMemory 里）
+            log.warn("[{}] 工作流写回记忆失败（不影响回答）：{}", LOG_TAG, e.toString());
+        }
+        sink.next(buildFinal(new StringBuilder(text), new StringBuilder(),
+                failure == null ? "stop" : "stepFailed", null, startNanos));
+    }
+
+    /** 工作流的写回：与普通回合同一口径 —— 只写"用户问 + 最终答"，不写工具活动。 */
+    private void writeBackTurn(String conversationId, Message userMessage, String replyText) {
+        List<Message> turn = new ArrayList<>(2);
+        if (userMessage != null) {
+            turn.add(userMessage);
+        }
+        turn.add(new AssistantMessage(replyText));
+        memory.append(conversationId, turn);
+    }
+
+    /**
+     * 规划调用（<b>同步</b>，由调用方保证在 boundedElastic 上）。
+     *
+     * <p>★ 刻意<b>不带工具</b>：规划是"想清楚要做什么"，不该在执行前就调工具。
+     * 因此直接 {@code new Prompt(messages)}，让模型使用配置里的那份 options
+     * （省掉一次"克隆 options 再挂工具"的复杂度，也避免规划阶段产生副作用）。
+     */
+    private String draftPlanText(Message userMessage, String previousGoal, String failure) {
+        StringBuilder ask = new StringBuilder("用户的问题：\n")
+                .append(userMessage == null || userMessage.getText() == null
+                        ? "" : userMessage.getText());
+        if (failure != null) {
+            ask.append("\n\n上一次计划的执行情况：\n总目标：")
+                    .append(previousGoal == null ? "" : previousGoal)
+                    .append("\n失败原因：").append(failure)
+                    .append("\n请重新规划：已完成的部分不要再安排，只安排剩下的步骤。");
+        }
+        ChatResponse response = chatModel.call(new Prompt(List.of(
+                new SystemMessage(PLANNING_SYSTEM),
+                new UserMessage(ask.toString()))));
+        String text = response == null || response.getResult() == null
+                ? null : response.getResult().getOutput().getText();
+        if (text == null || text.isBlank()) {
+            throw new InvalidPlanException("规划调用返回了空内容");
+        }
+        return text;
+    }
+
+    /** 从拼装好的消息里取回系统提示词 —— 工作流的每一步都要带着它，否则模型会忘掉人设与规则。 */
+    private String systemMessageOf(LoopState state) {
+        for (Message message : state.messages) {
+            if (message instanceof SystemMessage system) {
+                return system.getText() == null ? "" : system.getText();
+            }
+        }
+        return "";
+    }
+
+    private static String brief(String text) {
+        String oneLine = text == null ? "" : text.replaceAll("\\s+", " ").trim();
+        return oneLine.length() <= 120 ? oneLine : oneLine.substring(0, 120) + "…";
+    }
+
+    /** 一次工作流运行的可变状态：记的是"计划进度"，不是"消息累积"（后者在 LoopState 里）。 */
+    private static final class WorkflowRun {
+        private WorkflowPlan plan;
+        private final List<CompletedStep> completed = new ArrayList<>();
+        private final StringBuilder narrative = new StringBuilder();
+        private int index = 1;
+        private int used;
+
+        private WorkflowRun(WorkflowPlan plan) {
+            this.plan = plan;
+        }
+
+        /** 重规划后从新计划的第 1 步开始（已完成的步骤作为上下文写进每一步的指令）。 */
+        private void restart(WorkflowPlan next) {
+            this.plan = next;
+            this.index = 1;
+        }
+    }
+
+    private record CompletedStep(int index, String goal, String summary) {
+    }
+
+    private record StepResult(boolean ok, String summary) {
     }
 
     // ========================================================================

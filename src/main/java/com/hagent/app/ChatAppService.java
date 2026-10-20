@@ -274,6 +274,28 @@ public class ChatAppService {
         }
         // ★ 检索命中片段外发 —— 前端据此显示"参考了哪几篇"。
         //   它是结构化数据（来源 / 相关度都在里面），不需要前端从工具文本里解析。
+        // ★ 阶段 13：工作流的编排骨架（计划 / 规划降级 / 步结束）。
+        //   与 STEP 一样属于"我们的骨架"，不是模型产出 —— 但用一个独立事件名，
+        //   这样前端"不渲染计划面板"时不需要写任何分支（忽略未知事件名即可）。
+        if (event instanceof PipelineEvent.PlanCreated created) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.WORKFLOW, planData(created)));
+            return;
+        }
+        if (event instanceof PipelineEvent.PlanSkipped skipped) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent, StreamEventType.WORKFLOW,
+                    java.util.Map.of("type", "plan_skipped", "reason", skipped.reason())));
+            return;
+        }
+        if (event instanceof PipelineEvent.StepFinished finished) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent, StreamEventType.WORKFLOW,
+                    java.util.Map.of(
+                            "type", "step_finished",
+                            "step", finished.step(),
+                            "ok", finished.ok(),
+                            "summary", finished.summary())));
+            return;
+        }
         if (event instanceof PipelineEvent.Retrieved retrieved) {
             sendNamedEvent(emitter, frame(emitter, seq, retrySent,
                     StreamEventType.RETRIEVED, retrievedData(retrieved)));
@@ -292,6 +314,29 @@ public class ChatAppService {
     private java.util.Map<String, Object> stepData(PipelineEvent.StepStarted step) {
         java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
         data.put("step", step.step());
+        return data;
+    }
+
+    /**
+     * 「计划」→ SSE 数据：{@code {"type":"plan","goal":"…","steps":[…]}}。
+     *
+     * <p>字段名用 {@code goal} / {@code steps} / {@code doneWhen}，与
+     * {@code WorkflowPlan} 的 record 组件同名 —— 这里不用缩写，因为它是
+     * <b>要给人看的计划</b>，而不是内部枚举。
+     */
+    private java.util.Map<String, Object> planData(PipelineEvent.PlanCreated created) {
+        java.util.List<java.util.Map<String, Object>> steps = new java.util.ArrayList<>();
+        for (var step : created.plan().steps()) {
+            java.util.Map<String, Object> one = new java.util.LinkedHashMap<>();
+            one.put("index", step.index());
+            one.put("goal", step.goal());
+            one.put("doneWhen", step.doneWhen());
+            steps.add(one);
+        }
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("type", "plan");
+        data.put("goal", created.plan().goal());
+        data.put("steps", steps);
         return data;
     }
 

@@ -4202,6 +4202,90 @@ com.hagent.memory.longterm.LongTermMemoryStore                  ← 退化为纯
 
 ---
 
+## 阶段 13：工作流模式（真实编排）
+
+> **状态**：本阶段完成。**不是新能力开关** —— `workflow` 早就能跑完整的多步工具循环
+> （与 `chat` 同一条 `loop()`，只是预算 5 万 / 20 步不同）。本阶段补的是
+> **chat 完全没有的东西**：显式计划、步与目标的对应、失败重规划。
+
+### 13.1 四条决策（2026-10-21 本人拍板）
+
+| # | 决策 | 落地口径 |
+|---|---|---|
+| 1 | **先拆解、再逐步执行** | 一次规划调用产出 1..8 步（`WorkflowPlan.MAX_STEPS=8`：20 次调用 ÷ 每步约 2 次） |
+| 2 | **计划可见、不停下等确认** | 计划以 `workflow` SSE 事件推出，执行立即开始；不做挂起/恢复 |
+| 3 | **两次重试就放弃** | ①同步重试同一步 → ②重规划一次 → 仍失败则停下，并在回答里写明"第 k 步失败、原因、已完成哪几步" |
+| 4 | **不落库** | 计划与每步结论随最终回答写进会话记录；不建表 |
+
+**规划失败**（模型输出不是合法 JSON）→ **退回普通循环并推 `plan_skipped` 事件**。
+理由：配置写错该失败，**模型输出写歪不该让用户拿不到任何回答**；但必须可见，
+否则用户会以为工作流跑过了。
+
+**刻意不选**：失败时"跳过该步" —— 跳过会让"少做了一件事"看起来像"做完了"。
+
+### 13.2 数据流向
+
+```mermaid
+flowchart TD
+    A["run(message, mode)"] --> B{"mode == WORKFLOW ?"}
+    B -- 否 --> C["loop()（chat 路径：一个字没改）"]
+    B -- 是 --> D["规划调用（同步、无工具）<br/>→ 文本 → WorkflowPlanParser"]
+    D -- 解析失败 --> E["PlanSkipped 事件<br/>退回 loop()"]
+    D -- 成功 --> F["PlanCreated 事件<br/>WorkflowRun(plan)"]
+    F --> G["runPlan：逐步执行"]
+    G --> H["runStep：StepStarted(k)<br/>内层循环（terminal=false，不发 Final/不写回）"]
+    H -- 无产出/异常 --> I["同步重试一次"]
+    I -- 仍失败 --> J["重规划一次（带上已完成 + 失败原因）"]
+    J -- 仍失败 --> K["放弃：Final 写明第 k 步失败"]
+    H -- 成功 --> L["StepFinished(k, ok, 结论)"]
+    L --> G
+    G -- 全部完成 --> M["汇总 narrative → Final + 写回一次"]
+```
+
+```mermaid
+mindmap
+  root(("workflow 编排"))
+    ("规划")
+      ("PLANNING_SYSTEM 提示词")
+      ("WorkflowPlanParser（纯函数）")
+        ("宽进：剥围栏/寒暄、忽略未知字段")
+        ("严出：1..8 步、编号连续、goal 非空")
+    ("执行")
+      ("WorkflowRun（计划进度）")
+        ("index / used / completed / narrative")
+      ("runStep：terminal=false 的内层循环")
+        ("复用 loop()，不重复实现工具循环")
+    ("失败")
+      ("同步重试 1 次")
+      ("重规划 1 次")
+      ("放弃并指认步骤")
+    ("事件")
+      ("PlanCreated / PlanSkipped / StepFinished")
+      ("StepStarted(k) 的步号 = 计划步号")
+```
+
+### 13.3 落点
+
+| 文件 | 作用 |
+|---|---|
+| `workflow/PlanStep`、`WorkflowPlan`、`InvalidPlanException`、`WorkflowPlanParser` | 纯领域：计划的形状、校验、解析（零 Spring） |
+| `app.AgentPipeline` | `run()` 唯一分叉点 + `runWorkflow/runStep/runPlan/executeWithRetry/finishWorkflow`；`LoopState` 加 `terminal` / `stepEvents` 两个开关 |
+| `agent.PipelineEvent` | 新增 `PlanCreated` / `PlanSkipped` / `StepFinished` |
+| `stream.StreamEventType` | 新增 `WORKFLOW`（一个事件名，`type` 字段区分三种载荷） |
+| `app.ChatAppService` | 把三种骨架事件翻成 `workflow` SSE 帧 |
+
+★ **为什么编排放在 `AgentPipeline` 而不是新建一个 `WorkflowRunner`**：AgentPipeline 的构造器
+有 10 个参数、**测试里有 15 处直接 new 它**；为一次分派再加一个协作者会让那 15 处全部改一遍，
+而收益只是"类小一点"。审计建议的"拆 5 个协作者"本就已明确拒绝 —— 这里保持一致。
+
+### 13.4 本阶段没做
+
+- **前端计划面板**：事件已到浏览器，前端目前不渲染（未知事件名被忽略）。后端口径已完成，
+  渲染是纯前端工作，单列。
+- 断线恢复 / 进度落库（决策 4）、并行步、交互式确认（决策 2）。
+
+---
+
 ## 待推进
 
 - ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`282 用例全绿`）
