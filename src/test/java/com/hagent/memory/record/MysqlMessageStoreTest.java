@@ -43,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>★ 每个用例用独立会话 ID，结束即清理：本类连的是<b>真实</b>库。
  */
 @SpringBootTest(properties = "hagent.memory.chat.circuit-break-seconds=0")
-class MysqlConversationRecordStoreTest {
+class MysqlMessageStoreTest {
 
     /** ★ 业务主库，必须按名取 —— 见 BusinessDataSourceConfig 的类注释。 */
     @Autowired
@@ -51,7 +51,7 @@ class MysqlConversationRecordStoreTest {
     private DataSource businessDataSource;
 
     @Autowired
-    private ConversationRecordStore recordStore;
+    private MessageStore recordStore;
 
     private JdbcTemplate mysql;
     private String conversationId;

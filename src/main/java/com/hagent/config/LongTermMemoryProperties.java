@@ -1,5 +1,7 @@
 package com.hagent.config;
 
+import com.hagent.memory.longterm.LongTermMemorySettings;
+
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.beans.factory.InitializingBean;
@@ -36,11 +38,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * {@code com.hagent.memory.longterm}（"它讲记忆，就跟记忆走"）——
  * 那正是踩坑 #25 的同一种错：**判据看的是"它是什么种类"，不是"它讲什么业务"**。
  * 现已挪回，并由 {@code PackagePlacementTest} 守着。
+ *
+ * <p>★ 阶段 12：{@code memory.longterm} 不能依赖 {@code config}，所以实现需要的四个值
+ * 由领域自己声明成端口 {@link LongTermMemorySettings}，本类去实现它 ——
+ * 方法全由 {@code @Getter} 生成，这里不新增任何方法。
  */
 @Getter
 @Setter
 @ConfigurationProperties(prefix = "hagent.memory.long-term")
-public class LongTermMemoryProperties implements InitializingBean {
+public class LongTermMemoryProperties implements InitializingBean, LongTermMemorySettings {
 
     /** 记忆根目录。实际路径是 {@code {dir}/{userId}/}。 */
     private String dir = "tmp/agent-memory";
@@ -49,7 +55,7 @@ public class LongTermMemoryProperties implements InitializingBean {
      * 注入 prompt 的<b>索引块</b>最大字符数（默认 1000）。
      *
      * <p><b>为什么必须有上限</b>：索引是<b>每一轮</b>都注入 system 的，
-     * 它直接吃掉会话历史的预算（{@code conversation-max-tokens=5000}）。
+     * 它直接吃掉会话历史的预算（{@code chat-max-tokens=5000}）。
      * 1000 字 ≈ 15%–20%，再大就会把"最近几轮对话"挤掉 ——
      * 而那不是省钱问题，是<b>模型忘掉上下文</b>。
      *

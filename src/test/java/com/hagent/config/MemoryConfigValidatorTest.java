@@ -1,4 +1,4 @@
-package com.hagent.memory;
+package com.hagent.config;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

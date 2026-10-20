@@ -1,5 +1,7 @@
 package com.hagent.app;
 
+import com.hagent.common.Fingerprints;
+
 import com.hagent.config.ChunkingProperties;
 import com.hagent.config.IngestProperties;
 import com.hagent.config.VectorStoreProperties;
@@ -7,7 +9,6 @@ import com.hagent.document.AccessLevel;
 import com.hagent.document.Chunk;
 import com.hagent.document.DocumentKind;
 import com.hagent.document.DocumentMetadata;
-import com.hagent.document.HashingSupport;
 import com.hagent.document.IngestOutcome;
 import com.hagent.document.IngestResult;
 import com.hagent.document.LoadedDocument;
@@ -133,7 +134,7 @@ public class DocumentIngestService {
 
         LoadedDocument loaded;
         try {
-            loaded = sourceLoader.load(root, source, ingestProperties.getDefaultKind());
+            loaded = sourceLoader.load(root, source, ingestProperties.getDefaultKind(), ingestProperties.getExtensions());
         } catch (IOException e) {
             throw new AgentException(ErrorCode.STORAGE_UNAVAILABLE,
                     "读取知识库文档失败：" + source + "（" + e.getMessage() + "）", e);
@@ -282,7 +283,7 @@ public class DocumentIngestService {
     private List<Document> toDocuments(LoadedDocument loaded, List<Chunk> chunks, String docHash) {
         List<Document> documents = new ArrayList<>(chunks.size());
         for (Chunk chunk : chunks) {
-            String contentHash = HashingSupport.sha256(chunk.text());
+            String contentHash = Fingerprints.content(chunk.text());
             DocumentMetadata metadata = new DocumentMetadata(
                     loaded.source(),
                     loaded.title(),
@@ -326,7 +327,7 @@ public class DocumentIngestService {
         if (loaded.validTo() != null) {
             sb.append("validTo:").append(loaded.validTo()).append('\n');
         }
-        return HashingSupport.sha256(sb.toString());
+        return Fingerprints.content(sb.toString());
     }
 
     // ========================================================================

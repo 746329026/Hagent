@@ -103,7 +103,7 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
      * 启动自检：表必须存在、读审计要用的索引必须在。
      *
      * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 ——
-     * 与 {@code MysqlConversationRecordStore#verifySchemaOrThrow}、
+     * 与 {@code MysqlMessageStore#verifySchemaOrThrow}、
      * {@code MemoryConfigValidator} 是同一立场（决策 8：不静默降级）。
      *
      * <p><b>为什么不校验字符集</b>：这张表存的是工具名、参数与结果文本，

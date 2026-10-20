@@ -1,4 +1,4 @@
-package com.hagent.memory.session;
+package com.hagent.memory.catalog;
 
 import com.hagent.memory.MemoryMode;
 
@@ -28,7 +28,7 @@ import java.util.Optional;
  *
  * <h2>★ 为什么 {@code mode} 必须落库（本类最重要的一个理由）</h2>
  *
- * <p>阶段 10 之前，模式由 {@code ChatController} <b>硬编码</b>传 {@code CONVERSATION}。
+ * <p>阶段 10 之前，模式由 {@code ChatController} <b>硬编码</b>传 {@code MemoryMode.CHAT}。
  * 阶段 10 让客户端在请求里声明模式，于是出现一个新的风险：
  * <pre>
  *   若模式只由【每次请求】现传 → 客户端可以每轮换一次模式
@@ -51,11 +51,11 @@ import java.util.Optional;
  * <h2>★ 实现与记录层共用同一个开关</h2>
  *
  * <p>{@code hagent.memory.chat.record-store=mysql|file} 同时决定
- * {@code ConversationRecordStore} 与 {@code ConversationCatalog} 的实现。
+ * {@code MessageStore} 与 {@code SessionStore} 的实现。
  * 刻意<b>不给它俩各一个开关</b>：消息在 MySQL、目录在文件里的组合没有任何意义，
  * 而两个开关可以配出那种组合，且不会有任何报错（只表现为"侧栏永远是空的"）。
  */
-public interface ConversationCatalog {
+public interface SessionStore {
 
     /**
      * 标题列宽 —— 与 {@code chat_conversation.sql} 的 {@code VARCHAR(128)} 对齐。
@@ -163,7 +163,7 @@ public interface ConversationCatalog {
     /**
      * 删除会话目录项。
      *
-     * <p>★ 它与 {@code ConversationRecordStore#delete} 是<b>两件事</b>，
+     * <p>★ 它与 {@code MessageStore#delete} 是<b>两件事</b>，
      * 需要由调用方<b>一起做</b>：删消息不删目录 = 侧栏留下一个打不开的空壳；
      * 删目录不删消息 = 数据还在库里，违反"用户要求删除自己的数据"。
      * 本接口不提供"连带删除"，因为跨两个存储的原子性在这里无法保证

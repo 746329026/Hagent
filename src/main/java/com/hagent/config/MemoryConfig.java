@@ -6,12 +6,12 @@ import com.hagent.memory.LayeredConversationMemory;
 import com.hagent.memory.context.ConversationContextCache;
 import com.hagent.memory.context.NoOpContextCache;
 import com.hagent.memory.context.RedisConversationContextCache;
-import com.hagent.memory.record.ConversationRecordStore;
-import com.hagent.memory.record.FileConversationRecordStore;
-import com.hagent.memory.record.MysqlConversationRecordStore;
-import com.hagent.memory.session.ConversationCatalog;
-import com.hagent.memory.session.FileConversationCatalog;
-import com.hagent.memory.session.MysqlConversationCatalog;
+import com.hagent.memory.record.MessageStore;
+import com.hagent.memory.record.FileMessageStore;
+import com.hagent.memory.record.MysqlMessageStore;
+import com.hagent.memory.catalog.SessionStore;
+import com.hagent.memory.catalog.FileSessionStore;
+import com.hagent.memory.catalog.MysqlSessionStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -33,18 +33,18 @@ import javax.sql.DataSource;
  * <pre>
  *   ConversationMemory（{@code AgentPipeline} 依赖的抽象）
  *        └── LayeredConversationMemory（门面：组合 + 时序 + 失败分级 + 熔断）
- *                ├── ConversationRecordStore   ← 记录层：mysql | file
+ *                ├── MessageStore   ← 记录层：mysql | file
  *                └── ConversationContextCache  ← 上下文层：redis | none
  * </pre>
  *
  * <p><b>★ 阶段 10 多了一个不进这条链的协作者</b>：
  * <pre>
- *   ConversationCatalog（会话目录：标题 / 模式 / 时间，一会话一行）
+ *   SessionStore（会话目录：标题 / 模式 / 时间，一会话一行）
  *        └── mysql | file   ← 与记录层【共用】record-store 这一个开关
  * </pre>
  * 它不进 {@code LayeredConversationMemory} 是因为它<b>不参与"给模型看什么"</b> ——
  * 模型不需要知道自己的会话叫什么名字。它的消费者是<b>前端侧栏</b>，
- * 以及"这个会话是什么模式"这条<b>需要被记住的事实</b>（见 {@code ConversationCatalog} 类注释）。
+ * 以及"这个会话是什么模式"这条<b>需要被记住的事实</b>（见 {@code SessionStore} 类注释）。
  *
  * <p>所以本类里有<b>两组</b>条件装配，各由自己的开关决定 ——
  * 而不是阶段 5 那种"三者选其一"。见 {@link MemoryProperties} 的类注释。
@@ -79,12 +79,6 @@ import javax.sql.DataSource;
 @EnableConfigurationProperties(MemoryProperties.class)
 public class MemoryConfig {
 
-    /** 记录层支持的实现。新增时同步 {@link MemoryProperties#VALID_RECORD_STORES}。 */
-    public static final java.util.Set<String> SUPPORTED_RECORD_STORES = java.util.Set.of("mysql", "file");
-
-    /** 上下文层支持的实现。新增时同步 {@link MemoryProperties#VALID_CONTEXT_CACHES}。 */
-    public static final java.util.Set<String> SUPPORTED_CONTEXT_CACHES = java.util.Set.of("redis", "none");
-
     // ========================================================================
     // 记录层（权威·完整·永久）
     // ========================================================================
@@ -109,21 +103,21 @@ public class MemoryConfig {
     @Bean
     @ConditionalOnProperty(name = "hagent.memory.chat.record-store",
             havingValue = "mysql", matchIfMissing = true)
-    public ConversationRecordStore mysqlConversationRecordStore(
+    public MessageStore mysqlMessageStore(
             @Qualifier("dataSource") DataSource dataSource,
             PlatformTransactionManager transactionManager,
             MemoryProperties properties) {
         log.info("[记忆] 记录层 = mysql（对话记录的权威存储：完整、永久、可审计）");
-        return new MysqlConversationRecordStore(dataSource, transactionManager, properties);
+        return new MysqlMessageStore(dataSource, transactionManager, properties);
     }
 
     /** 记录层 file 实现：{@code record-store=file} 时创建（零基础设施兜底）。 */
     @Bean
     @ConditionalOnProperty(name = "hagent.memory.chat.record-store", havingValue = "file")
-    public ConversationRecordStore fileConversationRecordStore(MemoryProperties properties,
+    public MessageStore fileMessageStore(MemoryProperties properties,
                                                                ObjectMapper objectMapper) {
         log.info("[记忆] 记录层 = file（零基础设施兜底；★ 它是【记录层】，不是缓存）");
-        return new FileConversationRecordStore(properties, objectMapper);
+        return new FileMessageStore(properties, objectMapper);
     }
 
     // ========================================================================
@@ -140,18 +134,18 @@ public class MemoryConfig {
     @Bean
     @ConditionalOnProperty(name = "hagent.memory.chat.record-store",
             havingValue = "mysql", matchIfMissing = true)
-    public ConversationCatalog mysqlConversationCatalog(
+    public SessionStore mysqlSessionStore(
             @Qualifier("dataSource") DataSource dataSource,
             MemoryProperties properties) {
-        return new MysqlConversationCatalog(dataSource, properties);
+        return new MysqlSessionStore(dataSource, properties);
     }
 
     /** 会话目录的 file 实现（与记录层同为 {@code record-store=file}）。 */
     @Bean
     @ConditionalOnProperty(name = "hagent.memory.chat.record-store", havingValue = "file")
-    public ConversationCatalog fileConversationCatalog(MemoryProperties properties,
+    public SessionStore fileSessionStore(MemoryProperties properties,
                                                        ObjectMapper objectMapper) {
-        return new FileConversationCatalog(properties, objectMapper);
+        return new FileSessionStore(properties, objectMapper);
     }
 
     // ========================================================================
@@ -186,10 +180,10 @@ public class MemoryConfig {
      * "缺一层"这件事在启动期就会暴露，不会等到第一次对话。
      */
     @Bean
-    public ConversationMemory conversationMemory(ConversationRecordStore recordStore,
+    public ConversationMemory conversationMemory(MessageStore messageStore,
                                                  ConversationContextCache contextCache,
                                                  MemoryProperties properties) {
-        return new LayeredConversationMemory(recordStore, contextCache,
+        return new LayeredConversationMemory(messageStore, contextCache,
                 properties.getCircuitBreakSeconds());
     }
 }

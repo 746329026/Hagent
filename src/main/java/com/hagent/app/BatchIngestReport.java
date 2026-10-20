@@ -53,8 +53,9 @@ public record BatchIngestReport(List<IngestResult> results,
 
     /** 本次实际写入的块总数。 */
     public int writtenChunkCount() {
-        return results.stream().filter(IngestResult::written)
-                .mapToInt(IngestResult::chunkCount).sum();
+        // 不需要 filter(IngestResult::written)：被跳过 / 正文为空的文档 chunkCount 本来就是 0，
+        // 而那一层 filter 恰恰是"written 语义含糊"被用来兜的地方。
+        return results.stream().mapToInt(IngestResult::chunkCount).sum();
     }
 
     /** 是否有任何文档失败。 */

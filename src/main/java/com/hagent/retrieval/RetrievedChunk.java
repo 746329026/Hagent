@@ -32,7 +32,10 @@ import java.util.Map;
  * @param title      文档标题，出处的兜底（入库时保证非空）
  * @param section    章节标题；可能为空字符串
  * @param chunkIndex 块在文档内的序号，从 0 开始
- * @param level      密级 —— 用于日志与自检（过滤已在 SQL 侧完成，这里仅作核对）
+ * @param level      密级 —— <b>过滤已在 SQL 侧完成</b>，这里的值只用于核对/断言。
+ *                   ★ 阶段 12 复核：它在<b>主代码</b>里没有读者，但有真实消费者 ——
+ *                   权限集成测试靠它证明"SQL 过滤真的按密级生效"（安全性质，不是展示）。
+ *                   所以<b>保留</b>，不当"零读者字段"删掉。
  * @param similarity 余弦相似度（<b>越大越相关</b>，实测值域约 0.51~0.82）
  * @param band       由 {@link #similarity} 换算出的相关度档位
  */
@@ -123,17 +126,17 @@ public record RetrievedChunk(
         return 0;
     }
 
-    /** 密级解析：取不到或取值非法时给保守值 INTERNAL（不抛异常，理由见类注释）。 */
+    /**
+     * 密级解析 —— <b>规则只有一处</b>（{@link AccessLevel#tryParse}），这里只决定策略。
+     *
+     * <p>策略：<b>宽松</b>。读侧不该因为一条脏记录让整轮对话失败，所以取不到/非法时落到
+     * {@link AccessLevel#DEFAULT}（= INTERNAL，偏严的一侧）。
+     *
+     * <p>★ 阶段 12 第 2 步：这里原来自带一份"字符串 → 枚举"的循环，与 {@code AccessLevel.parse}
+     * 平行维护；两处一旦漂移，就表现为"同一个文档在入库与检索时被判成不同密级"，且不报错。
+     */
     private static AccessLevel level(Map<String, Object> metadata) {
-        String raw = text(metadata, DocumentMetadata.FIELD_LEVEL, "");
-        if (raw.isBlank()) {
-            return AccessLevel.DEFAULT;
-        }
-        for (AccessLevel candidate : AccessLevel.values()) {
-            if (candidate.name().equalsIgnoreCase(raw.trim())) {
-                return candidate;
-            }
-        }
-        return AccessLevel.DEFAULT;
+        return AccessLevel.tryParse(text(metadata, DocumentMetadata.FIELD_LEVEL, ""))
+                .orElse(AccessLevel.DEFAULT);
     }
 }

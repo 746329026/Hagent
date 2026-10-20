@@ -1,7 +1,6 @@
 package com.hagent.memory.longterm;
 
 import com.hagent.common.Texts;
-import com.hagent.config.LongTermMemoryProperties;
 import com.hagent.document.AccessLevel;
 import com.hagent.security.UserContext;
 import lombok.extern.slf4j.Slf4j;
@@ -42,7 +41,7 @@ import java.util.stream.Stream;
  *   <li>{@code ../../application.yml} 这类标题就是一次<b>目录穿越</b>写入；</li>
  *   <li>中文/空格/引号在 Windows 上还有一批不可见字符要处理。</li>
  * </ul>
- * 用 {@code sha256(title)} 的前 8 位十六进制当文件名，这两类问题<b>不是被校验挡住，
+ * 用 {@code sha256Hex(title)} 的前 8 位十六进制当文件名，这两类问题<b>不是被校验挡住，
  * 而是根本构造不出来</b>（结果只可能是 {@code [0-9a-f]}）。
  *
  * <p>★ 顺带的好处：同名 → 同哈希 → <b>同一个文件</b> ⇒ upsert 天然成立，
@@ -61,7 +60,7 @@ import java.util.stream.Stream;
  * <h2>★ 并发</h2>
  *
  * <p>单 JVM 内用一把锁串行化<b>写</b>（读不加锁：文件是原子替换的，读到的要么旧要么新）。
- * 与 {@code FileConversationRecordStore} 同一立场 —— 本实现是"零基础设施可用"的兜底，
+ * 与 {@code FileMessageStore} 同一立场 —— 本实现是"零基础设施可用"的兜底，
  * 不是分布式存储。
  */
 @Slf4j
@@ -85,21 +84,21 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
     private static final Pattern SAFE_SEGMENT = Pattern.compile("[A-Za-z0-9._-]{1,64}");
 
     private final Path rootDir;
-    private final LongTermMemoryProperties properties;
+    private final LongTermMemorySettings settings;
 
     /** 写操作的锁（见类注释：读不加锁）。 */
     private final Object lock = new Object();
 
-    public FileLongTermMemoryStore(LongTermMemoryProperties properties) {
-        this.properties = properties;
-        this.rootDir = Path.of(properties.getDir()).toAbsolutePath().normalize();
+    public FileLongTermMemoryStore(LongTermMemorySettings settings) {
+        this.settings = settings;
+        this.rootDir = Path.of(settings.getDir()).toAbsolutePath().normalize();
         try {
             Files.createDirectories(rootDir);
         } catch (IOException e) {
             throw new UncheckedIOException("无法创建长期记忆目录：" + rootDir, e);
         }
         log.info("[长期记忆] 根目录={}  索引上限={} 字  单条正文上限={} 字",
-                rootDir, properties.getIndexMaxChars(), properties.getContentMaxChars());
+                rootDir, settings.getIndexMaxChars(), settings.getContentMaxChars());
     }
 
     // ========================================================================
@@ -130,7 +129,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
             return "";
         }
         String digest = renderForPrompt(visible);
-        if (digest.length() <= properties.getIndexMaxChars()) {
+        if (digest.length() <= settings.getIndexMaxChars()) {
             return digest;
         }
         // ★ 走到这里说明"上限被调小过"，而历史条目还按老上限存的。
@@ -140,7 +139,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         for (MemoryEntry entry : visible) {
             List<MemoryEntry> candidate = new ArrayList<>(kept);
             candidate.add(entry);
-            if (renderForPrompt(candidate).length() > properties.getIndexMaxChars()) {
+            if (renderForPrompt(candidate).length() > settings.getIndexMaxChars()) {
                 break;
             }
             kept.add(entry);
@@ -148,7 +147,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         log.warn("[长期记忆] 索引超出上限 {} 字（实际 {} 字，可见 {} 条），本次只注入前 {} 条 —— "
                         + "【怎么办】调大 hagent.memory.long-term.index-max-chars，"
                         + "或让模型用 forgetMemory 清掉不再需要的条目",
-                properties.getIndexMaxChars(), digest.length(), visible.size(), kept.size());
+                settings.getIndexMaxChars(), digest.length(), visible.size(), kept.size());
         return renderForPrompt(kept);
     }
 
@@ -164,8 +163,8 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
             return SaveResult.FORBIDDEN;
         }
         String body = content == null ? "" : content.strip();
-        if (body.length() > properties.getContentMaxChars()) {
-            body = Texts.truncateByCodePoints(body, properties.getContentMaxChars(), "…");
+        if (body.length() > settings.getContentMaxChars()) {
+            body = Texts.truncateByCodePoints(body, settings.getContentMaxChars(), "…");
         }
 
         synchronized (lock) {
@@ -201,9 +200,9 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
                     .filter(e -> e.visibleTo(level))
                     .sorted(byUpdatedDesc())
                     .toList());
-            if (projectedDigest.length() > properties.getIndexMaxChars()) {
+            if (projectedDigest.length() > settings.getIndexMaxChars()) {
                 log.info("[长期记忆] 索引会超出上限（{} > {}），拒绝写入「{}」",
-                        projectedDigest.length(), properties.getIndexMaxChars(), clean);
+                        projectedDigest.length(), settings.getIndexMaxChars(), clean);
                 return SaveResult.INDEX_FULL;
             }
 
@@ -333,21 +332,15 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         return FILE_PREFIX + sha256Hex(title).substring(0, 8) + FILE_SUFFIX;
     }
 
+    /** 标题指纹 —— 复用 {@code common.Fingerprints}（协议第 13 条：不另写一份 MessageDigest）。 */
     private static String sha256Hex(String input) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (NoSuchAlgorithmException e) {
-            // SHA-256 是 JDK 必须支持的算法，走到这里说明 JDK 环境异常
-            throw new IllegalStateException("JVM 不支持 SHA-256", e);
-        }
+        return com.hagent.common.Fingerprints.identifier(input);
     }
 
     /** 标题的规范化：压成一行 + 截断。**唯一**的标题清洗点（读写都用它）。 */
     private String cleanTitle(String title) {
         return Texts.truncateByCodePoints(
-                Texts.singleLine(title), properties.getTitleMaxChars(), "…");
+                Texts.singleLine(title), settings.getTitleMaxChars(), "…");
     }
 
     private void ensureDirectory(Path dir) {
@@ -424,14 +417,13 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         }
     }
 
+    /** 策略：<b>WARN + 默认密级</b>。规则来自 {@link AccessLevel#tryParse}，这里只决定后果。 */
     private AccessLevel parseLevelOrWarn(String raw, Path file) {
-        try {
-            return AccessLevel.parse(raw);
-        } catch (IllegalArgumentException e) {
+        return AccessLevel.tryParse(raw).orElseGet(() -> {
             log.warn("[长期记忆] {} 的密级取值非法（{}），按默认密级 {} 处理",
                     file.getFileName(), raw, AccessLevel.DEFAULT);
             return AccessLevel.DEFAULT;
-        }
+        });
     }
 
     private Instant parseInstantOr(String raw, Instant fallback) {
@@ -464,7 +456,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
     /**
      * 原子写入：临时文件 → {@code ATOMIC_MOVE}。
      *
-     * <p>与 {@code FileConversationRecordStore} / {@code FileConversationCatalog} 同一做法：
+     * <p>与 {@code FileMessageStore} / {@code FileSessionStore} 同一做法：
      * 直接往目标文件写，写到一半进程被杀就留下<b>半截文件</b>，
      * 而半截的 frontmatter 会让这条记忆永久读不出来。
      *
@@ -472,28 +464,9 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
      * 换台机器读同一份记忆就是乱码，且不可逆。
      */
     private void writeAtomically(Path target, String content) {
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-        try {
-            Files.writeString(tmp, content, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE);
-            try {
-                Files.move(tmp, target,
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE);
-            } catch (IOException atomicFailed) {
-                log.warn("[长期记忆] ATOMIC_MOVE 不被支持，降级为普通替换（原子性无保障）：{}",
-                        atomicFailed.getMessage());
-                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException("写入记忆文件失败：" + target, e);
-        } finally {
-            try {
-                Files.deleteIfExists(tmp);
-            } catch (IOException ignored) {
-                // 临时文件清理失败不影响主流程
-            }
+        // ★ 阶段 12：三份原子写收口到 common.AtomicWrites（唯一实现）。
+        if (!com.hagent.common.AtomicWrites.writeString(target, content)) {
+            log.warn("[长期记忆] ATOMIC_MOVE 不被支持，已降级为普通替换（原子性无保障）：{}", target);
         }
     }
 }

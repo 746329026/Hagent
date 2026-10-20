@@ -22,7 +22,7 @@ import jakarta.validation.constraints.NotBlank;
  *                       所以服务端用<b>随机 UUID</b>（不可预测），而不是自增序号。
  * @param mode           记忆模式（阶段 10 新增，<b>可选</b>）：{@code chat}（默认）/ {@code workflow}。
  *                       <p><b>它决定什么</b>：本次对话愿意为历史付多少预算
- *                       （{@code conversation-max-*} 5k token vs {@code workflow-max-*} 50k token，
+ *                       （{@code chat-max-*} 5k token vs {@code workflow-max-*} 50k token，
  *                       差一个数量级）。所以它不是一个"风格开关"，是<b>成本开关</b>。
  *                       <p><b>为什么放在请求里</b>：只有 HTTP 层知道"这次属于哪种场景"。
  *                       但这个值<b>只在会话第一次创建时生效</b>，之后由会话目录记住

@@ -83,26 +83,6 @@ public class RetrievalProperties implements InitializingBean {
     /** 中相关：距离不超过此值（决策 5）。超过则归为低。 */
     private double mediumMaxDistance = 0.45;
 
-    /**
-     * 分档比较的容差 —— <b>为什么必须有它</b>。
-     *
-     * <p>{@code bandOf} 要算 {@code distance = 1.0 - similarity}，而这一步在浮点下
-     * <b>不精确</b>：
-     * <pre>
-     *   1.0 - 0.70 = 0.30000000000000004     ← 不是 0.30
-     * </pre>
-     * 于是"相似度 0.70、阈值 0.30"这个<b>恰好落在边界</b>的输入，
-     * 会因为 {@code 0.30000000000000004 <= 0.30} 为假而被判成【中】——
-     * 而按设计它应当是【高】。
-     *
-     * <p>这个偏差只有 {@code 1e-16}，但它的表现是"边界那一档偶尔判错"，
-     * <b>没有异常、没有日志</b>。所以显式给一个远大于浮点误差、
-     * 又远小于任何真实分数间距（实测分数间距在 0.01 量级）的容差。
-     *
-     * <p>这条是<b>评审时被单元测试抓出来的</b>（{@code RetrievalPropertiesTest}）——
-     * 真实检索永远不会恰好落在边界上，所以手工测试一辈子碰不到它。
-     */
-    private static final double BAND_EPSILON = 1e-9;
 
     // ========================================================================
     // 单位换算 —— 唯一允许出现"1 - x"的地方
@@ -119,25 +99,6 @@ public class RetrievalProperties implements InitializingBean {
         return 1.0 - maxDistance;
     }
 
-    /**
-     * 按<b>距离</b>把相似度分档。
-     *
-     * <p>边界取"不超过"（{@code <=}）而非"小于"：阈值本身恰好命中时算作更相关的一档。
-     * 这条选择必须写死在一个地方，否则"0.30 到底算高还是中"会随调用点变化。
-     *
-     * <p>比较带 {@link #BAND_EPSILON} 容差 —— 因为 {@code 1 - x} 在浮点下不精确，
-     * 详见该常量的注释。这一条不写就会"边界那一档偶尔判错"。
-     */
-    public RelevanceBand bandOf(double similarity) {
-        double distance = 1.0 - similarity;
-        if (distance <= highMaxDistance + BAND_EPSILON) {
-            return RelevanceBand.HIGH;
-        }
-        if (distance <= mediumMaxDistance + BAND_EPSILON) {
-            return RelevanceBand.MEDIUM;
-        }
-        return RelevanceBand.LOW;
-    }
 
     /**
      * 启动期校验 —— <b>配置写错就让应用起不来</b>，而不是运行时静默用错值。

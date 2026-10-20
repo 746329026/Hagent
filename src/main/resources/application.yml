@@ -216,15 +216,20 @@ hagent:
   probe:
     live-call: true
 
+  # ===== Agent 循环上限（阶段 12：从 memory.chat 搬来，并拆成按模式两档）=====
+  # 为什么搬家：步数上限是【agent 循环的终止条件】，不是"记忆预算"。
+  #   原来它挂在 hagent.memory.chat.max-steps 下（键说"记忆"、值管"循环"）。
+  # 为什么分两档：chat 与 workflow 的"合理步数"不是一个量级 ——
+  #   前者是"查两次资料 + 追问 + 汇总"，后者每一步的工具返回都可能是整篇文档。
+  #   用一个值必然二选一地错：取 10 会砍掉工作流的长任务，取 20 会让普通问答多绕 10 步的账单。
+  # ⚠️ 本次搬家的唯一行为变化：workflow 从 10 变成 20（此前那个 "20" 是没人读的孤儿键）。
   agent:
-    # Agent 循环最大步数，防止模型陷入死循环烧 token
-    max-steps: 20
-    executor:
-      core-pool-size: 4
-      max-pool-size: 16
-      queue-capacity: 100
-      thread-name-prefix: "hagent-agent-"
-      await-termination-seconds: 30
+    # chat 模式：一次对话里最多允许的模型调用步数。
+    # 正常出口是"模型不再请求工具"——但那是【由模型控制】的出口，模型绕圈时不会自己结束，
+    # 而每一次循环都是一次计费的模型调用。这里是唯一由我们控制的强制出口。
+    chat-max-steps: 10
+    # workflow 模式：多步循环，每步的工具返回都可能是一整篇文档，所以给大一倍。
+    workflow-max-steps: 20
 
   # 调用链日志（阶段 8 起前缀由 hagent.advisor.trace 改为 hagent.trace）。
   # 改名的理由：advisor 链已换成 AgentPipeline，"advisor"这个词在项目里不再存在 ——
@@ -290,24 +295,20 @@ hagent:
       #   0 = 关闭熔断（永远尝试），便于排查时对照。
       circuit-break-seconds: 30
 
-      # 会话模式预算：只约束【历史消息】，不含 system 提示词与本次问题。
+      # chat 模式预算：只约束【历史消息】，不含 system 提示词与本次问题。
       # 本次问题不参与预算，就从结构上杜绝了"截断把当前问题丢掉"的可能。
-      conversation-max-tokens: 5000
-      conversation-max-messages: 30
+      # ★ 键名里的 chat 指【工作模式】（与 workflow 并列），不是"会话数据"。
+      chat-max-tokens: 5000
+      chat-max-messages: 30
 
-      # 工作流 / Agent 模式预算：比会话大一个数量级。
+      # workflow 模式预算：比 chat 大一个数量级。
       # 原因：多步循环里每一轮的工具返回结果（可能是一整篇文档）都会成为下一轮输入。
       workflow-max-tokens: 50000
       workflow-max-messages: 200
 
-      # ★ 工具循环的步数上限（阶段 9 新增）。
-      # 工具循环的正常出口是"模型不再请求工具"——但那是【由模型控制】的出口。
-      # 模型若绕圈（反复请求同一个工具、或永远不停），循环不会自己结束，
-      # 而【每一次循环都是一次计费的模型调用】。这里是唯一由我们控制的强制出口。
-      # 与框架的 maxCallsPerTool / maxTotalToolCalls 是两层：
-      #   框架那层防"同一个工具被调太多次"，本层防"整轮步数太多"。
-      # 取 10：足够覆盖"查两次资料 + 追问一次 + 汇总"；再多通常意味着绕圈。
-      max-steps: 10
+      # ★ 工具循环的步数上限已搬到 hagent.agent.chat-max-steps / workflow-max-steps（阶段 12）。
+      # 搬家的理由：它管的是"循环跑几轮"，而这一段管的是"历史能有多长"（token / 条数）——
+      # 两者是不同轴的量。见 hagent.agent 那一节。
 
       # 记录层 file 实现：每会话一个 JSON 文件，原子写入（临时文件 + ATOMIC_MOVE）。
       # 它保留的意义是"零基础设施的兜底"与"人可读的成长记录"，不是生产主路径。
@@ -340,7 +341,7 @@ hagent:
       dir: "${user.dir}/tmp/agent-memory"
 
       # ★ 注入 prompt 的【索引块】最大字符数。索引是每轮都注入 system 的，
-      #   它直接吃会话历史预算（conversation-max-tokens=5000）。
+      #   它直接吃会话历史预算（chat-max-tokens=5000）。
       #   1000 字 ≈ 15%~20%，再大就会把"最近几轮对话"挤掉 —— 那不是省钱问题，是模型忘上下文。
       #   超限时【拒绝写新记忆】（让模型自己整理），而不是静默淘汰最旧的条目。
       index-max-chars: 1000

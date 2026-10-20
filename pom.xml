@@ -245,6 +245,20 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- 5.8.1 架构守卫（阶段 12 第 0 步）—— ArchUnit。
+             为什么需要它：手写 import 扫描【看不见】全限定名引用与常量内联，
+             更做不了"包级无环"的判断（见 docs/架构问题.md 复核结论第 7 条）。
+             为什么是这个制品、不是 archunit-junit5：
+               本项目 JUnit 是 6.0.3，而 archunit-junit5 会把 junit-platform 5.x 拽进来；
+               我们只用 core（它的依赖只有 slf4j-api），规则写成普通 @Test 方法即可。
+             版本必须写死：它不在 Spring Boot 的 dependencyManagement 里，不写会漂。 -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <version>1.5.1</version>
+            <scope>test</scope>
+        </dependency>
+
         <!-- 5.9 YAML 解析：读取知识库文档 .md 头部的 frontmatter（kind/title/level/dept/有效期）
              为什么显式声明它：snakeyaml 本来会经由 spring-boot-starter 传递进来，
              但"传递依赖"意味着它的存在不由我们控制 —— 将来 Boot 换掉内部实现，

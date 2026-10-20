@@ -3,9 +3,13 @@
 > **用途**：新开对话时先读本文件，即可在**不重读历史对话**的前提下继续推进。
 > 本文件是"当前状态 + 已定决策 + 全部待办 + 踩坑红线"的**唯一权威快照**。
 >
-> **最后更新**：阶段 11 已完成（**长期记忆**：`.md` + 索引常驻注入 + 三个记忆工具，`310 用例全绿`）。
-> 阶段 10（前端 + 会话目录 + 思考落库）已在真机联调中修掉两个"逻辑对、位置错"的 bug。
-> ★ 下一步是**阶段 12（工作流模式：真实编排）** —— 动手前先按协议第 1 条走五步，等明确放行。
+> **最后更新（2026-10-20）**：**阶段 12 已完成**（结构治理：包级环 **8 → 0**，`330 用例全绿`）。
+> ★ **阶段序列已重排**：**阶段 12 = 结构治理**（落地 `docs/架构问题.md` 的台账），
+> 工作流 / 可观测性与审计 / 新工具追加 / MCP 引入 / 工程收尾整体**顺延为 13–17**。
+> ★ 阶段 12 四步全部收尾：双守卫（ArchUnit 裸 `beFreeOfCycles()` + `PackagePlacementTest`）、
+> 4 条"现在就在错"、唯一出处 6 项、解环 **8 → 0**（`memory → config` 用领域端口切掉）。
+> 详细记录见 `docs/PROCEDURES.md` §12（12.3 / 12.6）；★ **`archunit_store/` 已删除** ——
+> 环归零后基线机制一并退场，现在**没有基线、没有例外**。
 
 ---
 
@@ -32,11 +36,14 @@
 | **9** | **工具调用与多步 Agent**（工具循环 + `ToolCall`/`ToolResult` 事件 + 审计表） | ✅ 已完成（当时 251 用例；见第 9 节） |
 | **10** | **前端页面 + 会话目录 + 思考落库**（Vue3 前端 / 3 个会话接口 / `@@step:` 落进 `reasoning` / 真机联调修掉 2 个 bug） | ✅ 已完成（当时 282 用例；见第 10 节） |
 | **11** | **长期记忆**（`{dir}/{userId}/MEMORY.md` + 索引常驻注入 + `saveMemory`/`readMemory`/`forgetMemory` + 包归属守卫） | ✅ 已完成（见第 11 节） |
-| **12** | **工作流模式（真实编排）**：计划 → 逐步执行 → 汇总 | ⏳ **下一步**（四个拍板点已出，待你选） |
-| **13** | 可观测性（耗时 / 成功率 / 工具计数 / token 成本） | 未开始 |
-| **14** | 工程收尾（README / 演示脚本 / 限流 / 部署说明） | 未拍板（提议） |
+| **12** | **结构治理**：修守卫 → 修"现在就在错" → 收敛唯一出处 → **解包级环** | ✅ **已完成**（环 **8 → 0**；详见 `PROCEDURES` §12，下一步 = 阶段 13） |
+| **13** | 工作流模式（真实编排）：计划 → 逐步执行 → 汇总 | 顺延（四个拍板点原文保留在 §十） |
+| **14** | 可观测性与**审计**（耗时 / 成功率 / 工具计数 / token 成本） | 顺延 |
+| **15** | 新工具追加（工具分组 / 最小权限） | 顺延 |
+| **16** | MCP 引入（外部工具生态） | 顺延 —— **仅占位，尚未论证**（协议第 7 条三问还没答） |
+| **17** | 工程收尾（README / 演示脚本 / 限流 / 部署说明） | 顺延（本就未拍板） |
 
-**当前测试状态**：`310 个用例全绿，2 skipped`（`mvnw.cmd -B -ntp clean test`；
+**当前测试状态**：`318 个用例全绿，2 skipped`（`mvnw.cmd -B -ntp clean test`；
 35 个测试类 + 1 个抽象契约类由 3 个子类继承）
 
 **能力现状（这个项目现在能做什么）**：
@@ -50,8 +57,8 @@
 | 思考过程落库（`@@step:` 标记）+ 历史回放 | ✅ |
 | 会话列表 / 改名 / 全部历史（前端可用） | ✅ |
 | 长期记忆（跨会话的事实与偏好，模型自主读写） | ✅ |
-| 工作流编排 | ⏳ 阶段 12 |
-| 可观测性 / 成本统计 | ⏳ 阶段 13 |
+| 工作流编排 | ⏳ 阶段 13 |
+| 可观测性 / 成本统计 | ⏳ 阶段 14 |
 | 鉴权（当前只有明文 token 的身份传递，**没有真正的鉴权**） | ❌ 缺口，见 §七 优先级 2 |
 
 > ⚠️ **跑测试前必须设 `DEEPSEEK_API_KEY`**（任意非空值即可，测试不调真模型 ——
@@ -542,7 +549,7 @@ $h = "C:\Users\Rong\Desktop\实习准备\Hagent"
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 Set-Location $h
 
-# 全量测试（310 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
+# 全量测试（322 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
 # ⚠️ 改了签名/删了类时，本地验证也必须带 clean —— 不带 clean 的 test-compile 会【假绿】（坑 43）
 .\mvnw.cmd -B -ntp clean test
 
@@ -609,7 +616,103 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 ## 七、待办（按优先级，新对话从这里开始）
 
-### ✅ 优先级 1：阶段 11 已完成（长期记忆 `.md` + 索引）
+### ✅ 优先级 1（历史）：阶段 12 已完成（结构治理，包级环 8 → 0）
+
+**为什么单独立一个阶段**：`docs/架构问题.md` 是一份第三方审计（101 类 / 14,297 行）。
+它不是新功能，但它发现的问题（4 个包级环、9 个无效配置键、~20 个死成员、
+3 类"同一规则多重出处"、1 个路径穿越）**会被后续阶段放大** ——
+工作流 / 新工具 / MCP 落下来时，新代码只会照着旧形状写。所以先还债、再添功能。
+
+**这份报告的可信度（已逐条复核，别当成传话）**：主体成立、行号级引用精确；
+但有 **7 处需要修正，其中 2 处改变优先级** —— 见 `docs/架构问题.md` 顶部的「复核结论」块。
+**结论先行**：它是**债务台账**，不是**施工图**。
+
+#### 本阶段的四步（顺序不可换）
+
+| 步 | 内容 | 为什么必须这个顺序 |
+|---|---|---|
+| **0** | **装 ArchUnit**（1.5.1，`com.tngtech.archunit:archunit`）做"包级无环"与分层方向断言；**同时保留** `PackagePlacementTest` 的源码扫描做 import 级规则 | 搬包动作全被"`*Service` → `app`"这条后缀规则**物理挡住**。★ 两条守卫**必须并存**：ArchUnit 看**字节码**，而 `WebConfig → ChatController`（header 常量）因**常量内联**在字节码里**不存在**（javap 实证），ArchUnit 永远看不见它；源码扫描补这个盲区 |
+| **1** | 修 **4 条"现在就在错"**：① `file` 模式会话 ID **路径穿越** + `_catalog` 撞名 ② 扩展名白名单双出处 ③ `written()` 语义说谎 ④ 步数上限：孤儿键 `hagent.agent.max-steps` → `AgentLoopProperties`（**已拍板，形状见下**） | 零结构变化；每项都能"先写红、再修绿" |
+| **2** | 收敛**唯一出处**：密级解析 ×3 / 原子文件写 ×3 / "实现名"字典 ×3 / 模型可见文本 ×3 | 必须在搬包前做，否则同一份重复逻辑会被搬两次 |
+| **3** | 解 **1 个 4 节点强连通分量** `{app, config, memory, tool}`（ArchUnit 实测**8 条**基本环），逐一拆它上面的反馈边 | ★ **不是"删 4 条边"**：审计说的"4 个双向环"只是 4 条**两节点**环，真实结构是一个 SCC。只砍 `app⇄tool` 那一对，`app→memory→config→tool→app` **仍然成环**（ArchUnit 已列出来）。环不消灭，阶段 15/16 只能"照着旧形状抄" |
+
+**本阶段结果**：四步全部完成 —— 第 0 步 4/4（ArchUnit + `PackagePlacementTest` 双守卫；
+★ 环基线冻结机制已随环归零**删除**）、第 1 步 4/4、第 2 步 6/6、
+**第 3 步 5/5：包级环 8 → 0**。详细记录见 `docs/PROCEDURES.md` §12（12.3 / 12.6）。
+
+**已登记、刻意不混入本阶段的尾巴**：`IDENTIFIER` 正则两份、`SafePaths` 抽取、
+`FileSessionStore.write` 改原子写、`SessionDtos`→`ConversationDtos` + HTTP `/chat/conversations`、
+3 个死键（`min-tail-ratio` / `ingest.dept` / `heartbeat-interval-ms`）、
+`MemoryProperties.ignoreUnknownFields`；以及一个**待拍板**的命名问题 ——
+`hagent.memory.chat` 前缀里的 `chat` 指的是"会话记忆"，导致预算键成了
+`hagent.memory.chat.chat-max-tokens`（`chat` 出现两次），建议改成 `hagent.memory.conversation`。
+
+#### 本阶段**明确不做**（防止无限膨胀）
+
+审计的第 4 批（拆 `AgentPipeline` 5 个协作者、`memory.impl.*` 重组、`dto` 逐 record 拆文件）
+与全部**改名类**建议都不在本阶段：
+
+- `MemoryMode → MemoryBudgetProfile`：**拒绝**。`mode` 是落库值（`chat_conversation.mode`）+ HTTP 契约 +
+  前端标签，改名会造出一对**新的同义异名**（违反协议第 12/13 条）
+- `AccessLevel → security`：**拒绝**。它是文档域词汇；搬过去会让 `document` 从"零依赖叶包"
+  变成依赖 `security`（与审计自己 §2.1-⑧ 的表扬相反）
+- `clear` / `delete` / `evict`：**不删**。审计把它们算"死成员"（确无生产调用者），但
+  `HANDOFF` 的诚实清单里"会话删除接口"是明确欠着的功能 —— 删掉端口方法等于删掉下一个落点
+
+#### 待拍板（未定就动手 = 违反协议第 1 条）
+
+| # | 问题 | AI 倾向 |
+|---|---|---|
+| ① | ~~`hagent.agent.max-steps: 20` 删键还是迁~~ | ✅ **已拍板：迁 + 按模式两档**（`AgentLoopProperties`，chat 10 / workflow 20 **现在就生效**）—— 形状见下 |
+| ② | ~~守卫升级走哪条路~~ | ✅ **已拍板：B（引 ArchUnit）** —— 细节见下 |
+| ③ | 死成员删到什么程度（8 个死错误码 / 4 个死方法 / `chunkTotal` / `RetrievedChunk.level`）？ | 先删**纯删除、零行为变化**那批；`RetrievedChunk.level` 是复核时**新发现**的零读者字段，随第 2 步定 |
+| ④ | **鉴权缺失**（"我的会话"其实就是"所有会话"）排到哪个阶段？ | 并入**阶段 15（新工具 / 权限分组）**，或单独立一阶段 —— 需要你定 |
+
+#### ① 已拍板：`AgentLoopProperties`（**按模式两档**，不是全局一个值）
+
+**这条前提由本人给出，纠正了一个原本的设计误解**：10 / 20 不是"一个上限的两个候选值"，
+而是 **chat 与 workflow 各自的单轮执行上限**，目的是**防烧 token**。原来那个
+`hagent.agent.max-steps: 20` 是**写对了数值、写错了位置（没有模式维度）、也没人读**。
+
+```yaml
+hagent:
+  agent:
+    chat-max-steps: 10        # 取代现在生效的 hagent.memory.chat.max-steps: 10
+    workflow-max-steps: 20    # 认领原来那个孤儿 20
+```
+
+形状与 `MemoryProperties` 的预算**同构**（两个字段 + `AgentPipeline` 里一个**穷尽 switch**）：
+
+```java
+private int maxStepsOf(MemoryMode mode) {   // 刻意不写 default：新增模式会编译失败
+    return switch (mode) {
+        case CONVERSATION -> agentLoopProperties.getChatMaxSteps();
+        case WORKFLOW     -> agentLoopProperties.getWorkflowMaxSteps();
+    };
+}
+```
+
+- **为什么不并进已有的 `TokenBudget`**（协议第 13 条要求先找复用）：`TokenBudget` 的消费者是
+  `MemoryTrimmer`（裁历史），塞一个 `maxSteps` 进去会让 trimmer 拿到一个**它永不读的字段**（坑 #12）。
+  两者是不同轴：**历史有多长** vs **循环跑几轮**
+- ★ **已知副作用（本人已确认接受）**：前端 `Composer.vue:85` 现在就允许选"工作流"，
+  所以选它的会话，最坏情况模型调用 **10 → 20**。因此阶段 12 的口径是
+  "**除 workflow 步数外**零行为变化"，不是"零行为变化"
+
+#### ② 已拍板的技术底座（已实跑验证，不是"应该能行"）
+
+| 项 | 事实 | 怎么验的 |
+|---|---|---|
+| 制品 | **`com.tngtech.archunit:archunit:1.5.1`**（只依赖 `slf4j-api`） | 从阿里云镜像 `dependency:get` 拉到本地仓库；读它的 POM，`<dependencies>` 只有一条 |
+| ★ **不要** `archunit-junit5` | 本项目 JUnit 是 **6.0.3**，那个制品会拽 `junit-platform` 5.x 进来 | 本地仓库里 `junit-jupiter` 有 5.12.2 / 6.0.3 两个版本，混用是自找的 |
+| 能读我们的字节码 | `ClassFileImporter().importPackages("com.hagent")` 正常导入，Java 21 类文件无告警 | 写了个一次性的 `tmp/archprobe/Probe.java` 跑通（`java exit=0`） |
+| 能报出环 | `slices().matching("com.hagent.(*)..").should().beFreeOfCycles()` → **8 条环**（全落在 `{app, config, memory, tool}` 这个 SCC 内） | 同上；环清单见 `docs/架构问题.md` 复核结论第 7 条 |
+
+★ **结论性的一条**：ArchUnit **不能单独用** —— `config → controller` 那条边在字节码里被**常量内联**抹掉了（`javap` 实证），
+它永远看不见。所以守卫是 **ArchUnit（字节码）+ 现有源码扫描（import）** 并存，
+后者继续管"谁 import 了 controller"这类源码级规则。
+
+### ✅ 优先级 1（历史）：阶段 11 已完成（长期记忆 `.md` + 索引）
 
 **结果**：`310 用例全绿（2 skipped）`；详细记录见 `docs/PROCEDURES.md` 第 11 节（两张 Mermaid + 坑 43）。
 
@@ -740,7 +843,7 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 #### 留下的诚实清单（本阶段没做）
 
 会话删除接口 / 历史回放的工具参数与结果 / 工具成功失败标识 / 单次工具耗时 /
-会话按用户隔离（无鉴权）/ 工作流的真实编排（阶段 12）/ 会话列表分页 —— 理由逐条见 `PROCEDURES.md` 10.10。
+会话按用户隔离（无鉴权）/ 工作流的真实编排（阶段 13）/ 会话列表分页 —— 理由逐条见 `PROCEDURES.md` 10.10。
 
 ---
 
@@ -850,7 +953,7 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 ```
 main(13)  ConversationMemory(26,45,46)  MemoryBudgets(12,13,46-51)  MemoryMode(11,12,67,94,98)
-          MemoryConfig(28,140)  MemoryConfigValidator(18-27 整段论证)  KnowledgeRetrievalService(21,22,35,49)
+          MemoryConfig(28,140)  MemoryConfigValidator(18-27 整段论证)  KnowledgeSearch(21,22,35,49)
           UserContext(11,22,27-40)  UserContextInterceptor(28,42-43)  LayeredConversationMemory(16,24)
           WebConfig(97,116)  RagConfig(14,33,64)  StreamProperties(11)  AiConfig(整篇)
           ChatAppService(90,141,142,152)
@@ -977,7 +1080,7 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 > 完整证据（日志片段 + 库里的回答原文）见 `docs/STAGE5-VERIFICATION.md` 末尾的「验证记录」。
 > ★ 顺带纠正一条旧结论：**流式路径的 token 用量是拿得到的**
 > （实测 `usage=DefaultUsage{promptTokens=2591, completionTokens=446, totalTokens=3037}`），
-> 阶段 13 可直接用 `Final.usage`。
+> 阶段 14 可直接用 `Final.usage`。
 
 ### 优先级 5：机制化 `DEEPSEEK_API_KEY`（协议第 6 条）
 
@@ -994,11 +1097,18 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
 - ✅ **阶段 9：工具调用与多步 Agent** —— 已完成（工具循环 + 事件 + 审计表）
 - ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成
 - ✅ **阶段 11：长期记忆（`.md` + 索引）** —— 已完成
-- **阶段 12：工作流模式（真实编排）** ← ★ 下一步 —— 通道已通电，行为仍与 `chat` 一致
-- **阶段 13：可观测性** —— 耗时 / 成功率 / 工具调用计数 / token 用量
+- ✅ **阶段 12：结构治理** —— 已完成（包级环 **8 → 0**；双守卫 + 唯一出处 6 项 +
+  4 条"现在就在错"；细节见 `PROCEDURES` §12 与本节「优先级 1（历史）：阶段 12」）
+- **阶段 13：工作流模式（真实编排）** ← ★ **下一步**（通道已通电，行为仍与 `chat` 一致）
+- **阶段 14：可观测性与审计** —— 耗时 / 成功率 / 工具调用计数 / token 用量
   - ★ `Final.usage` 在流式路径**已实测拿得到**（2026-10-19：`promptTokens/completionTokens/totalTokens` 都有值），
   可直接用于成本统计；但换模型提供方要重测。工具调用计数可直接查 `chat_tool_invocation`
-- **阶段 14（提议，未拍板）：工程收尾** —— README / 演示脚本 / token 预算与限流 / 部署说明
+- **阶段 15：新工具追加**（工具分组 / 最小权限）—— 审计报告指出"只有 1 个工具时不做分组"的决定仍有效，
+  第二个工具出现时才需要它
+- **阶段 16：MCP 引入**（外部工具生态）—— ⚠️ **仅占位，尚未论证**：
+  协议第 7 条三问（解决什么具体问题 / 产出谁消费 / 不做会怎样）都还没答。
+  它与阶段 15 强相关：MCP 会把"工具从哪来"变成**动态注册**，而那正是 `ToolRegistration` 该有的形状
+- **阶段 17：工程收尾（未拍板）** —— README / 演示脚本 / token 预算与限流 / 部署说明
 
 ---
 
@@ -1011,6 +1121,7 @@ Hagent/
 │   ├── PROCEDURES.md               ← 按阶段的完整记录（~150 KB，含数据流向图与踩坑）
 │   ├── STAGE5-VERIFICATION.md      ← 阶段 5 验收清单（第 2.4 步未跑）
 │   ├── KNOWLEDGE-SAMPLE-DATA.md    ← 示例数据的说明与 frontmatter 规则
+│   ├── 架构问题.md                 ← ★ 第三方架构审计（阶段 12 的输入台账；顶部有复核结论）
 │   └── HANDOFF.md                  ← 本文件
 ├── knowledge/                      ← 4 份示例知识文档（进版本库）
 │   ├── 员工手册.md                  POLICY      964 字  4 个 ## 标题  → 按标题切
@@ -1050,7 +1161,7 @@ Hagent/
 │   │                 共用：MemoryTrimmer / MessageCodec / TokenBudget /
 │   │                       FailureCircuit / LayerStatus / MemoryConfigValidator（唯一例外）
 │   │                 ★ 阶段 8 删除：ChatMemoryAdapter、MemoryBudgets
-│   │                 ★ 阶段 10 新增：session/（会话目录 ConversationCatalog +
+│   │                 ★ 阶段 10 新增：session/（会话目录 ConversationRepository +
 │   │                                Mysql/File 实现，与记录层共用同一开关）
 │   │                               ReasoningTrace（思考标记格式的唯一出处，写读两侧）
 │   │                 ★ 阶段 11 新增：longterm/（长期记忆）
@@ -1062,8 +1173,8 @@ Hagent/
 │   ├── app/          ★ AgentPipeline（唯一编排者）/ PromptBuilder（唯一拼装者）/
 │   │                 PipelineEvent（sealed 契约，阶段 10 新增 StepStarted）/
 │   │                 PromptLogFormat / ChatAppService（两条入口）/
-│   │                 ConversationQueryService（★ 阶段 10）/
-│   │                 KnowledgeRetrievalService /
+│   │                 ConversationService（★ 阶段 10）/
+│   │                 KnowledgeSearch /
 │   │                 DocumentIngestService / BatchIngestReport
 │   │                 ★ 阶段 8 删除：整个 advisor/ 包（8 个类）
 │   ├── stream/       StreamEventType（STEP / REASONING / TOOL_CALL / TOOL_RESULT /
@@ -1074,7 +1185,7 @@ Hagent/
 │   │                 audit/（ToolInvocationStore + Mysql 实现）
 │   └── observability/ StartupProbe（含框架 ChatMemory 启动自检）
 ├── src/main/resources/prompts/rag-answer-prompt.md   ← 5 条回答约束（缺失即启动失败）
-└── src/test/java/com/hagent/       ← 310 个用例，35 个测试类
+└── src/test/java/com/hagent/       ← 318 个用例，38 个测试类
                                        （另有 1 个抽象契约类 ConversationMemoryContractTest，
                                          由 3 个组合子类继承，本身不出现在报告里）
 ```
@@ -1182,21 +1293,29 @@ Hagent/
 ## 十、新对话的第一句话建议
 
 ```
-读 docs/HANDOFF.md 和 docs/WORKING-AGREEMENT.md。
+读 docs/HANDOFF.md、docs/WORKING-AGREEMENT.md、docs/架构问题.md（★ 含顶部「复核结论」）。
 
-当前状态：阶段 11 已完成（长期记忆 .md + 索引，310 用例全绿，已提交）；
-★ 下一步是**阶段 12：工作流模式（真实编排）**。
+当前状态：**阶段 12 已完成** —— 四步全部收尾，包级环 **8 → 0**，
+`archunit_store/` 与 `archunit.properties` 已删除（现在是裸 `beFreeOfCycles()`）；
+**330 用例全绿**。下一步是 **阶段 13（工作流模式）**。
 
-阶段 12 的第一件事：按协议第 1 条走五步，**等明确放行再写代码**。
-动手前必须先拍板（都属于"业务设计"，不许替你决定）：
-  1) "工作流"到底做什么？是【先把任务拆成若干步再逐步执行】，
-     还是【让模型自己边做边决定】（那样与现在的 chat 没区别）？
-  2) 拆解结果要不要**让用户看见并确认**（计划确认），还是直接开跑？
-  3) 失败/偏离计划时：重新规划、跳过、还是停下来问用户？
-  4) 步数预算用哪个（现在是 chat 10 步 / workflow 10 步 —— 两者要不要分开）？
+阶段 12 留下的尾巴（已登记，不是阻塞项）见 §七「优先级 1（历史）：阶段 12」末尾：
+`IDENTIFIER` 两份、`SafePaths` 抽取、`FileSessionStore.write` 原子写、
+`SessionDtos`→`ConversationDtos` + `/chat/conversations`、3 个死键、`ignoreUnknownFields`，
+以及**一个待拍板项**（`hagent.memory.chat` 前缀是否改成 `hagent.memory.conversation`）。
+
+阶段 13 的第一件事：按协议第 1 条走五步，**等明确放行再写代码**。它的四个拍板点见 §十。
+
+动手前必须先拍板（问题都在那张表里，逐条给结论，不许替你决定）：
+  ③ 死成员删到什么程度（clear/delete 已定：**不删**）？
+  ④ 鉴权缺口排到哪个阶段？
+  （① 步数上限**已定：迁进 `AgentLoopProperties`，chat 10 / workflow 20 立即生效**；
+    ② 守卫路线**已定：引 ArchUnit 1.5.1 + 保留源码扫描** —— 两者理由与实跑证据见 §七）
 
 已定的前提（不要再重新论证）：
-  · 模式只有 chat / workflow；它已落库（chat_conversation.mode），**首次确定后不再由请求改变**
+  · 这份审计是"**债务台账**"，不是"施工图"：改名类建议（MemoryMode → MemoryBudgetProfile、
+    AccessLevel → security）与第 4 批拆分**已明确拒绝**，理由写在 §七
+  · 模式只有 chat / workflow；已落库（chat_conversation.mode），**首次确定后不再由请求改变**
   · 思考**永不上送模型**（存 AssistantMessage.properties，不是 reasoningContent —— 后者会被框架回填进请求）
   · 前端只有**一条** SSE 连接；文本载荷是 JSON（`{"text":"…"}`），因为 `data:` 行放不下裸换行（坑 38）
   · 工具状态只到"已返回" —— 没有成功/失败信号，**不画绿勾**
@@ -1205,6 +1324,20 @@ Hagent/
   · 长期记忆：索引常驻注入（≤1000 字）+ 明细按需；三个工具 `saveMemory`(upsert)/`readMemory`/`forgetMemory`；
     密级**复用 `AccessLevel`**
 ```
+
+### ★ 阶段 13（工作流）的拍板点：**原文留档**（顺延 ≠ 作废）
+
+这四个问题里 **④ 已在阶段 12 被提前拍板**，其余三个一个都没答，仍是阶段 13 的入口条件：
+
+1. "工作流"到底做什么？是【先把任务拆成若干步再逐步执行】，还是【让模型自己边做边决定】（那样与现在的 chat 没区别）？
+2. 拆解结果要不要**让用户看见并确认**（计划确认），还是直接开跑？
+3. 失败/偏离计划时：重新规划、跳过、还是停下来问用户？
+4. ~~步数预算用哪个（chat 10 / workflow 10，要不要分开）~~ ✅ **已拍板：分开** ——
+   chat **10** / workflow **20**，随阶段 12 一起落成 `hagent.agent.chat-max-steps` / `workflow-max-steps`。
+
+> ★ 当初第 4 问与阶段 12 的待拍板 ① 是**同一个变量**（`MemoryProperties.maxSteps`）——
+> 阶段 12 把 `maxSteps` 迁进 `AgentLoopProperties` 时，顺手就把两档分开写死了。
+> 这就是"顺延"该有的样子：**顺延的是任务，不是问题**。
 
 **记住三件最容易被违反的事**：
 1. **未获明确放行不写代码**（协议第 1 条）

@@ -1,7 +1,6 @@
 package com.hagent.memory.record;
 
 import com.hagent.memory.LayerStatus;
-import com.hagent.config.MemoryProperties;
 import com.hagent.memory.MessageCodec;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -56,7 +55,7 @@ import java.util.regex.Pattern;
  * 先问<b>谁消费它</b>；如果答案是"排序能用上"，那已经有更好的东西在提供它了。
  */
 @Slf4j
-public class MysqlConversationRecordStore implements ConversationRecordStore {
+public class MysqlMessageStore implements MessageStore {
 
     /** 表名只允许普通标识符 —— 它是拼进 SQL 的，不能来自不可信输入。 */
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
@@ -86,10 +85,10 @@ public class MysqlConversationRecordStore implements ConversationRecordStore {
      *                           按名字取，理由见类注释）
      * @param transactionManager 事务管理器（与上面同一个数据源）
      */
-    public MysqlConversationRecordStore(DataSource dataSource,
+    public MysqlMessageStore(DataSource dataSource,
                                         PlatformTransactionManager transactionManager,
-                                        MemoryProperties properties) {
-        String raw = properties.getMysqlTableName();
+                                        MessageStoreSettings settings) {
+        String raw = settings.getMysqlTableName();
         if (raw == null || !IDENTIFIER.matcher(raw.trim()).matches()) {
             throw new IllegalStateException(
                     "hagent.memory.chat.mysql-table-name 不是合法标识符：" + raw

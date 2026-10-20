@@ -1,7 +1,5 @@
 package com.hagent.memory;
 
-import com.hagent.config.MemoryProperties;
-
 import org.springframework.ai.chat.messages.Message;
 
 import java.util.List;
@@ -13,7 +11,7 @@ import java.util.List;
  *
  * <p><b>它不管什么（边界必须清楚）</b>：
  * <ul>
- *   <li><b>不是长期记忆</b>。跨会话沉淀的事实与偏好属于长期记忆（阶段 12，
+ *   <li><b>不是长期记忆</b>。跨会话沉淀的事实与偏好属于长期记忆（阶段 11，
  *       用 `.md` + 索引，由<b>模型自主</b>决定写什么）。
  *       两者的区别是：会话记忆由对话管线自动存取（每轮的②读 / ⑦写，
  *       <b>模型不参与决定</b>），长期记忆由模型通过工具读写。</li>
@@ -36,11 +34,11 @@ import java.util.List;
  * 一旦有人接回框架记忆路径，历史会悄悄进堆内存，<b>重启即丢且不报错</b>。
  *
  * <p><b>★ 阶段 7 起：它是"门面"，背后是两层，不是三种可切换的实现</b>
- * （阶段 5 的"一个 type 三选一"已被取代，见 {@link MemoryProperties} 的类注释）：
+ * （阶段 5 的"一个 type 三选一"已被取代，见 {@code MemoryProperties} 的类注释）：
  * <pre>
  *   ConversationMemory（本接口 —— {@code AgentPipeline} 唯一依赖的记忆抽象，形状不变）
  *        └── {@link LayeredConversationMemory}（唯一实现：组合两层 + 时序 + 失败分级 + 熔断）
- *                ├── {@link com.hagent.memory.record.ConversationRecordStore}
+ *                ├── {@link com.hagent.memory.record.MessageStore}
  *                │      【记录层】用户可见的对话记录：权威·完整·永久（mysql | file）
  *                └── {@link com.hagent.memory.context.ConversationContextCache}
  *                       【上下文层】模型这一次要用的上下文：有损·TTL·可重建（redis | none）
@@ -61,7 +59,7 @@ import java.util.List;
  * <h2>★ 命名约定（三个接口一起看才完整）</h2>
  *
  * <p>记忆有三个接口：本接口（门面）、
- * {@link com.hagent.memory.record.ConversationRecordStore}（记录层）、
+ * {@link com.hagent.memory.record.MessageStore}（记录层）、
  * {@link com.hagent.memory.context.ConversationContextCache}（上下文层）。
  * 它们的方法名<b>不是同一个模子刻的</b> —— 差别是刻意的，四条判据如下。
  *

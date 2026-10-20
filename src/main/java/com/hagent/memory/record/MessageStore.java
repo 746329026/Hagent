@@ -62,7 +62,7 @@ import java.util.List;
  *       而"清空内容"与"删除数据"是用户可感知的两种语义。</li>
  * </ul>
  */
-public interface ConversationRecordStore {
+public interface MessageStore {
 
     /**
      * 追加消息 —— <b>完整落库，不做任何裁剪</b>。

@@ -1,7 +1,8 @@
 package com.hagent.memory.record;
 
+import com.hagent.common.AtomicWrites;
+import com.hagent.common.Fingerprints;
 import com.hagent.memory.LayerStatus;
-import com.hagent.config.MemoryProperties;
 import com.hagent.memory.MessageCodec;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -61,7 +62,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * 所以生产上的记录层是 MySQL，本实现用于"没有基础设施"的场景。
  */
 @Slf4j
-public class FileConversationRecordStore implements ConversationRecordStore {
+public class FileMessageStore implements MessageStore {
+
+    private static final java.util.regex.Pattern SAFE_SEGMENT =
+            java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
 
     private final Path rootDir;
     private final ObjectMapper objectMapper;
@@ -69,9 +73,9 @@ public class FileConversationRecordStore implements ConversationRecordStore {
     /** 会话级锁表：只串行<b>同一会话</b>的写入，不同会话完全并发。 */
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
 
-    public FileConversationRecordStore(MemoryProperties properties, ObjectMapper objectMapper) {
+    public FileMessageStore(MessageStoreSettings settings, ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
-        this.rootDir = Path.of(properties.getFileDir()).toAbsolutePath().normalize();
+        this.rootDir = Path.of(settings.getFileDir()).toAbsolutePath().normalize();
         try {
             Files.createDirectories(rootDir);
             log.info("[记忆-记录-file] 存储目录已就绪：{}", rootDir);
@@ -163,8 +167,16 @@ public class FileConversationRecordStore implements ConversationRecordStore {
 
     // ==================== 内部方法 ====================
 
+    /** 会话 ID → 文件路径（安全形态；理由见 safeSegment）。 */
     private Path fileOf(String conversationId) {
-        return rootDir.resolve(conversationId + ".json");
+        return rootDir.resolve(safeSegment(conversationId) + ".json");
+    }
+
+    /** 会话 ID 的安全文件名段：不可信 ID 退化成 c-{指纹}，构造不出越界路径。 */
+    private static String safeSegment(String conversationId) {
+        String raw = conversationId == null ? "" : conversationId.trim();
+        boolean usable = SAFE_SEGMENT.matcher(raw).matches() && !raw.startsWith("_");
+        return usable ? raw : "c-" + Fingerprints.identifier(raw);
     }
 
     /** 读出全部消息。文件不存在或损坏时返回空列表（不抛异常，避免会话彻底不可用）。 */
@@ -193,31 +205,11 @@ public class FileConversationRecordStore implements ConversationRecordStore {
      * <p>关键点是 {@link StandardCopyOption#ATOMIC_MOVE} —— 由文件系统保证替换是原子的。
      */
     private void writeAtomically(Path target, List<MessageCodec.StoredMessage> messages) {
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-        try {
-            String json = objectMapper.writeValueAsString(messages);
-            Files.writeString(tmp, json, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE);
-            try {
-                Files.move(tmp, target,
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE);
-            } catch (IOException atomicFailed) {
-                // 降级：某些文件系统不支持 ATOMIC_MOVE。
-                // 记 warn 而不是静默降级 —— 让"原子性没有保障"这件事可见。
-                log.warn("[记忆-记录-file] ATOMIC_MOVE 不被支持，降级为普通替换（原子性无保障）：{}",
-                        atomicFailed.getMessage());
-                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException("写入会话文件失败：" + target, e);
-        } finally {
-            try {
-                Files.deleteIfExists(tmp);
-            } catch (IOException ignored) {
-                // 临时文件清理失败不影响主流程
-            }
+        String json;
+        try { json = objectMapper.writeValueAsString(messages); }
+        catch (Exception e) { throw new IllegalStateException("序列化会话消息失败：" + target, e); }
+        if (!AtomicWrites.writeString(target, json)) {
+            log.warn("[记忆-记录-file] ATOMIC_MOVE 不被支持，已降级为普通替换（原子性无保障）：{}", target);
         }
     }
 }

@@ -517,9 +517,12 @@ messages.addAll(instructions);
 
 | 概念 | 代码名 | 说明 |
 |---|---|---|
-| **agent** | *（刻意不作为类型名前缀）* | **agent = harness + model**。本项目后端是 harness，DeepSeek 是 model，两者合起来才叫 agent。所以"模式"里没有 agent 这个取值，模型输出的类型名也不加 agent 前缀 |
-| **chat 模式** | `MemoryMode.CHAT` | 一次问答。预算见 `hagent.memory.chat.chat-max-*` |
-| **workflow 模式** | `MemoryMode.WORKFLOW` | 多步循环（工作流引擎在阶段 9）。预算比 chat 大一个数量级 |
+| **agent** | ✅ **允许**作类型名前缀，但只限"整机 / 一次运行"这一层：`AgentPipeline`、`AgentLoopProperties`、`AgentException` | **agent = harness + model**。★ 2026-10-19 修订：原表述"刻意不作为类型名前缀"**过窄** —— 它想禁止的是"**agent 模式**"（模式只有 chat / workflow）与"模型产出叫 AgentOutput"，却把"整机"这一层也一并禁掉了。现在的判据是：**描述"整台机器 / 它的循环"可以用 `Agent*`；描述"模式取值"或"模型产出"不可以用**。另：`hagent.agent.*` 是配置前缀，类名跟着前缀走是协议第 12 条规则 2 的要求 |
+| **chat 模式** | `MemoryMode.CHAT` | 一次问答。预算 / 步数见 `hagent.memory.chat.chat-max-*` 与 `hagent.agent.chat-max-steps` |
+| **workflow 模式** | `MemoryMode.WORKFLOW` | 多步循环（工作流引擎在阶段 13）。预算比 chat 大一个数量级；步数上限 `hagent.agent.workflow-max-steps` |
+| **会话（数据实体）** | `conversation`：`conversationId`、`conversation-table-name`、`chat_conversation` 表 | ★ 与"chat 模式"**不是一个东西**：conversation 是数据，chat 是模式取值。判据："它是不是一次运行的模式？"是 → chat；是"一堆数据/一个实体"→ conversation |
+| **会话目录（哪几个会话）** | `memory.catalog.SessionStore`（`File` / `Mysql`） | 一会话一行：标题 / 模式 / 时间。它管的是"有哪些会话"，不是"会话里有什么"（那是 `memory.record.MessageStore`） |
+| **领域端口 vs 配置绑定** | 端口 `*Settings`（在领域包）／绑定 `*Properties`（在 `config`） | ★ 阶段 12 新增的区分：`*Properties` 是**外部配置的唯一绑定**；`*Settings` 是**领域声明的取参契约**，由 `*Properties` 去 `implements`。所以"改一个参数"只动两者，构造器与装配一行不改；反过来若让领域直接收 `*Properties`，就形成包级环 |
 | **模型的产出** | `ModelOutput`（sealed） | 含 `Reasoning`（思考）/ `Token`（回答增量）/ `Final`（收尾）。阶段 9 新增 `ToolCall` / `ToolResult` |
 | **检索的产出** | `Retrieved` | **与 `ModelOutput` 平级**，不属于模型产出 |
 | **一次 pipeline 运行对外吐出的东西** | `PipelineEvent`（sealed） | 顶层类型，含 `Retrieved` 与 `ModelOutput` |
@@ -531,8 +534,8 @@ messages.addAll(instructions);
 
 | # | 不一致 | 处置与理由 |
 |---|---|---|
-| 1 | `MemoryMode.CONVERSATION` 与配置里的 `chat` 用词不一致（配置前缀已是 `hagent.memory.chat.*`，枚举值却叫 `CONVERSATION`） | ★ **本人已同意单独做、不混进阶段 8**。理由：阶段 8 本身已有 40+ 项结构性变更，再混入配置键改名，出问题时**分不清是新结构还是改名引起的**（对应第 7 条"一次只做一件事"）。**改的时候必须同步**：枚举值 + `MemoryProperties` 的 `conversationMax*` 字段 + `application.yml` 的 `conversation-max-*` 两个键 + `MemoryBudgets` 的穷尽 switch（改枚举值会**编译失败**，这正是它的设计目的） |
-| 2 | `AgentPipeline` 这个名字里带 `Agent`，而"agent 模式"并不存在 | **暂留**。它是 harness 侧的编排器，"驱动一次 agent 运行"是可接受的描述；等工作流引擎（阶段 9）落地、形状确定后再评估 |
+| 1 | ~~`MemoryMode.CONVERSATION` 与配置里的 `chat` 用词不一致~~ | ✅ **2026-10-20 已结清**：`MemoryMode.CHAT`、字段 `chatMaxTokens` / `chatMaxMessages`、配置键 `chat-max-*`；同批把"chat=模式 / conversation=会话数据"写进了术语表（上面两行） |
+| 2 | `AgentPipeline` 这个名字里带 `Agent`，而"agent 模式"并不存在 | **暂留**。它是 harness 侧的编排器，"驱动一次 agent 运行"是可接受的描述；等工作流引擎（阶段 13）落地、形状确定后再评估 |
 
 ---
 

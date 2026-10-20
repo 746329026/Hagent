@@ -1,5 +1,7 @@
 package com.hagent.security;
 
+import com.hagent.retrieval.KnowledgeSearch;
+
 import com.hagent.document.AccessLevel;
 
 /**
@@ -8,7 +10,7 @@ import com.hagent.document.AccessLevel;
  * <h2>★ 它的产出谁消费（协议第 7 条要求的答案）</h2>
  *
  * <p>消费者是 {@code AgentPipeline} 的第 ③ 步（检索）：它把
- * {@link #clearance()} 交给 {@code KnowledgeRetrievalService}，
+ * {@link #clearance()} 交给 {@code KnowledgeSearch}，
  * 翻成检索的 SQL 条件 {@code level IN (...)}，
  * 让无权的内容<b>在数据库里就被挡住</b>，而不是取回来再筛掉。
  *

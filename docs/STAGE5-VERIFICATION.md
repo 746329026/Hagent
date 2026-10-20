@@ -565,7 +565,7 @@ usage=DefaultUsage{promptTokens=1204, completionTokens=39, totalTokens=1243}
 usage=DefaultUsage{promptTokens=2591, completionTokens=446, totalTokens=3037}
 ```
 
-⇒ 阶段 13 做成本统计时**可以直接用** `Final.usage`。但仍要**先测一次**再写进契约：
+⇒ 阶段 14（可观测性与审计）做成本统计时**可以直接用** `Final.usage`。但仍要**先测一次**再写进契约：
 这条结论只覆盖 DeepSeek 的流式路径（换成别的提供方未测）。
 
 ### 一个**质量**问题（不是 bug，值得记）
@@ -573,7 +573,7 @@ usage=DefaultUsage{promptTokens=2591, completionTokens=446, totalTokens=3037}
 问"出差补贴标准"时，topK=3 的结果里有 **「员工手册 第二章 假期管理」与「第一章 考勤管理」**，
 档位还标着「高/中」。也就是说：**相关度分档不能替代"内容是否真的回答问题"** ——
 这正是 HANDOFF §3.5 记录过的"相关与无关提问的距离分布完全重叠"。
-模型的回答里确实带进了不相关内容。**这是检索质量的上限，不是链路故障**，阶段 12/13 再议。
+模型的回答里确实带进了不相关内容。**这是检索质量的上限，不是链路故障**，留待后续阶段（检索质量相关）再议。
 
 ---
 

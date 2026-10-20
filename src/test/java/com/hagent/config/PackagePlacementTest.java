@@ -114,6 +114,39 @@ class PackagePlacementTest {
                 .isEmpty();
     }
 
+    /**
+     * ★★ 阶段 12 第 0 步：<b>非 controller 包不得依赖 controller 包</b>。
+     *
+     * <p>为什么这条必须留在<b>源码扫描</b>里、不能交给 ArchUnit：
+     * {@code WebConfig} 曾用 {@code ChatController.ID} 暴露响应头，
+     * 而那是<b>编译期常量</b> —— javac 把值内联进 {@code WebConfig}，字节码里<b>零指令</b>
+     * 引用 {@code ChatController}（{@code javap -c} 实证）。⇒ <b>任何字节码级守卫都看不见这条边</b>。
+     *
+     * <p>这就是本项目两条守卫<b>必须并存</b>的原因：ArchUnit 管"字节码级真实依赖与环"，
+     * 这里管"源码级 import 与包归属"。删掉任何一条，都会有一类错误变成无人值守。
+     */
+    @Test
+    @DisplayName("★★ 除 controller 包外，任何类都不得依赖 com.hagent.controller")
+    void onlyControllerPackageMayDependOnControllers() {
+        List<String> offenders = new ArrayList<>();
+        try (Stream<Path> files = Files.walk(SOURCE_ROOT)) {
+            for (Path path : files.filter(p -> p.toString().endsWith(".java")).sorted().toList()) {
+                if (path.toString().replace('\\', '/').contains("/com/hagent/controller/")) {
+                    continue;   // controller 包内部互相使用是正常的
+                }
+                if (readText(path).contains("com.hagent.controller.")) {
+                    offenders.add(path + " → 引用了 com.hagent.controller.");
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("扫描源码目录失败：" + SOURCE_ROOT.toAbsolutePath(), e);
+        }
+
+        assertThat(offenders)
+                .as("装配层 / 领域层依赖 HTTP 层是反向边。★ 这条边可能被常量内联抹掉，"
+                        + "所以只能靠源码扫描抓")
+                .isEmpty();
+    }
     // ========================================================================
     // 扫描
     // ========================================================================

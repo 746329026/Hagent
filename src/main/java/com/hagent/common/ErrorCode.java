@@ -60,7 +60,8 @@ public enum ErrorCode {
     AGENT_MAX_STEPS_EXCEEDED(44001, "达到最大执行步数，任务未完成", HttpStatus.OK),
     AGENT_INTERRUPTED(44002, "任务已中断，等待用户补充信息", HttpStatus.OK),
 
-    // ===== 45xxx 长期记忆域（阶段 12 预留）=====
+    // ===== 45xxx 长期记忆域（阶段 11 定义，当前无使用者）=====
+    // ⚠️ 阶段 12 的"死成员清理"要处置这两条：要么接上，要么删（见 docs/架构问题.md 顶部复核结论）
     MEMORY_PATH_FORBIDDEN(45001, "记忆文件路径越界，已拒绝", HttpStatus.FORBIDDEN),
     MEMORY_CONTENT_REJECTED(45002, "记忆内容未通过审核", HttpStatus.BAD_REQUEST),
 

@@ -42,7 +42,7 @@ import org.springframework.context.annotation.Configuration;
  * 由 {@code AgentPipeline} 自己驱动（框架的 {@code ToolCallingAdvisor} 已不参与）。
  */
 @Configuration
-@EnableConfigurationProperties({TraceProperties.class, PromptProperties.class})
+@EnableConfigurationProperties({TraceProperties.class, PromptProperties.class, AgentLoopProperties.class})
 public class AiConfig {
 
     // ========================================================================

@@ -4,6 +4,7 @@ import com.hagent.config.PromptProperties;
 import com.hagent.config.TraceProperties;
 import com.hagent.memory.ConversationMemory;
 import com.hagent.memory.MemoryMode;
+import com.hagent.config.AgentLoopProperties;
 import com.hagent.config.MemoryProperties;
 import com.hagent.memory.TokenBudget;
 import com.hagent.security.UserContext;
@@ -50,8 +51,8 @@ import static org.mockito.Mockito.when;
  *       且不写 {@code default}，所以新增 {@link MemoryMode} 会<b>编译失败</b>。
  *       本测试的第 1 条断言把这个性质钉住 —— 它遍历 {@code values()}，
  *       若有人改回 {@code Map.of(...)} 手写列举，这里立刻失败；</li>
- *   <li><b>读错配置项</b>（串号）：两个模式若都读 {@code conversation-max-*}，
- *       表现是"工作流预算静默等于会话预算"，模型历史短了 10 倍而<b>没有任何报错</b>。
+ *   <li><b>读错配置项</b>（串号）：两个模式若都读 {@code chat-max-*}，
+ *       表现是"工作流预算静默等于 chat 预算"，模型历史短了 10 倍而<b>没有任何报错</b>。
  *       第 2 条断言用<b>刻意不同</b>的数字抓住它。</li>
  * </ol>
  */
@@ -60,8 +61,8 @@ class ChatBudgetTest {
     /** 刻意用与默认值不同的数字 —— 这样"读错了配置项"也会被抓到，而不是碰巧等于默认值而通过。 */
     private MemoryProperties properties() {
         MemoryProperties props = new MemoryProperties();
-        props.setConversationMaxTokens(1234);
-        props.setConversationMaxMessages(7);
+        props.setChatMaxTokens(1234);
+        props.setChatMaxMessages(7);
         props.setWorkflowMaxTokens(99999);
         props.setWorkflowMaxMessages(88);
         return props;
@@ -92,6 +93,7 @@ class ChatBudgetTest {
                 new TraceProperties(),
                 new PromptProperties(),
                 props,
+                new AgentLoopProperties(),
                 new ByteArrayResource("测试用约束".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
     }
@@ -171,10 +173,10 @@ class ChatBudgetTest {
 
         // 会话模式
         RecordingMemory chatMemory = new RecordingMemory();
-        runOnce(pipeline(props, chatMemory), MemoryMode.CONVERSATION);
+        runOnce(pipeline(props, chatMemory), MemoryMode.CHAT);
 
         assertThat(chatMemory.budgetsSeen)
-                .as("会话模式必须读 conversation-max-*")
+                .as("chat 模式必须读 chat-max-*")
                 .containsExactly(new TokenBudget(1234, 7));
 
         // 工作流模式
@@ -193,7 +195,7 @@ class ChatBudgetTest {
 
         RecordingMemory chatMemory = new RecordingMemory();
         RecordingMemory workflowMemory = new RecordingMemory();
-        runOnce(pipeline(props, chatMemory), MemoryMode.CONVERSATION);
+        runOnce(pipeline(props, chatMemory), MemoryMode.CHAT);
         runOnce(pipeline(props, workflowMemory), MemoryMode.WORKFLOW);
 
         assertThat(chatMemory.budgetsSeen.get(0))

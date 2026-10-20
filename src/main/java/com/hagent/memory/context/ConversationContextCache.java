@@ -9,7 +9,7 @@ import java.util.List;
  * 【上下文层】—— 模型这一次要用的<b>上下文</b>，有损、易失、<b>可从记录层重建</b>。
  *
  * <p>本接口的完整定位说明（两层为什么不是"两种存法"）见
- * {@link com.hagent.memory.record.ConversationRecordStore} 的类注释。
+ * {@link com.hagent.memory.record.MessageStore} 的类注释。
  *
  * <h2>★ 它存"原始消息"，不存"裁剪后的结果"</h2>
  *

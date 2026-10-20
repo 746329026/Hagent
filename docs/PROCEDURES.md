@@ -16,13 +16,16 @@
 - 工具循环 + 工具调用审计表；启动探针自动核对装配
 - 配置类归位由 `PackagePlacementTest` 强制（5 条规则、零例外）
 
-**还没做**（阶段 12–14）：
+**还没做**（能力上顺延为阶段 13–17；★ **阶段 12 是"结构治理"，不是新能力**）：
 
-- 工作流模式：计划 → 逐步执行 → 汇总（现在 `mode=workflow` 只差预算）
-- 可观测性：耗时 / 成功率 / 工具计数 / token 成本（`Final.usage` 已实测可用）
-- 工程收尾：README / 演示脚本 / 限流 / 部署说明
+- 工作流模式：计划 → 逐步执行 → 汇总（现在 `mode=workflow` 只差预算）—— **阶段 13**
+- 可观测性与审计：耗时 / 成功率 / 工具计数 / token 成本（`Final.usage` 已实测可用）—— **阶段 14**
+- 新工具追加（工具分组 / 最小权限）—— **阶段 15**
+- MCP 引入（外部工具生态）—— **阶段 16**（仅占位，三问未答）
+- 工程收尾：README / 演示脚本 / 限流 / 部署说明 —— **阶段 17**
 - ❌ **鉴权**：现在只有明文 `X-Hagent-Token` 的身份传递，**没有真正的认证授权**
-  （"我的会话"其实是"所有会话"）—— 这是已知缺口，不是疏忽
+  （"我的会话"其实是"所有会话"）—— 这是已知缺口，不是疏忽；**排期未定**
+  （候选：并入阶段 15，或单独立一阶段）
 
 ## 阶段总览
 
@@ -43,6 +46,7 @@
 | 9 | 工具调用与多步 Agent | `then()` 会**丢弃上游所有事件** | 251 |
 | 10 | 前端 + 会话目录 + 思考落库 | ① SSE 的 `data:` 行**放不下裸换行**；② **阻塞调用不能在事件循环上跑** | 282 |
 | 11 | 长期记忆（`.md` + 索引） | ① **降级要发生在"能说出原因"的那一层**；② 同类错误第 2 次必须**机制化** | 310 |
+| **12** | **结构治理**（修守卫 + 修静默失效 + 唯一出处 + 解 4 个环） | ⏳ **未开工** —— 输入台账 `docs/架构问题.md`（顶部有复核结论）；四步顺序与排除项见 `HANDOFF §七` | — |
 
 > ★ 阶段 8 的用例数**回落**（239 → 234）不是退步：删掉了 12 个"纯框架切面行为"的测试，
 > 换来的是不再维护一条已经不存在的链路。详见第 8 节。
@@ -63,8 +67,8 @@ Hagent/
 └── src/
     ├── main/java/com/hagent/
     │   ├── app/          AgentPipeline（唯一编排者）/ PromptBuilder / PipelineEvent /
-    │   │                 ChatAppService / ConversationQueryService /
-    │   │                 KnowledgeRetrievalService / DocumentIngestService
+    │   │                 ChatAppService / ConversationService /
+    │   │                 KnowledgeSearch / DocumentIngestService
     │   ├── config/       ★ 全部配置与装配类（13 个 *Properties + 8 个 @Configuration）
     │   ├── controller/   ChatController / ConversationController / HealthController
     │   ├── memory/       会话记忆（record/ + context/ + session/）+ longterm/ + 共用工具
@@ -551,7 +555,7 @@ mindmap
   确定性判断（该调什么工具、要不要先问用户、要产出什么文件），而不必解析自然语言。
 - 阶段 9 的多步 Agent 直接把 `TaskIntent` 当作规划输入；
   `needConfirmation` 是阶段 10 中断确认的触发条件。
-- 提示词外置成资源文件的模式，会被阶段 7（RAG 注入）、阶段 12（记忆注入）复用。
+- 提示词外置成资源文件的模式，会被阶段 7（RAG 注入）、阶段 11（长期记忆注入）复用。
 
 ### 主要新增/涉及文件
 
@@ -1664,7 +1668,7 @@ mindmap
       UserContextInterceptor
         HandlerInterceptor<br/>只拦 /chat/**
     检索层 retrieval
-      KnowledgeRetrievalService
+      KnowledgeSearch
         真正的检索<br/>失败降级为不注入
       RetrievalFilterBuilder
         权限→Filter.Expression<br/>唯一出处
@@ -1706,7 +1710,7 @@ mindmap
 |---|---|---|---|
 | `UserContextInterceptor` + `UserTokenResolver` | "谁在问"从请求头传到业务层 | `RagRetrievalAdvisor` 经 context 读 | 检索只有一种视角，要么全可见（越权）要么全不可见 |
 | `RetrievalFilterBuilder` | 把"用户许可"翻成 SQL 的 `level IN (...)` | `SearchRequest.filterExpression` | 机密内容被取回、拼进 prompt、由模型复述 —— **越权且不留痕迹** |
-| `KnowledgeRetrievalService` | 召回与问题相关的企业资料 | `RetrievedChunk` 列表 → 拼装 | 模型只能凭训练时的一般知识回答"年假几天"，与本司制度可能完全不符 |
+| `KnowledgeSearch` | 召回与问题相关的企业资料 | `RetrievedChunk` 列表 → 拼装 | 模型只能凭训练时的一般知识回答"年假几天"，与本司制度可能完全不符 |
 | `MemoryReadAdvisor` | 把历史放进 context（不再自己重建 prompt） | `PromptAssemblyAdvisor` | 模型看不到上一轮说了什么 |
 | `MemoryWritebackAdvisor` | 一次请求恰好把"问+答"落库一次 | 下一轮的 `MemoryReadAdvisor` | 历史永远为空；若在循环内则会写 N 次并污染历史 |
 | `PromptAssemblyAdvisor` | 把四个来源合成一份 prompt | 模型 | 前面所有切面的产出**没有任何消费者** |
@@ -1722,7 +1726,7 @@ mindmap
 | `security` | `UserContext` | 身份 record + `CONTEXT_KEY` + `ANONYMOUS` |
 | `security` | `UserTokenResolver` | 自定义 token 解析（缺失=匿名；非法=抛异常） |
 | `security` | `UserContextInterceptor` | 拦截器，只拦 `/chat/**` |
-| **`app`** | `KnowledgeRetrievalService` | 检索（失败降级为不注入，记 ERROR）。★ **Service 归 app** |
+| **`app`** | `KnowledgeSearch` | 检索（失败降级为不注入，记 ERROR）。★ **Service 归 app** |
 | **`config`** | `RetrievalProperties` | `hagent.rag.retrieval.*`；**单位=距离**，换算收口 |
 | **`config`** | `PromptProperties` | `hagent.rag.prompt.*` |
 | `retrieval` | `RelevanceBand` | 高/中/低档位（提示词只认档位，不认原始分数） |
@@ -1841,7 +1845,7 @@ advisors.add(toolCallingAdvisorBuilder.copy()
 
 **坑 6 ★ 检索失败会"伪装成没命中"**
 
-`KnowledgeRetrievalService` 在检索失败时**降级返回空列表**（设计如此：检索不在关键路径上）。
+`KnowledgeSearch` 在检索失败时**降级返回空列表**（设计如此：检索不在关键路径上）。
 于是一个**坏掉的过滤条件**（例如 jsonpath 在真实 pgvector 上不被接受）
 与"知识库里确实没有相关内容"在结果上**完全一样**，都是空列表。
 
@@ -1973,7 +1977,7 @@ POST /api/chat   X-Hagent-Token: badtoken
 第一版把 5 个类放进了（新造的）`retrieval` 包与 `prompt` 包：
 
 ```text
-❌ retrieval/KnowledgeRetrievalService.java     ← 项目里所有 *Service 都在 app/
+❌ retrieval/KnowledgeSearch.java     ← 项目里所有 *Service 都在 app/
 ❌ retrieval/RetrievalProperties.java           ← RAG 领域的 ChunkingProperties / IngestProperties 都在 config/
 ❌ prompt/PromptProperties.java                 ← 切面参数 AdvisorProperties 在 config/
 ❌ prompt/PromptFragmentKeys.java               ← 3 个使用者全在 advisor/，却单独占一个包
@@ -2709,7 +2713,7 @@ flowchart LR
         B6 --> B7["⑥ 逐片累积 + 过滤空片"]
         B7 --> B8["⑦ 写回记忆 → Final"]
         B2 --> B9["ConversationMemory"]
-        B2 --> B10["KnowledgeRetrievalService"]
+        B2 --> B10["KnowledgeSearch"]
         B3 -. "方法参数" .-> B5
         B4 -. "方法参数" .-> B5
     end
@@ -3205,9 +3209,9 @@ provider 表达的依赖是"**能提供工具的东西**" —— 与"可插拔"�
 |---|---|
 | 新增表 | `db/chat_conversation.sql`（一会话一行：标题 / 模式 / 时间） |
 | 新增列 | `db/chat_message.sql` 的 `reasoning MEDIUMTEXT NULL`（存量库用文件末尾的 `ALTER`） |
-| 新增 | `memory/session/{ConversationCatalog,MysqlConversationCatalog,FileConversationCatalog}.java` |
+| 新增 | `memory/session/{ConversationRepository,MysqlConversationRepository,FileConversationRepository}.java` |
 | 新增 | `memory/ReasoningTrace.java`（落库文本 ↔ 结构化分段，写读两侧的唯一格式出处） |
-| 新增 | `app/ConversationQueryService.java`、`controller/ConversationController.java`、`dto/SessionDtos.java` |
+| 新增 | `app/ConversationService.java`、`controller/ConversationController.java`、`dto/SessionDtos.java` |
 | 改 | `MessageCodec`（`StoredMessage` 加 `reasoning` + 从 properties 存取）、两个 `RecordStore`（读写 `reasoning` + `readAll` + 自检） |
 | 改 | `AgentPipeline`（发 `StepStarted`、按步切思考、写回带标记的思考） |
 | 改 | `ChatAppService`（`mode` 参数、`step` 事件、**文本载荷改 JSON**、`touchCatalog`） |
@@ -3228,12 +3232,12 @@ flowchart TD
         C1["ChatController<br/>POST /chat/stream-sse"]
         C2["ConversationController<br/>GET /sessions · GET /messages · PATCH"]
         AS["ChatAppService"]
-        QS["ConversationQueryService"]
+        QS["ConversationService"]
         PL["AgentPipeline"]
     end
 
     subgraph MEM["记忆层"]
-        CAT["ConversationCatalog<br/>标题 / 模式"]
+        CAT["ConversationRepository<br/>标题 / 模式"]
         REC["ConversationRecordStore<br/>消息 + reasoning"]
     end
 
@@ -3375,8 +3379,8 @@ Vue 3 的响应式靠 **Proxy**：数组读出来的元素是代理，而**手�
 |---|---|
 | `ReasoningTraceTest`（12） | 标记格式 + `render/parse` **往返恒等**；正文中间出现的 `@@step:` 不被当成标记 |
 | `AgentPipelineToolLoopTest`（+3） | 两步发两个 `StepStarted`、`StepStarted` 先于任何 `Reasoning`、落库思考带标记而 `Final.reasoning` 不带、单步回合无标记 |
-| `MysqlConversationCatalogTest`（5） | 不覆盖标题/模式、改名成同名仍成功、按活跃时间倒序、超长标题被截断 |
-| `FileConversationCatalogTest`（3） | sidecar 文件、跨实例可见、坏文件按空目录处理 |
+| `MysqlConversationRepositoryTest`（5） | 不覆盖标题/模式、改名成同名仍成功、按活跃时间倒序、超长标题被截断 |
+| `FileConversationRepositoryTest`（3） | sidecar 文件、跨实例可见、坏文件按空目录处理 |
 | `MemoryModeTest`（5） | 线上名称是 `chat/workflow`（不是枚举名）、打错字**抛异常**而不是静默退回默认 |
 
 **真实 HTTP 证据**（后端跑起来、用真实请求打的；模型因无有效 Key 而 401，这恰好验证了链路）：
@@ -3496,7 +3500,7 @@ bug 正好长在 mock 边界之外 —— 见 HANDOFF §十 第 5 条。
 
 **现象**：每次提问都被回答"知识库中未找到相关内容"，而用户问的年假就在 `员工手册.md` 里。
 
-**根因**：`KnowledgeRetrievalService.retrieve` 失败时 `return List.of()`。
+**根因**：`KnowledgeSearch.retrieve` 失败时 `return List.of()`。
 于是上层只看到"空列表"，而"空列表"的含义是"查过了、没有"：
 
 ```
@@ -3553,8 +3557,8 @@ bug 正好长在 mock 边界之外 —— 见 HANDOFF §十 第 5 条。
 | 2 | 历史回放的**工具参数与结果** | 它们不进会话历史（决策 32），只在审计表 `chat_tool_invocation`。前端因此只显示"第 N 步 · 工具名" |
 | 3 | 工具**成功/失败**标识 | `ToolResult` 刻意没有 `error` 字段（阶段 9.7），前端拿不到该信号，所以状态只能到"已返回"，**不画绿勾** |
 | 4 | 单次工具**耗时** | 框架的 `executeToolCalls` 一次执行整批，不逐个计时。要做得自己拆执行，代价大于收益 |
-| 5 | 会话按**用户隔离** | 现在没有鉴权，"我的会话"其实就是"所有会话"。这是既有安全缺口（阶段 13 的鉴权要一起解决） |
-| 6 | 工作流的**真实编排** | 阶段 10 只让 `mode` 名副其实（真实生效的历史预算 + 落库），编排本身在**阶段 12** |
+| 5 | 会话按**用户隔离** | 现在没有鉴权，"我的会话"其实就是"所有会话"。这是既有安全缺口（**排期未定**，见 `HANDOFF §七` 待拍板 ④） |
+| 6 | 工作流的**真实编排** | 阶段 10 只让 `mode` 名副其实（真实生效的历史预算 + 落库），编排本身在**阶段 13** |
 | 7 | 会话列表**分页** | 侧栏一次只显示前 50 个。真需要滚动加载时加游标（`updated_at` 已是索引） |
 
 ---
@@ -3592,7 +3596,7 @@ bug 正好长在 mock 边界之外 —— 见 HANDOFF §十 第 5 条。
 | 改 | `ToolRegistration`（记忆工具与检索开关**解耦**） |
 | 改 | `KnowledgeRetrievalTool`（两个 context key 与身份解析搬走） |
 | 改 | `application.yml`（把 `long-term` 从"死配置"变成真配置 + 三个上限） |
-| 改 | `ConversationCatalog.titleOf`（截断改用 `Texts`，消除第二份实现） |
+| 改 | `ConversationRepository.titleOf`（截断改用 `Texts`，消除第二份实现） |
 
 ### 11.3 本阶段数据流向
 
@@ -3721,6 +3725,483 @@ Spring 也给 +1 参数的 `AgentPipeline` 正常注入了。
 
 ---
 
+## 阶段 12：结构治理（解环 + 唯一出处 + 修静默失效）
+
+> **状态（2026-10-20 完成）**：四步全部收尾 ——
+> 第 0 步 4/4（见 12.4；★ 环基线冻结机制已随"环归零"**删除**）；
+> 第 1 步 4/4（步数上限搬家见 12.3）；第 2 步 6/6；
+> **第 3 步 5/5：包级环 8 → 0，ArchUnit 改为裸 `beFreeOfCycles()`**（见 12.6）。
+> 本阶段**不是能力阶段** —— 它不加任何用户可见功能，只把 `docs/架构问题.md` 的台账落地。
+> 输入台账与复核结论见该文件顶部；四步顺序与"明确不做"清单见 `HANDOFF §七`。
+
+### 12.1 本阶段的目标与边界
+
+| 步 | 内容 | 状态 |
+|---|---|---|
+| 0 | 装 ArchUnit + 环基线冻结 + controller 依赖规则 + `*Service → app` 冲突消解 | **4/4** ✅ |
+| 1 | 修 4 条"现在就在错"：路径穿越 / 扩展名双出处 / `written()` 说谎 / 步数上限 | **4/4** ✅ |
+| 2 | 收敛唯一出处：密级解析 ×3 / 原子写 ×3 / 实现名字典 ×3 / 模型可见文本 ×3 | **6/6** ✅ |
+| 3 | 解强连通分量（ArchUnit 实测：**8 条环 → 0 条**） | **5/5** ✅（3-4 配置进领域 = 端口化；3-5 删基线、改裸规则 —— 见 12.6） |
+
+**明确不做**：改名类建议（`MemoryMode` / `AccessLevel` 搬家）、第 4 批拆分、
+删除 `clear`/`delete`。理由见 `HANDOFF §七` 与 `架构问题.md` 顶部复核结论。
+
+### 12.2 数据流向（本次改动涉及的那一段）
+
+> 本节的图在阶段 12 收尾时补全为三张：① 步数上限这条线（第 1 步）；
+> ② 包级依赖：**解环前 / 后**（第 3 步）；③ 记忆三层 + 配置端口的形状（第 3 步）。
+
+```mermaid
+flowchart TD
+    A["HTTP 请求<br/>ChatRequest.mode = chat / workflow"] --> B["ChatController.resolveMode<br/>wireName → MemoryMode"]
+    B --> C["AgentPipeline.run(mode)"]
+    C --> D["budgetOf(mode)<br/>→ TokenBudget（历史能有多长）"]
+    C --> E["maxStepsOf(mode)<br/>→ int（循环跑几轮）★ 本次新增"]
+    E --> E1["CONVERSATION → hagent.agent.chat-max-steps = 10"]
+    E --> E2["WORKFLOW → hagent.agent.workflow-max-steps = 20"]
+    E1 --> F["LoopState.maxSteps<br/>（一次运行内不变）"]
+    E2 --> F
+    D --> G["memory.load(cid, budget)"]
+    F --> H{"state.steps >= state.maxSteps ?"}
+    H -- 是 --> I["③ 防御出口：用已累积文本收尾<br/>WARN 里点名 hagent.agent.*"]
+    H -- 否 --> J["调模型 → 可能请求工具 → 回到 H"]
+```
+
+```mermaid
+mindmap
+  root(("步数上限<br/>按模式两档"))
+    ("配置")
+      ("AgentLoopProperties<br/>prefix=hagent.agent")
+        ("chatMaxSteps = 10")
+        ("workflowMaxSteps = 20")
+        ("ignoreUnknownFields=false<br/>写错键名启动即失败")
+        ("afterPropertiesSet<br/>0/负数启动即失败")
+      ("application.yml")
+        ("删 hagent.memory.chat.max-steps")
+        ("删 hagent.agent.executor.* ×5")
+    ("消费")
+      ("AgentPipeline.maxStepsOf<br/>穷尽 switch，新增模式编译失败")
+        ("LoopState.maxSteps")
+    ("为什么两个值")
+      ("chat：查两次+追问+汇总")
+      ("workflow：每步工具返回可能是一整篇文档")
+    ("为什么不并进 TokenBudget")
+      ("trimmer 会拿到永不读的字段（坑 12）")
+```
+
+### 12.2b 包级依赖：解环前 / 后（第 3 步）
+
+**解环前**：`{app, config, memory, tool}` 是一个 4 节点强连通分量（ArchUnit 实测 **8 条**基本环）。
+三条"逆流边"（箭头指向被依赖方）是元凶：
+
+```mermaid
+flowchart TD
+    app["app"] --> cfg["config"]
+    app --> tool["tool"]
+    app --> mem["memory"]
+    cfg --> tool
+    cfg --> mem
+    tool --> mem
+    mem --x|"✗ memory → config（7 处）"| cfg
+    tool --x|"✗ tool → app"| app
+    cfg --x|"✗ config → app"| app
+```
+
+**解环后**：只剩向下 / 横向的边，`memory` 是叶包，不再指回 `config`
+（各包内部的方向由 `PackagePlacementTest` 与 `ArchitectureRulesTest` 双重守着）。
+
+```mermaid
+flowchart TD
+    app["app（编排）"] --> cfg["config（装配 + 配置绑定）"]
+    app --> tool["tool（工具）"]
+    app --> mem["memory（记忆）"]
+    cfg --> tool
+    cfg --> mem
+    tool --> mem
+```
+
+### 12.2c 记忆三层 + 配置端口的形状（第 3 步）
+
+```mermaid
+mindmap
+  root(("memory<br/>逆流边 0"))
+    ("门面")
+      ("ConversationMemory")
+        ("LayeredConversationMemory")
+    ("记录层")
+      ("MessageStore")
+        ("FileMessageStore ← MessageStoreSettings")
+        ("MysqlMessageStore ← MessageStoreSettings")
+    ("上下文层")
+      ("ConversationContextCache")
+        ("RedisConversationContextCache ← ContextCacheSettings")
+        ("NoOpContextCache")
+    ("会话目录")
+      ("SessionStore")
+        ("FileSessionStore ← SessionStoreSettings")
+        ("MysqlSessionStore ← SessionStoreSettings")
+    ("长期记忆")
+      ("LongTermMemoryStore")
+        ("FileLongTermMemoryStore ← LongTermMemorySettings")
+    ("config 侧（唯一出处在装配处）")
+      ("MemoryProperties implements 3 个端口")
+      ("LongTermMemoryProperties implements 1 个端口")
+```
+
+### 12.3 第 1 步 ④：步数上限从 `memory.chat` 搬到 `hagent.agent`（按模式两档）
+**问题**：`application.yml` 里有一个 `hagent.agent.max-steps: 20`，**没有任何 Java 字段绑定它**；
+真正生效的是另一个键里的 `hagent.memory.chat.max-steps: 10`。于是：
+
+1. **键撒谎**：步数上限是 agent 循环的终止条件，却挂在"记忆"前缀下（协议第 12 条规则 1）；
+2. **数值失踪**：那个 20 是**工作流那档的意图值**，却从未被读过 —— 工作流一直在用 chat 的 10。
+
+**修法**：`AgentLoopProperties(prefix="hagent.agent")` 两个字段 + `AgentPipeline#maxStepsOf` 穷尽 switch。
+
+| 键 | 值 | 谁读 |
+|---|---|---|
+| `hagent.agent.chat-max-steps` | 10 | `maxStepsOf(CONVERSATION)` |
+| `hagent.agent.workflow-max-steps` | 20 | `maxStepsOf(WORKFLOW)` |
+| ~~`hagent.memory.chat.max-steps`~~ | — | **已删**（`MemoryProperties.maxSteps` 一并删除） |
+| ~~`hagent.agent.executor.*`（5 键）~~ | — | **已删**（从来没有任何 Java 字段） |
+
+★ **唯一的行为变化**：前端可以选"工作流"（`Composer.vue`），选中的会话上限 10 → 20。**本人已确认接受。**
+
+**证据（不是"应该通过"）**：
+
+```text
+.\mvnw.cmd -B -ntp clean test
+[INFO] Tests run: 315, Failures: 0, Errors: 0, Skipped: 2
+[INFO] BUILD SUCCESS
+```
+
+**防线自检（坑 27：通过 ≠ 有效）**：把 `maxStepsOf` 的 `WORKFLOW` 分支故意改成取 `chat` 字段 →
+`AgentPipelineToolLoopTest#maxStepsIsPerMode` 立刻红，且报的是设计好的那句话：
+
+```text
+[★ workflow 模式必须用 hagent.agent.workflow-max-steps(4)。若这里也是 2，说明 ...]
+expected: 4
+but was: 2
+```
+
+还原后复绿。**同一次运行还顺手证明了两件事**：① 那条 WARN 里打的确实是**新键名**
+（`hagent.agent.chat-max-steps / workflow-max-steps`）；② 两档真的分开了。
+
+### 12.4 第 0 步（守卫）：ArchUnit + 环基线冻结
+
+> ⚠️ **本节记录的是当时的做法，现已被 12.6 取代**：环归零后 `archunit_store/` 与
+> `src/test/resources/archunit.properties` 都已删除，规则改成裸 `beFreeOfCycles()`
+> （没有基线、没有例外）。保留本节的理由只有一个 —— 下面那**四条运行规则**
+> 是本阶段真金白银踩出来的（尤其第 3、4 条），它们解释了"为什么基线必须尽快退场"。
+
+**为什么需要第二条守卫**（第一条是 `PackagePlacementTest` 的源码扫描）：
+
+| 盲区 | 实证 |
+|---|---|
+| 手写 import 扫描**看不见全限定名引用** | `KnowledgeRetrievalTool:204,206` 直接用 `com.hagent.app.ToolEventSink` / `PipelineEvent` 而**没有 import** ⇒ `app ⇄ tool` 这条真实环会被漏掉 |
+| 手写扫描**做不了环检测** | 环是"图"的性质，import 清单里看不出来 |
+
+反过来，ArchUnit 也有它**看不见**的东西：`config → controller`（`WebConfig` 用
+`ChatController.CONVERSATION_ID_HEADER`）在字节码里**被常量内联抹掉了**
+（`javap -c` 实证：`ldc "X-Conversation-Id"`，零指令引用 `ChatController`）。
+⇒ **两道守卫并存、各管一侧**，删掉任何一道都会有一类错误变成无人值守。
+
+**落地的东西**：
+
+| 文件 | 内容 | 为什么 |
+|---|---|---|
+| `pom.xml` | `com.tngtech.archunit:archunit:1.5.1`（test scope，版本写死） | 不引 `archunit-junit5`：它会把 `junit-platform` 5.x 拽进来，而本项目是 **6.0.3**（`dependency:tree` 实测：装完仍是 6.0.3） |
+| `src/test/resources/archunit.properties` | `freeze.store.default.path=archunit_store`；**刻意不写 `allowStoreCreation`** | 基线是提交进库的；万一它被删了，宁可**大声失败**，也不要静默重新基线（那等于"新漏洞自动被接受"） |
+| `archunit_store/` | 冻结的基线：**8 条环** + 每条环的完整依赖证据 | 这就是"只减不增的债务台账" |
+| `ArchitectureGuardTest` | ① 守卫自检（导入到的类数 > 90）② `FreezingArchRule.freeze(无环规则)` | ① 防"空集假绿"：导入拿到 0 个类时"无环"会因为**没有类**而通过 —— 一条永远绿的守卫比没有更糟 |
+
+**基线里的 8 条环**（全部落在 `{app, config, memory, tool}` 这一个 SCC 内）：
+
+```
+1. app -> config -> app                          5. app -> tool -> app
+2. app -> config -> tool -> app                  6. app -> tool -> memory -> config -> app
+3. app -> memory -> config -> app                7. config -> memory -> config
+4. app -> memory -> config -> tool -> app        8. config -> tool -> memory -> config
+```
+
+★ 这个数字**更正过一次**：先前口头说的是"6 条"，那是从被截断的控制台输出里数出来的；
+以 `archunit_store/` 里的冻结基线为准是 **8 条**。（教训：截断的输出也是一种"假证据"。）
+
+**证据**：
+
+```text
+.\mvnw.cmd -B -ntp test -Dtest=ArchitectureGuardTest              → Tests run: 2, 全绿（严格模式）
+（临时植入 retrieval -> app 的一条新边）
+                                                                   → 红：Cycle detected: Slice app -> Slice retrieval -> …
+（删除临时类后）                                                   → 复绿，且基线文件 SHA256 未变
+```
+
+**四条运行规则（写在这里，因为前三条都不会报错，第四条会）**：
+
+1. **正常构建/CI 里绝不设 `freeze.refreeze=true`** —— 那等于"新违规自动进基线"，守卫会悄悄退化成装饰品；
+2. ★ **`-D` 传不进 ArchUnit 的配置**：`-Dfreeze.store.default.allowStoreCreation=true` 与
+   `-Dfreeze.refreeze=true` 都**实测无效**——它只读 classpath 上的 `archunit.properties`。
+   需要改行为时，必须**临时改那个文件**，跑完再改回来；（这条是我踩出来的，不是查来的）
+3. ★★ **改名会让整份基线"失效"**：冻结记录的是**违规行文本**，里面含类名/成员名。
+   把 `KnowledgeRetrievalService` 改成 `KnowledgeSearch` 之后，8 条基线**全部**被报成"8 次新违规"。
+   ⇒ **改名批次要么一次做完再重建基线，要么每批重建一次**；这也是"改名应集中成批"的硬理由。
+4. ⚠️ **refreeze 失败会把基线写成 0 字节**（实测：权限不足时文件被截断，而不是"什么都没发生"）。
+   症状是之后每一次跑都报"所有违规都是新的"。**重建后务必检查文件大小**
+   （基线约 70 KB / 8 条环），别把 0 字节的台账提交上去。
+
+**重建 / 重新冻结的正确姿势**（因为第 2 条）：
+
+```powershell
+# 1) 临时在 src/test/resources/archunit.properties 追加（或改）一行：
+#      freeze.store.default.allowStoreCreation=true   # 从零重建时
+#      freeze.store.default.allowStoreUpdate=true     # 只想重写已有基线时
+# 2) 跑
+.\mvnw.cmd -B -ntp test "-Dtest=ArchitectureGuardTest"
+# 3) 删掉那一行，再跑一次确认严格模式绿
+# 4) 【提交 archunit_store/ 的 diff】—— 那份 diff 就是"架构被允许改变了"的书面记录
+```
+
+### 12.5 改名台账（本人已拍板：T1 全做；T3 方向已定死）
+
+**2026-10-19 的三条指令**：① `*Service → app` 规则**保留**（零例外）⇒ 检索能力要搬走只能靠改名脱身；
+② `Agent*` 前缀**允许**（`WORKING-AGREEMENT` 术语表已修订：只禁"agent 模式"与"模型产出"，不禁"整机/循环"）；
+③ T1 全做、T3 现在定方向。
+
+> ★★ **2026-10-20 更正（本节若干名字在第 3 步又改过一次，以下面这段为准）**：
+>
+> - `memory.session` → **`memory.catalog`**；`ConversationCatalog` → `ConversationRepository` → **最终 `SessionStore`**（`File` / `Mysql`）
+> - `memory.record.ConversationRecordStore` → **`MessageStore`**（`File` / `Mysql`）
+> - `common.AtomicFiles` → **`common.AtomicWrites`**；`Fingerprints.contentFingerprint/sha256Hex` → **`content()` / `identifier()`**（`HashingSupport` 已删）
+> - `MemoryMode.CONVERSATION` → **`CHAT`**；`conversationMax*` → **`chatMax*`**；yml `conversation-max-*` → **`chat-max-*`**
+> - `KnowledgeSearch` 已搬去 **`retrieval`**；`PipelineEvent` / `ToolEventSink` 已搬去 **`agent`**
+>
+> ⇒ 下面 T1 表里 A1 / A3 / A5 的"状态"列、以及"第 2 步进度"表里的类型名，**已经过时**；
+> 另：12.4 的运行规则 3（"改名会让基线失效"）**已随基线机制删除而失效**（见 12.6），保留仅为历史。
+
+#### T3 已定方向（先定死，**以后不许再起新名字**）
+
+| 组 | 现状（多名字并存） | 定为 | 代价与执行时机 |
+|---|---|---|---|
+| **B1 会话** | `Conversation*`（类）/ `session`（HTTP 段、`SessionDtos`、`memory.session` 包）/ `chat_conversation`（表） | ★ **2026-10-20 修订：按"数据 vs 目录"分工，不再用一个词通吃** —— <br>· **会话数据** = `conversation`：`conversationId`、`chat_conversation` 表<br>· **会话目录**（哪几个会话）= `session`：`memory/session` → **`memory/catalog`**，`SessionStore` / `FileSessionStore` / `MysqlSessionStore`<br>· **仍未做**：HTTP `/chat/sessions` → `/chat/conversations`、`SessionDtos` → `ConversationDtos`、Redis key 前缀 | 前半已完成（第 3 步搬包）；后三者登记为尾巴（牵动前端路径，需与前端一起改） |
+| **B8 chat vs conversation** | 配置键 `conversation-max-*`、字段 `conversationMax*`、枚举 `CONVERSATION`；而线上名与配置前缀是 `chat` | 统一为 **chat**：`chat-max-*` / `chatMax*` / `MemoryMode.CHAT`。**DB 不用改**（存的就是 wireName） | ✅ **已做（2026-10-20）**，见 12.6；`conversation` 从此只用于会话数据 |
+| **B9 "回答"五词** | `reply` / `text` / `content` / `message` | 对外契约 = **reply**；流式单片 = **delta**；内部累积缓冲 = **replyBuffer**；框架 `AssistantMessage.getText()` **不动**（第三方） | 第 3 步 |
+| **B5 切分块** | `document.Chunk` vs `retrieval.RetrievedChunk` | 两个词都保留（确实不同物），但**登记进术语表** | 已登记 |
+
+#### T1 执行状态
+
+| # | 改名 | 状态 |
+|---|---|---|
+| A1 | `KnowledgeRetrievalService` → **`KnowledgeSearch`** | ✅ 已做（仍在 `app` 包——**搬包是第 3 步**，改名与搬包刻意分开，避免同批文件改两遍） |
+| A2 | `ConversationQueryService` → **`ConversationService`** | ✅ 已做（它含 `rename` 写操作，"Query"是撒谎） |
+| A3 | `HashingSupport.sha256()` → **`contentFingerprint()`** | ✅ 已做（它先做 CRLF 归一化 + strip，不是裸 SHA-256） |
+| A5 | `ConversationCatalog` → **`ConversationRepository`**（含 File/Mysql 两个实现） | ✅ 已做（它是**可写**仓储，不是静态清单） |
+| A14 | `MemoryMode:49` 注释"唯一作用是选择记忆预算" | ⏸ 待改（现在它还选步数上限） |
+| A4 | `LayerStatus` → `LayerHealth` + 裸 String → 枚举 | ⏸ **拆两步**：改名可做；换枚举会改 `/health/detail` 的 JSON（`"record"`→`"RECORD"`）⇒ 属契约变更，要先定 |
+| A6 | `ReasoningTrace` → `ReasoningTraceCodec` + `Section` 独立 | ⏸ 与 B7（`SessionDtos.ReasoningSection` 同形两名）**必须一起**做，否则拆完仍有两个同名类型 |
+| A7 | `ToolContextSupport` → `ToolContextKeys` + `ToolContexts` | ⏸ 这是**拆分**不是改名，独立批次 |
+| A9 | `ToolRegistration` → `ToolRegistry` | ⏸ **必须与第 3 步搬包同批**（搬 `config`→`tool` 时一起改，否则引用要改两遍） |
+| B2 B3 B4 | 读动词统一 / 删动词统一 / 入库结论三词统一 | ⏸ **与第 2 步（唯一出处）同批**：改的是端口接口，第 2 步本来就要动这些文件 |
+| C1 | `*Store` 三义（权威存储 / 领域服务 / 健康探针） | ✅ **已定：拆职责，不是改名**（见下方「C1 已定」） |
+| C2 | `delete` 异义（`ConversationRepository.delete` 删会话 vs `ConversationRecordStore.delete` 删消息） | ⏸ 待定；候选：把"删整会话"叫 `remove`、把"删消息"叫 `clear`（现在 `clear` 已经是"删消息"） |
+| D1 | `*Support` ×4 | ⏸ 随各自类的归属一起改（`SseSupport` 已定为"保留类、改注释"） |
+
+★ **分批的硬理由（不是偷懒）**：见 12.4 运行规则 3 —— 改名会让整份架构基线失效，
+所以**纯改名集中成一批、重建一次基线**；接口级改动与第 2/3 步同批，避免同一文件改两遍。
+
+#### 第 2 步进度（2026-10-20）：原子写 ×3 → `common.AtomicFiles`；哈希 ×2 → `common.Fingerprints`
+
+| 收口了什么 | 收口前 | 收口后 |
+|---|---|---|
+| **原子文件写** | 三份近乎逐字重复：`FileConversationRecordStore#writeAtomically`、`FileConversationRepository#write`（★ 方法名不叫 writeAtomically）、`FileLongTermMemoryStore#writeAtomically` | **`common.AtomicFiles.writeString(Path, String)`**，返回 `boolean` = 是否真的原子替换（降级由调用方记 WARN，因为日志要带业务上下文） |
+| **SHA-256** | 两份：`document.HashingSupport#contentFingerprint`（归一化）、`memory.longterm.FileLongTermMemoryStore#sha256Hex`（不归一化） | **`common.Fingerprints`**：`contentFingerprint`（归一化）/ `sha256Hex`（裸）。两者的差别被写成表格，**不是合并成同一个方法** |
+
+★ **顺带清掉一条不该存在的依赖边**：第 1 步为了让 `FileConversationRecordStore` 复用哈希，
+产生了 `memory.record → document`。现在它改指 `common.Fingerprints`，那条边**消失**
+（这正是建档时写下的"第 2 步收口哈希时一并消除"）。
+
+**验证**：
+```text
+.\mvnw.cmd -B -ntp clean test   →  Tests run: 322, Failures: 0, Errors: 0, Skipped: 2   BUILD SUCCESS
+架构基线重建后仍为 8 条环；基线里已无 HashingSupport（说明 memory→document 边确实没了）
+```
+
+**过程中的两次教训（都是"没读就改"）**：
+1. 第一次尝试用 `IndexOf` 定位方法，**没确认文件是 LF 换行**，锚点用 `\r\n` → 定位失败。当时**主动删掉半成品** `AtomicFiles.java` 回退，而不是硬改。
+2. 第二次改为：**先 read 三处完整实现**，才动手。读的时候立刻发现一处只有读了才知道的事实：
+   会话目录那个方法叫 **`write(Catalog)`**，不叫 `writeAtomically` —— 按名字去改必然漏。
+
+#### 第 1 步完成（2026-10-20）：三条"现在就在错"
+
+| # | 修了什么 | 关键点 |
+|---|---|---|
+| 1-1 | **会话 ID 路径穿越 + `_catalog` 撞名** | `FileConversationRecordStore.fileOf` 改为"**构造不出越界路径**"：合法形态（首字符字母数字、无分隔符、不以 `_` 开头、≤64）直接用，其余一切退化成 `c-{指纹}`。指纹**复用** `HashingSupport.contentFingerprint`（协议第 13 条），不另写 MessageDigest |
+| 1-2 | **扩展名白名单双出处** | `SourceLoader.load(...)` 增加 `extensions` 参数，**不再硬编码 `.md/.txt`**；由 `DocumentIngestService` 传 `ingestProperties.getExtensions()`。原症状：配置加 `.markdown` 后"先发现、再拒绝"，且报错文案与配置无关 |
+| 1-3 | **`written()` 语义说谎** | `IngestOutcome.written()` → **`notSkipped()`**（只表示"处理过"）；`IngestResult.written()` → **`chunkCount > 0`**（真的写入了块）；`BatchIngestReport` 删掉那层冗余 filter（它正是被含糊语义用来兜的地方） |
+
+**测试**：`IngestResultTest`（3 条，钉住"处理过 ≠ 写入"）+ `FileConversationRecordStoreTest#conversationIdCannotEscapeOrCollideWithCatalog`（2 个危险 ID 都落成 `c-` 前缀文件、`_catalog.json` 不被覆盖）。
+
+**证据**：
+```text
+.\mvnw.cmd -B -ntp clean test   →  Tests run: 322（318 + 4 新增）
+一次全量里 DocumentIngestIntegrationTest 挂 1 条：Ollama embedding 报
+  dial tcp 127.0.0.1:xxxxx/tokenize: bind: insufficient buffer space
+⇒ 环境（套接字缓冲耗尽），不是代码；单独重跑该类 14/14 全绿。
+```
+
+**顺带记录一个新依赖边（已被守卫逼着显式接受）**：`memory.record → document`（为了复用 `HashingSupport`）。
+ArchUnit 立刻报"新违规"，重建基线后接受 —— 这正是"只减不增台账"该有的行为：
+**new edge 必须显式 refreeze 并留下 diff**。该边上不应长期存在，第 2 步收口 `common` 哈希时可一并消除。
+
+#### C1 已定（2026-10-19）：拆 `FileLongTermMemoryStore` 的四个职责
+
+**病因不是后缀，是一个类干四件事**（`FileLongTermMemoryStore` 499 行）：
+
+| # | 职责 | 证据 | 去向 |
+|---|---|---|---|
+| ① | 持久化（frontmatter、原子写、目录边界） | `readEntry` / `writeEntry` / `writeAtomically` / `userDir` | **留在 Store** |
+| ② | 授权 | `:180 existing.visibleTo(level)`、`:236 !existing.visibleTo(user.clearance())` | **移到门面** |
+| ③ | 限额（索引 ≤1000 / 正文 ≤2000） | `:102 getIndexMaxChars()`、`SaveResult.INDEX_FULL` | **移到门面** |
+| ④ | 渲染提示词（拼【长期记忆】+ 使用规则） | `renderForPrompt:268-280` | **移到 `PromptBuilder`**（审计 P1-7） |
+
+**结构与现有的会话记忆门面完全同构**：
+
+```
+com.hagent.memory.ConversationMemory        ← 门面（两层）      ✅ 已存在
+com.hagent.memory.record.ConversationRecordStore
+com.hagent.memory.context.ConversationContextCache
+
+com.hagent.memory.LongTermMemory            ← 门面（一层）      ★ 新增
+com.hagent.memory.longterm.LongTermMemoryStore                  ← 退化为纯持久化端口，名字不变
+```
+
+★ **门面放在 `memory` 根包，不放 `memory.longterm`** —— 否则会得到
+`com.hagent.memory.longterm.LongTermMemory`（包名与类名重复同一个词），
+而这正是审计吐槽 `memory.record.ConversationRecordStore` 的同一类问题。
+放进 `memory` 根包后，`ConversationMemory` 与 `LongTermMemory` 两个门面平级，形状自洽。
+
+★ **为什么授权必须收敛到门面，而不是"移到调用点"**：Store 一旦不判权限，
+任何新调用点忘记检查就是**越权且不报错**。门面是唯一入口 ⇒ 风险靠**结构**收敛，
+而不是靠"记得检查"（协议第 10 条）。
+
+**协议第 7 条三问（先答，再动手）**：
+- ① 解决什么：同一个类同时管持久化与授权，使"某条路径漏了检查"无法从结构上排除；且存储返回提示词文本
+- ② 产出谁消费：门面被 `LongTermMemoryTools`（3 个工具）与 `AgentPipeline`（读索引）消费；`PromptBuilder` 消费索引文本
+- ③ 不做会怎样：C1 永远只能靠改名缓解；`renderForPrompt` 继续住在存储实现里 ⇒ **换一个存储实现就得重写一遍提示词**
+
+**归属：第 3 步**（`renderIndexFor` 搬家会动 `PromptBuilder` / `AgentPipeline` 的接口，与解环同批）。
+**不是改名条目**——`LongTermMemoryStore` 这个名字保留，因为它届时真的只做存储。
+
+#### 0-4 结案（2026-10-19）：不需要改规则，冲突被"改名"消解了
+
+0-4 原本是"`*Service → app` 这条后缀规则与搬包冲突，要决定怎么改"。
+本人已拍板 **保留规则（零例外）**，随后 A1 把 `KnowledgeRetrievalService` 改成了
+`KnowledgeSearch` —— **它不再以 `Service` 结尾，将来搬去 `retrieval` 不会撞规则**。
+
+⇒ **0-4 以"消解"结案，规则一个字没改**。这也是"改名优于改守卫"的一次实证：
+守卫是从两次放错包的事故里长出来的，为一次搬包去削弱它，代价远大于给一个类换个诚实名字。
+
+★ 同时说明一件事：另外 4 个 `*Service`（`ChatAppService` / `ConversationService` /
+`DocumentIngestService` / `HealthAppService`）**都真的在 app 做编排**，规则对它们 100% 成立。
+
+#### A4 已定（2026-10-19）：接受 `/health/detail` 的 JSON 变化
+
+`LayerStatus` → `LayerHealth` + 把裸 `String layer/implementation` 换成枚举，会让
+`/health/detail` 的取值从 `"record"` 变成 `"RECORD"`。
+**已核实：前端 0 处消费该端点**（`grep health frontend/src` = 0）⇒ 今天零风险，接受。
+
+### 12.6 第 3 步完成（2026-10-20）：包级环 8 → 0，冻结机制退场
+
+**结果**：`slices().matching("com.hagent.(*)..").should().beFreeOfCycles()` 直接检查生产类 ——
+**0 条环**。`archunit_store/` 与 `src/test/resources/archunit.properties` 已删除，
+规则从"冻结基线"改成"**没有基线、没有例外**"。
+
+#### 环是一条条消掉的（8 → 5 → 2 → 0）
+
+| 轮次 | 消掉的逆流边 | 余下 |
+|---|---|---|
+| 3-1 / 3-3 | `app → tool` / `tool → app`（`PipelineEvent`、`ToolEventSink`、`KnowledgeSearch` 搬家） | 5 条 |
+| 3-4（检索半边） | `config → retrieval`（`RetrievalSettings` 值对象；`bandOf` 这条领域规则从配置类搬回领域） | 2 条 |
+| 3-4（记忆半边） | `memory → config` —— **本轮** | **0 条** |
+
+#### ★ 唯一的切点是 `memory → config`（两条环共用它）
+
+| # | 谁 | 原来拿什么 |
+|---|---|---|
+| 1-2 | `FileMessageStore` / `MysqlMessageStore` | `getFileDir()` / `getMysqlTableName()` |
+| 3-4 | `FileSessionStore` / `MysqlSessionStore` | `getFileDir()` / `getConversationTableName()` |
+| 5 | `RedisConversationContextCache` | key 前缀 / TTL / 两条数上限（4 个值） |
+| 6 | `FileLongTermMemoryStore` | 整个 `LongTermMemoryProperties` 当字段（4 个值） |
+| 7 | `MemoryConfigValidator` | `VALID_*` 两个常量 —— 而它**一个 memory 类型都不依赖**，是放错包的装配期类 |
+
+⇒ 切掉这 7 处，`config ↔ memory` 与 `config → tool → memory → config` **同时**消失；
+`tool`、`MemoryConfig`、`LongTermMemoryConfig` 一行都不用动。
+
+#### 做法：领域声明窄端口，配置类去实现（依赖倒置）
+
+| 端口（新增） | 方法 | 实现者 | 使用者 |
+|---|---|---|---|
+| `memory.record.MessageStoreSettings` | `getFileDir()` `getMysqlTableName()` | `MemoryProperties` | File / Mysql MessageStore |
+| `memory.catalog.SessionStoreSettings` | `getFileDir()` `getConversationTableName()` | `MemoryProperties` | File / Mysql SessionStore |
+| `memory.context.ContextCacheSettings` | `getRedisKeyPrefix()` `getRedisTtlSeconds()` `getChatMaxMessages()` `getWorkflowMaxMessages()` | `MemoryProperties` | Redis 缓存 |
+| `memory.longterm.LongTermMemorySettings` | `getDir()` `getIndexMaxChars()` `getContentMaxChars()` `getTitleMaxChars()` | `LongTermMemoryProperties` | FileLongTermMemoryStore |
+
+**为什么不是"标量构造器"，也不是"值对象"**（三条路的账，标量那条本人已否决）：
+
+| 路线 | 加一个参数的改动点 | 真值份数 | 属性类漏字段时 |
+|---|---|---|---|
+| 标量构造器 | 构造器签名 + 装配 + **所有构造点** | 1 | 编译期发现 |
+| 值对象（record 放领域、config 映射一次） | record + 映射 + 读取 | **2（会漂移）** | **运行期才炸**（漏设 = null） |
+| **端口（本方案）** | 接口方法 + 字段 | **1** | **编译期发现** |
+
+★ 关键收益（不是洁癖）：**装配与测试一行没改** —— 端口方法名就是 `@Getter` 已生成的
+`getXxx()`，`MemoryConfig` / `LongTermMemoryConfig` 照原样把 `properties` 传进去（它是子类型），
+`FileMessageStoreTest` / `FileSessionStoreTest` 等也一行不动。**"改一个参数"只动接口 + 字段两处。**
+
+**三条判据（写在 `MessageStoreSettings` 类注释里，防止下次长出第二种写法）**：
+① 端口只放**取值**、不放**派生**（`maxRetained = max(chat, workflow)` 仍留在 `RedisConversationContextCache`）；
+② 方法名沿用 JavaBean 访问器名，不造 `fileDir()` 别名（一个值两个名字，正是本阶段在清的问题）；
+③ **单值不包装** —— 门面的 `circuitBreakSeconds` 保持标量。
+
+#### 同批做的两件事
+
+1. **`MemoryConfigValidator` 搬进 `config`**（`META-INF/spring.factories` 的 key 同步改；
+   `MemoryConfigValidatorTest` 一并搬到 `test/.../config/`）；
+2. **模式改名**（第 2 步尾巴 + `WORKING-AGREEMENT` 术语表待办 1）：
+   `MemoryMode.CONVERSATION` → **`CHAT`**、`conversationMax*` → **`chatMax*`**、
+   yml `conversation-max-*` → **`chat-max-*`**。
+   `conversation` 此后只用于**会话数据**（`conversationId` / `conversation-table-name`）。
+
+**证据**：
+
+```text
+.\mvnw.cmd -q test-compile                    → EXIT=0
+.\mvnw.cmd -q -Dtest=ArchitectureRulesTest test  → Tests run: 2, 绿（裸 beFreeOfCycles；基线文件已删）
+.\mvnw.cmd test                               → Tests run: 330, Failures: 0, Errors: 0, Skipped: 2
+                                                BUILD SUCCESS
+```
+
+★ **误报的代价现在有数字了**：基线冻结期间，改名 / 移动会改变"违规文本"，共触发 **4 次**
+假"新违规"，每次都得重建基线（其中一次重建失败把基线写成 0 字节）。这就是"环必须尽快归零、
+机制必须删掉"的实证理由，而不是审美偏好。
+
+**留下的一个命名问题（需拍板，本轮没改）**：`hagent.memory.chat` 这个**前缀**里的 `chat`
+指的是"会话记忆"（阶段 5 遗留），于是预算键成了 `hagent.memory.chat.chat-max-tokens` ——
+`chat` 出现两次。建议把前缀改成 `hagent.memory.conversation`（影响约 15 处：yml、
+`@ConditionalOnProperty`、校验器、报错文案、文档）。改与不改都要有据，故单独列项。
+
+**登记在第 2 步尾巴、不混进解环的**：`IDENTIFIER` 正则两份（`MysqlMessageStore:62` /
+`MysqlSessionStore:45`）、`SafePaths` 抽取、`FileSessionStore.write` 改用 `AtomicWrites`。
+
+### 12.7 本阶段**还没做**的（诚实清单）
+
+| # | 没做 | 为什么现在不做 |
+|---|---|---|
+| 1 | 第 0 步的 ③④：源码级 import 规则、`*Service → app` 规则改造 | ③ 是补 ArchUnit 的常量内联盲区；④ 只在准备搬 `KnowledgeSearch` 时才必须改，现在改它没有消费者 |
+| 2 | 第 1 步其余 3 条（路径穿越 / 扩展名双出处 / `written()`） | 一条一条来（协议第 7 条：一次只做一件事），每条都要先红后绿 |
+| 3 | 9 个死键里剩下的 3 个（`min-tail-ratio` / `ingest.dept` / `heartbeat-interval-ms`） | 其中 `heartbeat` **删掉等于承认"没有 SSE 保活机制"** —— 这是真缺口，要先定它怎么办 |
+| 4 | `MemoryProperties` 的 `ignoreUnknownFields` | 它默认 `true`，所以旧键 `hagent.memory.chat.max-steps` 现在会被**静默忽略**（坑 #39 的同类）。改成 `false` 是正确方向，但会影响别人的 `application-local.yml` —— 需单独拍板 |
+
+---
+
 ## 待推进
 
 - ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`282 用例全绿`）
@@ -3730,19 +4211,39 @@ Spring 也给 +1 参数的 `AgentPipeline` 正常注入了。
   - ★ 欠的验证：**新会话问"我叫什么"能否答出** —— 这需要真实 API Key，
     它同时就是 `STAGE5-VERIFICATION.md` 第 2.4 步欠的那条
 
-- **阶段 12：工作流模式（真实编排）** —— 通道已通电（`mode` 落库、预算分开 5 万/5 千），
+- **阶段 12：结构治理** ← ★ **下一步**（**不是新能力阶段**）
+  - 输入：`docs/架构问题.md` —— 一份第三方架构审计（101 类 / 14,297 行）。
+    **已逐条复核**：主体成立、行号级引用精确；7 处需修正、2 处改变优先级 → 见该文件顶部「复核结论」。
+  - 四步顺序（不可换）：**0 修守卫 → 1 修"现在就在错"4 条 → 2 收敛唯一出处 → 3 解 4 个包级环**
+  - **明确不做**：改名类建议（`MemoryMode` / `AccessLevel` 搬家）、第 4 批拆分（`AgentPipeline` 拆 5 个协作者、
+    `memory.impl.*` 重组、`dto` 拆文件）、删除 `clear`/`delete`（会话删除接口是欠着的功能）
+  - 待拍板 2 项（死成员删除范围、鉴权排期）见 `HANDOFF §七`；
+    **① 步数上限已拍板**：迁进 `AgentLoopProperties(prefix="hagent.agent")`，**按模式两档**
+    （chat 10 / workflow 20，立即生效）—— 顺带把阶段 13 的第 ④ 问一起结清；
+    **② 守卫路线已拍板 = 引 ArchUnit 1.5.1**（只用 core 制品，不引 `archunit-junit5`），
+    且**必须与现有源码扫描并用** —— `config → controller` 那条边被常量内联抹掉、字节码级永远看不见
+  - 为什么先做它：这些债**会被阶段 13–16 放大** —— 工作流/新工具/MCP 落地时，新代码只会照着旧形状写
+
+- **阶段 13：工作流模式（真实编排）** —— 通道已通电（`mode` 落库、预算分开 5 万/5 千），
   但**行为仍与 `chat` 一致**：没有拆解、没有逐步执行、没有计划确认
-  - 动手前必须拍板：①"工作流"是**先拆解再逐步执行**，还是让模型边做边决定；
+  - 四个拍板点原文见 `HANDOFF §十`（顺延 ≠ 作废）：
+    ①"工作流"是**先拆解再逐步执行**，还是让模型边做边决定；
     ②拆解结果要不要**让用户看见并确认**；③失败/偏离计划时重新规划、跳过、还是停下来问；
-    ④步数预算是否与 chat 分开（现在都是 10）
-- **阶段 13：可观测性** —— 关键路径耗时 / 成功率 / 工具调用计数 / **token 用量**
+    ~~④步数预算是否与 chat 分开~~ ✅ **已在阶段 12 拍板：分开（chat 10 / workflow 20）**
+  - ★ ④ 与阶段 12 的待拍板 ① 是**同一个变量**（`MemoryProperties.maxSteps`）——
+    阶段 12 把它迁进 `AgentLoopProperties` 时已顺手把两档分开写死
+- **阶段 14：可观测性与审计** —— 关键路径耗时 / 成功率 / 工具调用计数 / **token 用量**
   - ✅ **流式路径的 token 用量已实测拿得到**（2026-10-19）：
     `usage=DefaultUsage{promptTokens=2591, completionTokens=446, totalTokens=3037}` ——
     `Final.usage` 可以直接用于成本统计（换提供方要重测）。旧结论"可能拿到 EmptyUsage"已作废
   - ★ 工具调用审计表已经落地，调用计数可以直接查库（见 `chat_tool_invocation`）
-- **阶段 14（提议，尚未拍板）：工程收尾** —— README / 演示脚本 / token 预算与限流 / 部署说明
+- **阶段 15：新工具追加**（工具分组 / 最小权限）—— 阶段 9 的决定"只有 1 个工具时不做分组"仍有效，
+  第二个工具出现时才需要；**鉴权缺口若要一并解决，最自然的落点是这里**
+- **阶段 16：MCP 引入**（外部工具生态）—— ⚠️ **仅占位，三问未答**（协议第 7 条）。
+  它与阶段 15 强相关：MCP 会把"工具从哪来"变成**动态注册**，而那正是 `ToolRegistration` 该有的形状
+- **阶段 17（提议，尚未拍板）：工程收尾** —— README / 演示脚本 / token 预算与限流 / 部署说明
   - 它不是一个"能力阶段"，而是"让别人能跑起来并看懂"的交付阶段
 - **一个待补的验证**（不是新功能，是欠的证据）：`docs/STAGE5-VERIFICATION.md` 里的"下一轮能否答出名字"
-  至今未跑 —— 目前只能证明记忆能装配、能落盘，**不能证明注入后模型真的用上了**
+  —— ⚠️ 这一条**已于 2026-10-19 结清**（见该文件末尾「验证记录」），此处仅留档
 - **工具清单的其余 3 个**（`listKnowledgeSources` / `queryChatHistory` / `getCurrentTime`）——
-  三问的答案已在阶段 9 讨论中给出，见 `HANDOFF` 的工具清单小节
+  三问的答案已在阶段 9 讨论中给出，见 `HANDOFF` 的工具清单小节；**归入阶段 15**

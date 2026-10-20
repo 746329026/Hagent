@@ -1,5 +1,7 @@
 package com.hagent.security;
 
+import com.hagent.retrieval.KnowledgeSearch;
+
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -42,7 +44,7 @@ import org.springframework.web.servlet.HandlerInterceptor;
  *              └─ Controller: @RequestAttribute(...) UserContext ctx
  *                    └─ ChatAppService.chat(message, conversationId, ctx)   ← 方法参数
  *                          └─ AgentPipeline.run(message, conversationId, mode, ctx)   ← 方法参数
- *                                └─ 检索：KnowledgeRetrievalService.retrieve(message, user)
+ *                                └─ 检索：KnowledgeSearch.retrieve(message, user)
  * </pre>
  *
  * <p><b>★ 最后一跳不再是字符串 key</b>：身份从拦截器一路都以<b>方法参数</b>往下传

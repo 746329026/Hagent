@@ -1,9 +1,14 @@
 package com.hagent.app;
 
+import com.hagent.retrieval.KnowledgeSearch;
+
+import com.hagent.agent.PipelineEvent;
+
 import com.hagent.config.PromptProperties;
 import com.hagent.config.TraceProperties;
 import com.hagent.memory.ConversationMemory;
 import com.hagent.memory.MemoryMode;
+import com.hagent.config.AgentLoopProperties;
 import com.hagent.config.MemoryProperties;
 import com.hagent.memory.TokenBudget;
 import com.hagent.security.UserContext;
@@ -116,13 +121,21 @@ class AgentPipelineToolLoopTest {
         }
     }
 
-    private MemoryProperties memoryProperties(int maxSteps) {
+    /** 预算（历史能有多长）—— 与步数上限无关，所以这里不再带 maxSteps。 */
+    private MemoryProperties memoryProperties() {
         MemoryProperties props = new MemoryProperties();
-        props.setConversationMaxTokens(5000);
-        props.setConversationMaxMessages(30);
+        props.setChatMaxTokens(5000);
+        props.setChatMaxMessages(30);
         props.setWorkflowMaxTokens(50000);
         props.setWorkflowMaxMessages(200);
-        props.setMaxSteps(maxSteps);
+        return props;
+    }
+
+    /** 步数上限（循环跑几轮）—— 阶段 12 起它是独立的一份配置，且按模式分档。 */
+    private AgentLoopProperties agentLoopProperties(int chatMaxSteps) {
+        AgentLoopProperties props = new AgentLoopProperties();
+        props.setChatMaxSteps(chatMaxSteps);
+        props.setWorkflowMaxSteps(chatMaxSteps * 2);
         return props;
     }
 
@@ -183,12 +196,12 @@ class AgentPipelineToolLoopTest {
                 chatModel, new RecordingMemory(),
                 TestToolCallbackProvider.of(weather.asCallback()),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(modelCalls.get())
@@ -224,12 +237,12 @@ class AgentPipelineToolLoopTest {
         AgentPipeline pipeline = new AgentPipeline(
                 chatModel, new RecordingMemory(), TestToolCallbackProvider.none(),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("你好", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(modelCalls.get())
@@ -261,12 +274,12 @@ class AgentPipelineToolLoopTest {
                 chatModel, new RecordingMemory(),
                 TestToolCallbackProvider.of(loopTool.asCallback()),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(maxSteps),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(maxSteps),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("一直绕圈", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("一直绕圈", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(modelCalls.get())
@@ -277,6 +290,59 @@ class AgentPipelineToolLoopTest {
         assertThat(events)
                 .as("即使绕圈，也必须产出 Final 收尾 —— 不能让调用方拿不到任何结果")
                 .anyMatch(PipelineEvent.ModelOutput.Final.class::isInstance);
+    }
+
+    @Test
+    @DisplayName("★★ 步数上限【按模式分档】：chat 与 workflow 各走各的上限")
+    void maxStepsIsPerMode() {
+        // 辅助方法造的是 chat=2 / workflow=4（见 agentLoopProperties(int)）
+        int chatCalls = modelCallsUntilFinish(MemoryMode.CHAT);
+        int workflowCalls = modelCallsUntilFinish(MemoryMode.WORKFLOW);
+
+        assertThat(chatCalls)
+                .as("chat 模式必须用 hagent.agent.chat-max-steps(%d)", 2)
+                .isEqualTo(2);
+        assertThat(workflowCalls)
+                .as("★ workflow 模式必须用 hagent.agent.workflow-max-steps(%d)。"
+                        + "若这里也是 2，说明 maxStepsOf 的 switch 两档取到了同一个字段 —— "
+                        + "而这正是『两档分开』这件事唯一会被抓到的位置", 4)
+                .isEqualTo(4);
+    }
+
+    /**
+     * 让模型一直请求工具（模拟绕圈），返回"到收尾为止发生了几次模型调用"。
+     *
+     * <p>★ 必须是**端到端**的（真的跑一遍 {@code run()}），而不是反射去调
+     * {@code maxStepsOf} —— 那个方法是 private，测它等于测实现细节；
+     * 而"哪一档真的被用上"只有跑完一条流才看得见。
+     */
+    private int modelCallsUntilFinish(MemoryMode mode) {
+        FakeTool loopTool = new FakeTool("loopingTool", "又是这个结果");
+
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(deepSeekOptions());
+        AtomicInteger modelCalls = new AtomicInteger();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> {
+            modelCalls.incrementAndGet();
+            return Flux.just(toolCallChunk("loopingTool", "{}"));
+        });
+
+        AgentPipeline pipeline = new AgentPipeline(
+                chatModel, new RecordingMemory(),
+                TestToolCallbackProvider.of(loopTool.asCallback()),
+                TestAudit.disabled(),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(2),
+                new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
+                TestLongTermMemory.empty());
+
+        List<PipelineEvent> events = pipeline
+                .run("一直绕圈", "conv-1", mode, UserContext.ANONYMOUS)
+                .collectList().block();
+
+        assertThat(events)
+                .as("即使触顶，也必须产出 Final 收尾")
+                .anyMatch(PipelineEvent.ModelOutput.Final.class::isInstance);
+        return modelCalls.get();
     }
 
     @Test
@@ -299,12 +365,12 @@ class AgentPipelineToolLoopTest {
         AgentPipeline pipeline = new AgentPipeline(
                 chatModel, new RecordingMemory(), TestToolCallbackProvider.of(tool.asCallback()),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(2),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(2),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("问", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("问", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(finalOf(events).text())
@@ -332,12 +398,12 @@ class AgentPipelineToolLoopTest {
         AgentPipeline pipeline = new AgentPipeline(
                 chatModel, new RecordingMemory(), TestToolCallbackProvider.of(weather.asCallback()),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("杭州天气", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("杭州天气", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         List<PipelineEvent.ModelOutput> modelEvents = events.stream()
@@ -376,8 +442,8 @@ class AgentPipelineToolLoopTest {
     void retrievalToolEmitsRetrievedEvent() {
         // 用【真实】的 KnowledgeRetrievalTool，而不是假工具：
         // 这条要验的正是"工具从 ToolContext 拿到事件出口并发出 Retrieved"。
-        com.hagent.app.KnowledgeRetrievalService retrieval =
-                mock(com.hagent.app.KnowledgeRetrievalService.class);
+        com.hagent.retrieval.KnowledgeSearch retrieval =
+                mock(com.hagent.retrieval.KnowledgeSearch.class);
         com.hagent.retrieval.RetrievedChunk chunk = new com.hagent.retrieval.RetrievedChunk(
                 "员工每年享有五天带薪年假", "员工手册", "员工手册", "假期管理", 0,
                 com.hagent.document.AccessLevel.INTERNAL, 0.8,
@@ -401,12 +467,12 @@ class AgentPipelineToolLoopTest {
         AgentPipeline pipeline = new AgentPipeline(
                 chatModel, new RecordingMemory(), TestToolCallbackProvider.of(callbacks),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("年假几天", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("年假几天", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         PipelineEvent.Retrieved retrieved = events.stream()
@@ -434,12 +500,12 @@ class AgentPipelineToolLoopTest {
         AgentPipeline pipeline = new AgentPipeline(
                 chatModel, new RecordingMemory(), TestToolCallbackProvider.none(),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("你好", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(events)
@@ -470,11 +536,11 @@ class AgentPipelineToolLoopTest {
                 chatModel, new RecordingMemory(),
                 TestToolCallbackProvider.of(weather.asCallback()),
                 audit,
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
-        pipeline.run("杭州天气", "conv-9", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+        pipeline.run("杭州天气", "conv-9", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(audit.recorded())
@@ -509,12 +575,12 @@ class AgentPipelineToolLoopTest {
                 chatModel, new RecordingMemory(),
                 TestToolCallbackProvider.of(weather.asCallback()),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
         List<PipelineEvent> events = pipeline
-                .run("天气", "conv-8", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("天气", "conv-8", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(weather.calls.get())
@@ -546,11 +612,11 @@ class AgentPipelineToolLoopTest {
         AgentPipeline pipeline = new AgentPipeline(
                 chatModel, memory, TestToolCallbackProvider.of(tool.asCallback()),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
 
-        pipeline.run("天气", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+        pipeline.run("天气", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(memory.appended).hasSize(1);
@@ -584,7 +650,7 @@ class AgentPipelineToolLoopTest {
         return new AgentPipeline(
                 chatModel, memory, TestToolCallbackProvider.of(new FakeTool("getWeather", "杭州今天晴").asCallback()),
                 TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty());
     }
@@ -593,7 +659,7 @@ class AgentPipelineToolLoopTest {
     @DisplayName("★★ 两步回合发两个 StepStarted，且都在同一步的思考之前")
     void stepEventsMarkEachModelCall() {
         List<PipelineEvent> events = twoStepPipeline(twoStepModel(new AtomicInteger()), new RecordingMemory())
-                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         List<Integer> steps = events.stream()
@@ -628,7 +694,7 @@ class AgentPipelineToolLoopTest {
     void reasoningIsPersistedWithStepMarkers() {
         RecordingMemory memory = new RecordingMemory();
         List<PipelineEvent> events = twoStepPipeline(twoStepModel(new AtomicInteger()), memory)
-                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("杭州今天天气怎么样", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         List<Message> turn = memory.appended.get(0);
@@ -661,10 +727,10 @@ class AgentPipelineToolLoopTest {
 
         RecordingMemory memory = new RecordingMemory();
         new AgentPipeline(chatModel, memory, TestToolCallbackProvider.none(), TestAudit.disabled(),
-                new TraceProperties(), new PromptProperties(), memoryProperties(5),
+                new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty())
-                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("你好", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(com.hagent.memory.MessageCodec.reasoningOf(memory.appended.get(0).get(1)))
@@ -726,10 +792,11 @@ class AgentPipelineToolLoopTest {
 
         new AgentPipeline(chatModel, new RecordingMemory(), TestToolCallbackProvider.of(probe),
                 TestAudit.disabled(), new TraceProperties(), new PromptProperties(),
-                memoryProperties(5),
+                memoryProperties(),
+                agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.empty())
-                .run("随便问问", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("随便问问", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(nonBlocking.get())

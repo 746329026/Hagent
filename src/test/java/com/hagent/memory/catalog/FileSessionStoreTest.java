@@ -1,4 +1,4 @@
-package com.hagent.memory.session;
+package com.hagent.memory.catalog;
 
 import com.hagent.memory.MemoryMode;
 import com.hagent.config.MemoryProperties;
@@ -18,17 +18,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 会话目录 file 实现的专项测试 —— 只测"这个实现独有、且错了不会报错"的性质。
  *
  * <p>对外语义（懒创建、不覆盖标题与模式、按活跃时间倒序）不在这里重复：
- * 那些由 {@link ConversationCatalogContractTest} 对两个实现各跑一遍。
+ * 那些由 {@link SessionStoreContractTest} 对两个实现各跑一遍。
  */
-class FileConversationCatalogTest {
+class FileSessionStoreTest {
 
     private Path tempDir;
-    private FileConversationCatalog catalog;
+    private FileSessionStore catalog;
 
     @BeforeEach
     void setUp() throws IOException {
         tempDir = Files.createTempDirectory("hagent-catalog-test-");
-        catalog = new FileConversationCatalog(properties(), new ObjectMapper());
+        catalog = new FileSessionStore(properties(), new ObjectMapper());
     }
 
     @AfterEach
@@ -55,7 +55,7 @@ class FileConversationCatalogTest {
     @Test
     @DisplayName("★ 目录落在 sidecar 文件里（不与会话的消息文件混在一起）")
     void catalogLivesInSidecarFile() throws IOException {
-        catalog.touch("conv-a", MemoryMode.CONVERSATION, "第一句话");
+        catalog.touch("conv-a", MemoryMode.CHAT, "第一句话");
 
         assertThat(tempDir.resolve("_catalog.json"))
                 .as("目录必须是【一个】文件：侧栏要列出全部会话，"
@@ -71,7 +71,7 @@ class FileConversationCatalogTest {
     void reopenedInstanceSeesExistingCatalog() {
         catalog.touch("conv-a", MemoryMode.WORKFLOW, "跨实例");
 
-        FileConversationCatalog reopened = new FileConversationCatalog(properties(), new ObjectMapper());
+        FileSessionStore reopened = new FileSessionStore(properties(), new ObjectMapper());
 
         assertThat(reopened.find("conv-a")).hasValueSatisfying(session -> {
             assertThat(session.title()).isEqualTo("跨实例");
@@ -86,7 +86,7 @@ class FileConversationCatalogTest {
 
         assertThat(catalog.list(10)).isEmpty();
         // 而且还能继续写（不能被一个坏文件永久锁死）
-        catalog.touch("conv-b", MemoryMode.CONVERSATION, "新会话");
+        catalog.touch("conv-b", MemoryMode.CHAT, "新会话");
         assertThat(catalog.find("conv-b")).isPresent();
     }
 }

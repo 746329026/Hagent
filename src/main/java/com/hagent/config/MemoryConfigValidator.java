@@ -1,6 +1,4 @@
-package com.hagent.memory;
-
-import com.hagent.config.MemoryProperties;
+package com.hagent.config;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.EnvironmentPostProcessor;
@@ -39,6 +37,13 @@ import java.util.Set;
  * 也正因为如此，它<b>不依赖任何 Bean</b>：{@code AgentPipeline} /
  * {@code ConversationMemory} 能不能创建出来，与本类无关。
  *
+ * <h2>★ 阶段 12：它从 {@code com.hagent.memory} 搬到了这里</h2>
+ *
+ * <p>它是"启动期配置校验"，一个<b>装配</b>期的东西，而且它<b>一个 memory 类型都不依赖</b>
+ * （只读 {@code Environment} 与 {@link MemoryProperties} 的两个常量）。
+ * 住在 {@code memory} 包时，它凭空构成了一条 {@code memory → config} 依赖 ——
+ * 也就是一个包级环的一半。判据仍是"它是什么种类"，而不是"它讲什么业务"。
+ *
  * <h2>★ 第四次修正：接口在 Spring Boot 4.0 换了包</h2>
  *
  * <p>上面写的是"第三次"，这次是<b>包名</b>的修正，与运行时机无关：
@@ -64,10 +69,6 @@ import java.util.Set;
  */
 @Slf4j
 public class MemoryConfigValidator implements EnvironmentPostProcessor, Ordered {
-
-    private static final Set<String> VALID_RECORD_STORES = Set.of("mysql", "file");
-    private static final Set<String> VALID_CONTEXT_CACHES = Set.of("redis", "none");
-
     private static final String RECORD_PROPERTY = "hagent.memory.chat.record-store";
     private static final String CONTEXT_PROPERTY = "hagent.memory.chat.context-cache";
 
@@ -85,12 +86,12 @@ public class MemoryConfigValidator implements EnvironmentPostProcessor, Ordered 
                             + "【为什么报错而不是兼容】：两套语义并存会让后来者不知道该看哪个，"
                             + "而本项目尚未上线、没有外部调用方，兼容层只会成为永久负担。",
                     LEGACY_PROPERTY, legacy,
-                    RECORD_PROPERTY, VALID_RECORD_STORES,
-                    CONTEXT_PROPERTY, VALID_CONTEXT_CACHES));
+                    RECORD_PROPERTY, MemoryProperties.VALID_RECORD_STORES,
+                    CONTEXT_PROPERTY, MemoryProperties.VALID_CONTEXT_CACHES));
         }
 
-        requireOneOf(environment, RECORD_PROPERTY, VALID_RECORD_STORES);
-        requireOneOf(environment, CONTEXT_PROPERTY, VALID_CONTEXT_CACHES);
+        requireOneOf(environment, RECORD_PROPERTY, MemoryProperties.VALID_RECORD_STORES);
+        requireOneOf(environment, CONTEXT_PROPERTY, MemoryProperties.VALID_CONTEXT_CACHES);
 
         log.debug("[记忆] 配置预检通过：{}={} {}={}",
                 RECORD_PROPERTY, environment.getProperty(RECORD_PROPERTY),

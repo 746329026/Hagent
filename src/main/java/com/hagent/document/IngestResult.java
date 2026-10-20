@@ -17,8 +17,14 @@ public record IngestResult(String source, IngestOutcome outcome, int chunkCount,
         return new IngestResult(source, IngestOutcome.SKIPPED_UNCHANGED, 0, docHash);
     }
 
-    /** 是否实际写入了向量库。 */
+    /**
+     * 是否<b>真的</b>写入了向量库 —— 判据是"写入了块"，不是"没被跳过"。
+     *
+     * <p>★ 阶段 12 修正：原先转发 {@code outcome.written()}，于是
+     * "正文为空 → {@code ADDED}、{@code chunkCount = 0}" 的文档会被报成"已写入"。
+     * 数值统计没错，但契约是假的 —— 谁按它判断"这次有没有东西进库"就会错。
+     */
     public boolean written() {
-        return outcome.written();
+        return chunkCount > 0;
     }
 }

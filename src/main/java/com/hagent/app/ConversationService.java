@@ -8,8 +8,8 @@ import com.hagent.dto.SessionDtos.SessionSummary;
 import com.hagent.exception.AgentException;
 import com.hagent.memory.MessageCodec;
 import com.hagent.memory.ReasoningTrace;
-import com.hagent.memory.record.ConversationRecordStore;
-import com.hagent.memory.session.ConversationCatalog;
+import com.hagent.memory.record.MessageStore;
+import com.hagent.memory.catalog.SessionStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -24,10 +24,10 @@ import java.util.List;
  *
  * <p>三件事必须有人做，而它们都不属于 HTTP 层，也不属于存储层：
  * <ol>
- *   <li><b>把两个存储拼起来</b>：标题/模式来自 {@link ConversationCatalog}，
- *       消息来自 {@link ConversationRecordStore}。"一个会话的详情"横跨这两者，
+ *   <li><b>把两个存储拼起来</b>：标题/模式来自 {@link SessionStore}，
+ *       消息来自 {@link MessageStore}。"一个会话的详情"横跨这两者，
  *       拼接点是本层；</li>
- *   <li><b>把存储类型翻译成 API 类型</b>：{@code ConversationCatalog.Session} 与
+ *   <li><b>把存储类型翻译成 API 类型</b>：{@code SessionStore.Session} 与
  *       {@code ReasoningTrace.Section} 是<b>存储形态</b>（允许演化），
  *       {@code SessionDtos.*} 是<b>契约</b>（改名即破坏前端）。两者不共用类型；</li>
  *   <li><b>"不存在"要变成异常</b>：存储层返回 {@code Optional.empty()} / {@code false}，
@@ -50,15 +50,15 @@ import java.util.List;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class ConversationQueryService {
+public class ConversationService {
 
     /** 侧栏默认返回多少个会话（调用方不指定时）。 */
     private static final int DEFAULT_LIMIT = 50;
 
-    private final ConversationCatalog conversationCatalog;
+    private final SessionStore conversationCatalog;
 
     /** 直接依赖记录层而不是门面 {@code ConversationMemory}：门面只提供"按预算裁剪"的读。 */
-    private final ConversationRecordStore recordStore;
+    private final MessageStore recordStore;
 
     /**
      * 列出会话（最近的在前）。
@@ -80,7 +80,7 @@ public class ConversationQueryService {
      * @throws AgentException {@link ErrorCode#SESSION_NOT_FOUND} 会话不存在
      */
     public SessionDetail detail(String conversationId) {
-        ConversationCatalog.Session session = conversationCatalog.find(conversationId)
+        SessionStore.Session session = conversationCatalog.find(conversationId)
                 .orElseThrow(() -> new AgentException(ErrorCode.SESSION_NOT_FOUND, conversationId));
         List<Message> messages = recordStore.readAll(conversationId);
         return new SessionDetail(toSummary(session),
@@ -107,7 +107,7 @@ public class ConversationQueryService {
 
     // ==================== 类型翻译 ====================
 
-    private SessionSummary toSummary(ConversationCatalog.Session session) {
+    private SessionSummary toSummary(SessionStore.Session session) {
         return new SessionSummary(session.conversationId(), session.title(),
                 session.mode(), session.createdAt(), session.updatedAt());
     }

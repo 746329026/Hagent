@@ -1,6 +1,6 @@
 package com.hagent.controller;
 
-import com.hagent.app.ConversationQueryService;
+import com.hagent.app.ConversationService;
 import com.hagent.dto.SessionDtos.RenameRequest;
 import com.hagent.dto.SessionDtos.SessionDetail;
 import com.hagent.dto.SessionDtos.SessionSummary;
@@ -51,7 +51,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ConversationController {
 
-    private final ConversationQueryService conversationQueryService;
+    private final ConversationService conversationQueryService;
 
     /**
      * 列出会话，最近的在前。
@@ -88,7 +88,7 @@ public class ConversationController {
      *
      * <p>为什么需要它：标题默认取第一句用户消息，而它经常不是一个好名字
      * （"在吗"、"这个怎么弄"）。用户应当能改 —— 而改完<b>不能再被下一句话覆盖回去</b>
-     * （这条由 {@code ConversationCatalog#touch} 的契约保证：已存在的会话不改标题）。
+     * （这条由 {@code SessionStore#touch} 的契约保证：已存在的会话不改标题）。
      */
     @PatchMapping("/{conversationId}")
     public SessionSummary rename(@PathVariable String conversationId,

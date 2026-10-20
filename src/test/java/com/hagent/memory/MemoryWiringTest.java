@@ -1,7 +1,7 @@
 package com.hagent.memory;
 
-import com.hagent.memory.record.ConversationRecordStore;
-import com.hagent.memory.record.MysqlConversationRecordStore;
+import com.hagent.memory.record.MessageStore;
+import com.hagent.memory.record.MysqlMessageStore;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -88,8 +88,8 @@ class MemoryWiringTest {
     @Test
     @DisplayName("★ 默认配置下记录层必须是 MySQL 实现（不是 file，也不是别的）")
     void recordStoreIsMysql() {
-        assertThat(context.getBean(ConversationRecordStore.class))
-                .isInstanceOf(MysqlConversationRecordStore.class);
+        assertThat(context.getBean(MessageStore.class))
+                .isInstanceOf(MysqlMessageStore.class);
     }
 
     @Test

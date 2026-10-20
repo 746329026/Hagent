@@ -1,5 +1,9 @@
 package com.hagent.app;
 
+import com.hagent.agent.PipelineEvent;
+import com.hagent.agent.ToolEventSink;
+
+import com.hagent.config.AgentLoopProperties;
 import com.hagent.config.PromptProperties;
 import com.hagent.config.TraceProperties;
 import com.hagent.memory.ConversationMemory;
@@ -139,6 +143,15 @@ public class AgentPipeline {
     private final PromptBuilder promptBuilder;
     private final MemoryProperties memoryProperties;
 
+    /**
+     * 步数上限（阶段 12 从 {@code MemoryProperties} 搬来）—— 按模式两档。
+     *
+     * <p>为什么它是独立的一个字段而不是并进 {@link #memoryProperties}：
+     * 那里装的是"<b>历史能有多长</b>"（token / 条数），这里装的是"<b>循环跑几轮</b>" ——
+     * 两者是不同轴的量。合并会让 {@code MemoryTrimmer} 拿到一个它永不读的字段（坑 #12）。
+     */
+    private final AgentLoopProperties agentLoopProperties;
+
     /** 模型配置好的 options（系统提示词、模型名、reasoning-effort 等）。每步从它克隆再加工具。 */
     private final ChatOptions baseOptions;
 
@@ -172,11 +185,13 @@ public class AgentPipeline {
                          TraceProperties traceProperties,
                          PromptProperties promptProperties,
                          MemoryProperties memoryProperties,
+                         AgentLoopProperties agentLoopProperties,
                          Resource ragAnswerPromptResource,
                          LongTermMemoryStore longTermMemory) {
         this.chatModel = chatModel;
         this.memory = memory;
         this.memoryProperties = memoryProperties;
+        this.agentLoopProperties = agentLoopProperties;
         this.promptBuilder = new PromptBuilder(traceProperties, promptProperties, ragAnswerPromptResource);
         this.toolCallbacks = toolCallbackProvider.getToolCallbacks();
         this.toolCallingManager = ToolCallingManager.builder().build();
@@ -237,6 +252,9 @@ public class AgentPipeline {
 
         Prompt original = new Prompt(List.of(new UserMessage(message)));
         TokenBudget budget = budgetOf(safeMode);
+        // ★ 阶段 12：步数上限按模式取（chat 10 / workflow 20）。
+        //   在 run() 里解析一次就定下来，融进本次运行的状态 —— 而不是循环里每步再 switch 一次。
+        int maxSteps = maxStepsOf(safeMode);
 
         return Flux.defer(() -> {
             long startNanos = System.nanoTime();
@@ -246,9 +264,9 @@ public class AgentPipeline {
 
             // ---------- ② 读历史 ----------
             List<Message> history = memory.load(cid, budget);
-            log.debug("[{}] ② 读历史：会话={} 模式={} 注入历史 {} 条（预算 {} token / {} 条）",
+            log.debug("[{}] ② 读历史：会话={} 模式={} 注入历史 {} 条（预算 {} token / {} 条，步数上限 {}）",
                     LOG_TAG, cid, safeMode, history.size(),
-                    budget.maxTokens(), budget.maxMessages());
+                    budget.maxTokens(), budget.maxMessages(), maxSteps);
 
             // ---------- ③ 暂无"无条件检索" ----------
             //   ★ 阶段 9 的重要行为变更：检索【不再】在管线里无条件执行。
@@ -265,7 +283,7 @@ public class AgentPipeline {
 
             // 本轮循环状态：从拼装好的 prompt 开始，随工具结果不断增长
             LoopState state = new LoopState(new ArrayList<>(assembled.getInstructions()),
-                    original.getUserMessage());
+                    original.getUserMessage(), maxSteps);
             return loop(state, cid, user, startNanos);
         });
     }
@@ -339,9 +357,18 @@ public class AgentPipeline {
         /** 本次的用户消息。<b>只有这一条会写进会话记忆</b>（工具活动不写）。 */
         private final Message userMessage;
 
-        private LoopState(List<Message> messages, Message userMessage) {
+        /**
+         * 本次运行的步数上限 —— 由 {@code run()} 按模式解析一次（chat 10 / workflow 20）。
+         *
+         * <p>放在运行状态里而不是每步重新取：循环是递归的，同一个值会被读 N 次，
+         * 而它<b>在一次运行内不可能变</b>（模式已落库、请求内不可改，决策 53）。
+         */
+        private final int maxSteps;
+
+        private LoopState(List<Message> messages, Message userMessage, int maxSteps) {
             this.messages = messages;
             this.userMessage = userMessage;
+            this.maxSteps = maxSteps;
         }
     }
 
@@ -389,13 +416,13 @@ public class AgentPipeline {
                                      UserContext user,
                                      long startNanos) {
         return Flux.defer(() -> {
-            if (state.steps >= memoryProperties.getMaxSteps()) {
+            if (state.steps >= state.maxSteps) {
                 // ---------- ③ 防御出口：不再调用模型，用已累积的内容收尾 ----------
                 log.warn("[{}] ★ 达到步数上限 {}（可能模型在绕圈）—— 用已累积的 {} 字收尾。"
                                 + "【排查方向】① 工具描述是否让模型误解了用途；"
                                 + "② 工具返回内容是否让模型以为【还没做完】；"
-                                + "③ hagent.memory.chat.max-steps 是否需要调整",
-                        LOG_TAG, memoryProperties.getMaxSteps(), state.text.length());
+                                + "③ hagent.agent.chat-max-steps / workflow-max-steps 是否需要调整",
+                        LOG_TAG, state.maxSteps, state.text.length());
                 return Flux.just(finish(state, conversationId, startNanos, "maxSteps"));
             }
             state.steps++;
@@ -861,12 +888,33 @@ public class AgentPipeline {
      */
     private TokenBudget budgetOf(MemoryMode mode) {
         return switch (mode) {
-            case CONVERSATION -> new TokenBudget(
-                    memoryProperties.getConversationMaxTokens(),
-                    memoryProperties.getConversationMaxMessages());
+            case CHAT -> new TokenBudget(
+                    memoryProperties.getChatMaxTokens(),
+                    memoryProperties.getChatMaxMessages());
             case WORKFLOW -> new TokenBudget(
                     memoryProperties.getWorkflowMaxTokens(),
                     memoryProperties.getWorkflowMaxMessages());
+        };
+    }
+
+    /**
+     * 模式 → 步数上限（阶段 12：从 {@code MemoryProperties.maxSteps} 搬来，并按模式分档）。
+     *
+     * <p><b>★ 为什么是两档而不是一个全局值</b>：chat 的"合理步数"与 workflow 不是一个量级 ——
+     * 前者是"查两次资料 + 追问 + 汇总"，后者每一步的工具返回都可能是整篇文档。
+     * 用一个值必然二选一地错：取 10 会砍掉工作流的长任务，取 20 会让普通问答多绕 10 步的账单。
+     *
+     * <p>与 {@link #budgetOf} 一样用<b>穷尽 switch 且刻意不写 {@code default}</b>：
+     * 新增 {@link MemoryMode} 时编译器会报错，而不是运行期落到某个默认值。
+     *
+     * <p>★ 与 {@code budgetOf} 是<b>两条不同的轴</b>：这里管"循环跑几轮"，
+     * 那里管"历史能有多长"。不要因为签名相似就合并成一个对象 ——
+     * {@code MemoryTrimmer} 只消费后者，合并会让它带一个永不读的字段（坑 #12）。
+     */
+    private int maxStepsOf(MemoryMode mode) {
+        return switch (mode) {
+            case CHAT -> agentLoopProperties.getChatMaxSteps();
+            case WORKFLOW -> agentLoopProperties.getWorkflowMaxSteps();
         };
     }
 

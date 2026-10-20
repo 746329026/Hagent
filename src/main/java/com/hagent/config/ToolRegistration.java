@@ -1,6 +1,6 @@
 package com.hagent.config;
 
-import com.hagent.app.KnowledgeRetrievalService;
+import com.hagent.retrieval.KnowledgeSearch;
 import com.hagent.tool.KnowledgeRetrievalTool;
 import com.hagent.tool.LongTermMemoryTools;
 import com.hagent.tool.audit.MysqlToolInvocationStore;
@@ -72,7 +72,7 @@ public class ToolRegistration {
      * @param retrievalProperties 检索开关；关掉则不注册检索工具
      */
     @Bean
-    public ToolCallback[] allTools(KnowledgeRetrievalService retrievalService,
+    public ToolCallback[] allTools(KnowledgeSearch retrievalService,
                                    RetrievalProperties retrievalProperties,
                                    com.hagent.memory.longterm.LongTermMemoryStore longTermMemoryStore) {
         java.util.List<Object> toolObjects = new java.util.ArrayList<>(2);

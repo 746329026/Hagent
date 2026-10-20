@@ -1,8 +1,11 @@
 package com.hagent.tool;
 
+import com.hagent.agent.PipelineEvent;
+import com.hagent.agent.ToolEventSink;
+
 import com.hagent.config.ToolRegistration;
 
-import com.hagent.app.KnowledgeRetrievalService;
+import com.hagent.retrieval.KnowledgeSearch;
 import com.hagent.config.RetrievalProperties;
 import com.hagent.document.AccessLevel;
 import com.hagent.retrieval.RelevanceBand;
@@ -49,7 +52,7 @@ class KnowledgeRetrievalToolTest {
     }
 
     private KnowledgeRetrievalTool toolReturning(List<RetrievedChunk> chunks) {
-        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        KnowledgeSearch service = mock(KnowledgeSearch.class);
         when(service.retrieve(any(), any())).thenReturn(chunks);
         return new KnowledgeRetrievalTool(service);
     }
@@ -65,7 +68,7 @@ class KnowledgeRetrievalToolTest {
     @Test
     @DisplayName("★★ 身份必须从 ToolContext 传进检索 Service —— 越权防线不能因为搬家而断掉")
     void identityIsPassedThroughToRetrievalService() {
-        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        KnowledgeSearch service = mock(KnowledgeSearch.class);
         when(service.retrieve(any(), any())).thenReturn(List.of());
         KnowledgeRetrievalTool tool = new KnowledgeRetrievalTool(service);
 
@@ -78,7 +81,7 @@ class KnowledgeRetrievalToolTest {
     @Test
     @DisplayName("★★ 缺失身份 → 落到【匿名】而不是放行（失败方向必须偏保守）")
     void missingIdentityFallsBackToAnonymousNotToEverything() {
-        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        KnowledgeSearch service = mock(KnowledgeSearch.class);
         when(service.retrieve(any(), any())).thenReturn(List.of());
         KnowledgeRetrievalTool tool = new KnowledgeRetrievalTool(service);
 
@@ -94,7 +97,7 @@ class KnowledgeRetrievalToolTest {
     @Test
     @DisplayName("★ 身份类型不对 → 同样落匿名（不静默当成缺省的写权限）")
     void wrongIdentityTypeFallsBackToAnonymous() {
-        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        KnowledgeSearch service = mock(KnowledgeSearch.class);
         when(service.retrieve(any(), any())).thenReturn(List.of());
         KnowledgeRetrievalTool tool = new KnowledgeRetrievalTool(service);
 
@@ -156,7 +159,7 @@ class KnowledgeRetrievalToolTest {
     @Test
     @DisplayName("★★ 检索【失败】必须与『没命中』给出完全不同的说明 —— 否则系统在诚实地撒谎")
     void retrievalFailureIsNotRenderedAsNoHit() {
-        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        KnowledgeSearch service = mock(KnowledgeSearch.class);
         when(service.retrieve(any(), any())).thenThrow(
                 new com.hagent.exception.RetrievalUnavailableException(
                         "知识库检索失败（查询=年假几天）", new RuntimeException("pgvector 不可达")));
@@ -176,14 +179,14 @@ class KnowledgeRetrievalToolTest {
     @Test
     @DisplayName("★ 检索失败时不发 Retrieved 事件 —— 发了就等于告诉前端『检索成功、命中 0 条』")
     void failureDoesNotEmitRetrievedEvent() {
-        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        KnowledgeSearch service = mock(KnowledgeSearch.class);
         when(service.retrieve(any(), any())).thenThrow(
                 new com.hagent.exception.RetrievalUnavailableException(
                         "失败", new RuntimeException("pgvector 不可达")));
         KnowledgeRetrievalTool tool = new KnowledgeRetrievalTool(service);
 
-        java.util.List<com.hagent.app.PipelineEvent> emitted = new java.util.ArrayList<>();
-        com.hagent.app.ToolEventSink sink = emitted::add;
+        java.util.List<com.hagent.agent.PipelineEvent> emitted = new java.util.ArrayList<>();
+        com.hagent.agent.ToolEventSink sink = emitted::add;
         UserContext employee = new UserContext("zhangsan", Role.EMPLOYEE);
 
         tool.retrieveKnowledge("年假几天", new ToolContext(Map.of(
@@ -231,7 +234,7 @@ class KnowledgeRetrievalToolTest {
     @Test
     @DisplayName("★ 通过 ToolCallback 真实调用一次 —— 参数能正确解析并命中工具方法")
     void callbackActuallyInvokesTheToolMethod() {
-        KnowledgeRetrievalService service = mock(KnowledgeRetrievalService.class);
+        KnowledgeSearch service = mock(KnowledgeSearch.class);
         when(service.retrieve(any(), any())).thenReturn(List.of(
                 chunk("员工每年享有五天带薪年假", "员工手册", "假期管理", RelevanceBand.HIGH)));
         ToolCallback[] callbacks = MethodToolCallbackProvider.builder()
@@ -266,7 +269,7 @@ class KnowledgeRetrievalToolTest {
         off.setEnabled(false);
 
         ToolCallback[] tools = new ToolRegistration()
-                .allTools(mock(KnowledgeRetrievalService.class), off,
+                .allTools(mock(KnowledgeSearch.class), off,
                         mock(com.hagent.memory.longterm.LongTermMemoryStore.class));
 
         assertThat(tools)
@@ -286,7 +289,7 @@ class KnowledgeRetrievalToolTest {
         on.setEnabled(true);
 
         ToolCallback[] tools = new ToolRegistration()
-                .allTools(mock(KnowledgeRetrievalService.class), on,
+                .allTools(mock(KnowledgeSearch.class), on,
                         mock(com.hagent.memory.longterm.LongTermMemoryStore.class));
 
         assertThat(tools)

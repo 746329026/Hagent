@@ -132,16 +132,38 @@ public enum AccessLevel {
      * @throws IllegalArgumentException 取值不在允许范围内时
      */
     public static AccessLevel parse(String raw) {
+        return tryParse(raw).orElseThrow(() -> new IllegalArgumentException(
+                "未知的密级取值：" + raw + "。允许的取值：" + java.util.Arrays.toString(values())));
+    }
+
+    /**
+     * <b>宽松</b>解析："字符串 → 枚举"的规则仍然只有这一处，但不决定后果。
+     *
+     * <p>★ 阶段 12 第 2 步：这一步之前，三处各自实现了一遍"level 字符串怎么变成枚举"，
+     * 而且<b>失败策略互相矛盾</b>（入库抛异常 / 检索静默回退 / 长期记忆 WARN 回退）。
+     * 矛盾本身不是错 —— 是因为三处对脏数据的容忍度确实不同；错的是<b>规则</b>被抄了三遍。
+     *
+     * <p>于是拆成：<b>规则收在这里</b>（{@link #parse} 与 {@code tryParse} 共用同一段匹配逻辑），
+     * <b>策略留在调用点</b>：
+     * <ul>
+     *   <li>入库 → {@link #parse}（<b>拒绝</b>）：作者写了 {@code level: 绝密} 却存成 INTERNAL，
+     *       是最坏的静默失配，必须让它失败；</li>
+     *   <li>读取既有数据 → {@code tryParse(...).orElse(DEFAULT)}（<b>不中断</b>）：
+     *       一条脏记录不该让整轮对话失败，但调用点要能自己记 WARN。</li>
+     * </ul>
+     *
+     * @return 空表示"取值非法"；空白输入返回 {@link #DEFAULT}（与 {@link #parse} 一致）
+     */
+    public static java.util.Optional<AccessLevel> tryParse(String raw) {
         if (raw == null || raw.isBlank()) {
-            return DEFAULT;
+            return java.util.Optional.of(DEFAULT);
         }
         String normalized = raw.trim().toUpperCase();
         for (AccessLevel level : values()) {
             if (level.name().equals(normalized)) {
-                return level;
+                return java.util.Optional.of(level);
             }
         }
-        throw new IllegalArgumentException(
-                "未知的密级取值：" + raw + "。允许的取值：" + java.util.Arrays.toString(values()));
+        return java.util.Optional.empty();
     }
 }

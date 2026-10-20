@@ -1,6 +1,6 @@
-package com.hagent.app;
+package com.hagent.retrieval;
 
-import com.hagent.config.RetrievalProperties;
+
 import com.hagent.exception.RetrievalUnavailableException;
 import com.hagent.retrieval.RetrievalFilterBuilder;
 import com.hagent.retrieval.RetrievedChunk;
@@ -10,7 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 
@@ -66,12 +66,12 @@ import java.util.List;
  * 那时的重复调用会是我们显式写出来的，不再需要一个防御性检查去兜）。
  */
 @Slf4j
-@Service
+@Component
 @RequiredArgsConstructor
-public class KnowledgeRetrievalService {
+public class KnowledgeSearch {
 
     private final VectorStore vectorStore;
-    private final RetrievalProperties properties;
+    private final RetrievalSettings settings;
     private final RetrievalFilterBuilder filterBuilder;
 
     /**
@@ -82,7 +82,7 @@ public class KnowledgeRetrievalService {
      * @return 命中片段（可能为空，<b>不会为 null</b>）；失败时同样返回空列表
      */
     public List<RetrievedChunk> retrieve(String query, UserContext user) {
-        if (!properties.isEnabled()) {
+        if (!settings.enabled()) {
             log.debug("[检索] 已通过 hagent.rag.retrieval.enabled=false 关闭，跳过检索");
             return List.of();
         }
@@ -98,10 +98,10 @@ public class KnowledgeRetrievalService {
 
         SearchRequest request = SearchRequest.builder()
                 .query(query)
-                .topK(properties.getTopK())
+                .topK(settings.topK())
                 // ★ 单位换算在这里闭环：配置是"距离上限"，框架要"相似度下限"。
                 //   实测确认过该参数是相似度下限（0.0 = 不筛）。
-                .similarityThreshold(properties.similarityThreshold())
+                .similarityThreshold(settings.similarityThreshold())
                 .filterExpression(filter)
                 .build();
 
@@ -112,7 +112,7 @@ public class KnowledgeRetrievalService {
                     .toList();
 
             log.debug("[检索] 命中 {} 条（topK={} 粗筛=距离<= {}）| 视角 userId={} role={} 可见密级={}",
-                    chunks.size(), properties.getTopK(), properties.getMaxDistance(),
+                    chunks.size(), settings.topK(), settings.maxDistance(),
                     user.userId(), user.role(),
                     com.hagent.document.AccessLevel.visibleLevels(user.clearance()));
             chunks.forEach(c -> log.debug("[检索]   · 相似度={} 档位={} 出处={}",
@@ -142,6 +142,6 @@ public class KnowledgeRetrievalService {
                 document.getMetadata(),
                 document.getText(),
                 similarity,
-                properties.bandOf(similarity));
+                settings.bandOf(similarity));
     }
 }

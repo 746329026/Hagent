@@ -1,6 +1,5 @@
 package com.hagent.memory.longterm;
 
-import com.hagent.config.LongTermMemoryProperties;
 import com.hagent.document.AccessLevel;
 import com.hagent.security.UserContext;
 
@@ -28,7 +27,7 @@ import java.util.Optional;
  *
  * <p>所以：<b>索引</b>（每条一行标题+摘要）每轮注入，让模型<b>知道有哪些记忆</b>；
  * <b>明细</b>由 {@code readMemory} 按需取。索引的长度上限因此是一条硬约束
- * （见 {@link LongTermMemoryProperties#getIndexMaxChars()}）。
+ * （见 {@link LongTermMemorySettings#getIndexMaxChars()}）。
  *
  * <h2>★ 密级：复用 {@link AccessLevel}，不新增概念</h2>
  *

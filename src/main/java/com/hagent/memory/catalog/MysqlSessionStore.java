@@ -1,7 +1,6 @@
-package com.hagent.memory.session;
+package com.hagent.memory.catalog;
 
 import com.hagent.memory.MemoryMode;
-import com.hagent.config.MemoryProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -39,7 +38,7 @@ import java.util.regex.Pattern;
  * 早晚要改；不需要它的语义，就不要引入这个依赖。）
  */
 @Slf4j
-public class MysqlConversationCatalog implements ConversationCatalog {
+public class MysqlSessionStore implements SessionStore {
 
     /** 表名只允许普通标识符 —— 它会被拼进 SQL，不能来自不可信输入。 */
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
@@ -50,8 +49,8 @@ public class MysqlConversationCatalog implements ConversationCatalog {
     private final JdbcTemplate jdbc;
     private final String table;
 
-    public MysqlConversationCatalog(DataSource dataSource, MemoryProperties properties) {
-        String raw = properties.getConversationTableName();
+    public MysqlSessionStore(DataSource dataSource, SessionStoreSettings settings) {
+        String raw = settings.getConversationTableName();
         if (raw == null || !IDENTIFIER.matcher(raw.trim()).matches()) {
             throw new IllegalStateException(
                     "hagent.memory.chat.conversation-table-name 不是合法标识符：" + raw
@@ -91,7 +90,7 @@ public class MysqlConversationCatalog implements ConversationCatalog {
     @Override
     public void touch(String conversationId, MemoryMode mode, String titleSeed) {
         MemoryMode safeMode = mode == null ? MemoryMode.DEFAULT : mode;
-        String title = ConversationCatalog.titleOf(titleSeed);
+        String title = SessionStore.titleOf(titleSeed);
         // 一条语句承担两种语义：不存在→插入；存在→只更新 updated_at。
         // 标题与模式【刻意】不出现在 UPDATE 子句里（见类注释）。
         jdbc.update("INSERT INTO " + table
@@ -109,7 +108,7 @@ public class MysqlConversationCatalog implements ConversationCatalog {
             return false;
         }
         int affected = jdbc.update("UPDATE " + table + " SET title = ?, updated_at = NOW(3)"
-                + " WHERE conversation_id = ?", ConversationCatalog.titleOf(title), conversationId);
+                + " WHERE conversation_id = ?", SessionStore.titleOf(title), conversationId);
         if (affected > 0) {
             return true;
         }

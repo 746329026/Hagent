@@ -1,5 +1,6 @@
 package com.hagent.stream;
 
+
 /**
  * SSE 事件名的**唯一出处**。
  *

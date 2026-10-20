@@ -1,5 +1,7 @@
 package com.hagent.app;
 
+import com.hagent.retrieval.KnowledgeSearch;
+
 import com.hagent.document.AccessLevel;
 import com.hagent.retrieval.RetrievedChunk;
 import com.hagent.security.Role;
@@ -38,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>★ 一个必须警惕的陷阱：失败会伪装成"没命中"</h2>
  *
- * <p>{@code KnowledgeRetrievalService} 在检索失败时<b>降级返回空列表</b>
+ * <p>{@code KnowledgeSearch} 在检索失败时<b>降级返回空列表</b>
  * （设计如此：知识检索不在关键路径上）。于是一个<b>坏掉的过滤条件</b>
  * 与"知识库里确实没有相关内容"在结果上完全一样 —— 都是空列表。
  *
@@ -73,7 +75,7 @@ class RetrievalPermissionIntegrationTest {
     private static final String INTERNAL_SOURCE = "员工手册.md";
 
     @Autowired
-    private KnowledgeRetrievalService retrievalService;
+    private KnowledgeSearch retrievalService;
 
     @Autowired
     private DocumentIngestService ingestService;

@@ -1,7 +1,8 @@
-package com.hagent.memory.session;
+package com.hagent.memory.catalog;
+
+import com.hagent.common.AtomicWrites;
 
 import com.hagent.memory.MemoryMode;
-import com.hagent.config.MemoryProperties;
 import lombok.extern.slf4j.Slf4j;
 import tools.jackson.databind.ObjectMapper;
 
@@ -53,7 +54,7 @@ import java.util.Optional;
  * 展示格式属于前端，不属于存储。
  */
 @Slf4j
-public class FileConversationCatalog implements ConversationCatalog {
+public class FileSessionStore implements SessionStore {
 
     /** sidecar 文件名。下划线开头，与 {@code {uuid}.json} 的命名空间分开。 */
     private static final String CATALOG_FILE = "_catalog.json";
@@ -70,9 +71,9 @@ public class FileConversationCatalog implements ConversationCatalog {
      */
     private final Object lock = new Object();
 
-    public FileConversationCatalog(MemoryProperties properties, ObjectMapper objectMapper) {
+    public FileSessionStore(SessionStoreSettings settings, ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
-        this.rootDir = Path.of(properties.getFileDir()).toAbsolutePath().normalize();
+        this.rootDir = Path.of(settings.getFileDir()).toAbsolutePath().normalize();
         this.catalogFile = rootDir.resolve(CATALOG_FILE);
         try {
             Files.createDirectories(rootDir);
@@ -116,7 +117,7 @@ public class FileConversationCatalog implements ConversationCatalog {
             Catalog file = read();
             Entry existing = file.conversations().get(conversationId);
             Entry next = existing == null
-                    ? new Entry(ConversationCatalog.titleOf(titleSeed), safeMode.wireName(), now, now)
+                    ? new Entry(SessionStore.titleOf(titleSeed), safeMode.wireName(), now, now)
                     // ★ 已存在：只更新 updatedAt。标题与模式原地不动（接口契约）。
                     : new Entry(existing.title(), existing.mode(), existing.createdAt(), now);
             if (existing != null && next.equals(existing)) {
@@ -139,7 +140,7 @@ public class FileConversationCatalog implements ConversationCatalog {
                 return false;
             }
             file.conversations().put(conversationId, new Entry(
-                    ConversationCatalog.titleOf(title), existing.mode(),
+                    SessionStore.titleOf(title), existing.mode(),
                     existing.createdAt(), System.currentTimeMillis()));
             write(file);
             return true;
@@ -196,29 +197,11 @@ public class FileConversationCatalog implements ConversationCatalog {
 
     /** 原子写入：临时文件 → ATOMIC_MOVE（与记录层同一做法，理由见那个类）。 */
     private void write(Catalog catalog) {
-        Path tmp = catalogFile.resolveSibling(CATALOG_FILE + ".tmp");
-        try {
-            String json = objectMapper.writeValueAsString(catalog);
-            Files.writeString(tmp, json, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE);
-            try {
-                Files.move(tmp, catalogFile,
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE);
-            } catch (IOException atomicFailed) {
-                log.warn("[记忆-会话目录-file] ATOMIC_MOVE 不被支持，降级为普通替换（原子性无保障）：{}",
-                        atomicFailed.getMessage());
-                Files.move(tmp, catalogFile, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException("写入会话目录失败：" + catalogFile, e);
-        } finally {
-            try {
-                Files.deleteIfExists(tmp);
-            } catch (IOException ignored) {
-                // 临时文件清理失败不影响主流程
-            }
+        String json;
+        try { json = objectMapper.writeValueAsString(catalog); }
+        catch (Exception e) { throw new IllegalStateException("序列化会话目录失败：" + catalogFile, e); }
+        if (!AtomicWrites.writeString(catalogFile, json)) {
+            log.warn("[记忆-会话目录-file] ATOMIC_MOVE 不被支持，已降级为普通替换（原子性无保障）：{}", catalogFile);
         }
     }
 

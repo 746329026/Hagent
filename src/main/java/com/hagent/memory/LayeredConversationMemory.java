@@ -1,7 +1,7 @@
 package com.hagent.memory;
 
 import com.hagent.memory.context.ConversationContextCache;
-import com.hagent.memory.record.ConversationRecordStore;
+import com.hagent.memory.record.MessageStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 
@@ -15,7 +15,7 @@ import java.util.function.Consumer;
  *
  * <p>{@code AgentPipeline} 依赖 {@link ConversationMemory} 这一个抽象，而它背后是<b>两个角色</b>：
  * <ul>
- *   <li>{@link ConversationRecordStore} —— <b>对话记录</b>：权威、完整、永久（用户刷新页面要看）；</li>
+ *   <li>{@link MessageStore} —— <b>对话记录</b>：权威、完整、永久（用户刷新页面要看）；</li>
  *   <li>{@link ConversationContextCache} —— <b>模型上下文</b>：有损、易失、可重建（模型这次要用的）。</li>
  * </ul>
  *
@@ -43,18 +43,18 @@ import java.util.function.Consumer;
  * <p>注意 <b>clear / delete 不受熔断影响</b>：那是用户明确要求"把数据删掉"，
  * 不该因为"这一层刚才失败过"就跳过 —— 跳过会让用户继续看到已被要求删除的内容。
  *
- * @see ConversationRecordStore 记录层的定位说明（含"两层为什么不是两种存法"）
+ * @see MessageStore 记录层的定位说明（含"两层为什么不是两种存法"）
  */
 @Slf4j
 public class LayeredConversationMemory implements ConversationMemory {
 
-    private final ConversationRecordStore recordStore;
+    private final MessageStore recordStore;
     private final ConversationContextCache contextCache;
     private final FailureCircuit recordCircuit;
     private final FailureCircuit contextCircuit;
     private final long circuitBreakSeconds;
 
-    public LayeredConversationMemory(ConversationRecordStore recordStore,
+    public LayeredConversationMemory(MessageStore recordStore,
                                      ConversationContextCache contextCache,
                                      long circuitBreakSeconds) {
         this.recordStore = recordStore;

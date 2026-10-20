@@ -1,7 +1,6 @@
 package com.hagent.memory.context;
 
 import com.hagent.memory.LayerStatus;
-import com.hagent.config.MemoryProperties;
 import com.hagent.memory.MessageCodec;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -56,15 +55,15 @@ public class RedisConversationContextCache implements ConversationContextCache {
      */
     private final int maxRetained;
 
-    public RedisConversationContextCache(MemoryProperties properties,
+    public RedisConversationContextCache(ContextCacheSettings settings,
                                          StringRedisTemplate redis,
                                          ObjectMapper objectMapper) {
         this.redis = redis;
         this.objectMapper = objectMapper;
-        this.keyPrefix = properties.getRedisKeyPrefix();
-        this.ttl = Duration.ofSeconds(properties.getRedisTtlSeconds());
-        this.maxRetained = Math.max(properties.getConversationMaxMessages(),
-                properties.getWorkflowMaxMessages());
+        this.keyPrefix = settings.getRedisKeyPrefix();
+        this.ttl = Duration.ofSeconds(settings.getRedisTtlSeconds());
+        this.maxRetained = Math.max(settings.getChatMaxMessages(),
+                settings.getWorkflowMaxMessages());
         log.info("[记忆-上下文-redis] 已启用：keyPrefix={} TTL={}h 最多保留={}条"
                         + "（★ 它是【模型上下文的缓存】，不是权威存储；权威在记录层）",
                 keyPrefix, ttl.toHours(), maxRetained);

@@ -1,9 +1,12 @@
 package com.hagent.app;
 
+import com.hagent.agent.PipelineEvent;
+
 import com.hagent.config.PromptProperties;
 import com.hagent.config.TraceProperties;
 import com.hagent.memory.ConversationMemory;
 import com.hagent.memory.MemoryMode;
+import com.hagent.config.AgentLoopProperties;
 import com.hagent.config.MemoryProperties;
 import com.hagent.memory.TokenBudget;
 import com.hagent.retrieval.RetrievedChunk;
@@ -83,8 +86,8 @@ class AgentPipelineTest {
 
     private MemoryProperties memoryProperties() {
         MemoryProperties props = new MemoryProperties();
-        props.setConversationMaxTokens(5000);
-        props.setConversationMaxMessages(30);
+        props.setChatMaxTokens(5000);
+        props.setChatMaxMessages(30);
         props.setWorkflowMaxTokens(50000);
         props.setWorkflowMaxMessages(200);
         return props;
@@ -117,6 +120,7 @@ class AgentPipelineTest {
                 new TraceProperties(),
                 new PromptProperties(),
                 memoryProperties(),
+                new AgentLoopProperties(),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
                 longTermMemory);
     }
@@ -143,10 +147,11 @@ class AgentPipelineTest {
                 chatModel, new RecordingMemory(), TestToolCallbackProvider.none(),
                 TestAudit.disabled(), new TraceProperties(), new PromptProperties(),
                 memoryProperties(),
+                new AgentLoopProperties(),
                 new ByteArrayResource("【约束内容】".getBytes(StandardCharsets.UTF_8)),
                 TestLongTermMemory.withIndex(digest));
 
-        pipeline.run("我叫什么", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+        pipeline.run("我叫什么", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         String system = seen.get(0).getSystemMessage().getText();
@@ -167,7 +172,7 @@ class AgentPipelineTest {
         when(broken.renderIndexFor(any())).thenThrow(new RuntimeException("磁盘炸了"));
 
         List<PipelineEvent> events = pipeline(new RecordingMemory(), List.of(textChunk("照常回答")), broken)
-                .run("你好", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+                .run("你好", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
         assertThat(events)
@@ -206,7 +211,7 @@ class AgentPipelineTest {
     }
 
     private List<PipelineEvent> collect(AgentPipeline pipeline) {
-        return pipeline.run("提问", "conv-1", MemoryMode.CONVERSATION, UserContext.ANONYMOUS)
+        return pipeline.run("提问", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList()
                 .block();
     }
@@ -398,7 +403,7 @@ class AgentPipelineTest {
         AgentPipeline pipeline = pipeline(memory, List.of(textChunk("答")));
 
         List<PipelineEvent> events = pipeline
-                .run("提问", "   ", MemoryMode.CONVERSATION, null)
+                .run("提问", "   ", MemoryMode.CHAT, null)
                 .collectList()
                 .block();
 

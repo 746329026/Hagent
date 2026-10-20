@@ -93,6 +93,18 @@ public record DocumentMetadata(
     /** 块在文档内的序号，从 0 开始。 */
     public static final String FIELD_CHUNK_INDEX = "chunkIndex";
     /** 该文档一共被切成几块。 */
+    /**
+     * 块总数。
+     *
+     * <p>★ 审计报告把它列为"只写不读"，<b>复核后不成立</b> —— 它有两个真实消费者：
+     * <ol>
+     *   <li>本类构造器里的<b>自洽断言</b>（chunkIndex 必须小于 chunkTotal）——
+     *       拦住"序号越界"这类会让出处定位错乱的数据；</li>
+     *   <li>两个入库集成测试用 <b>SQL 直查</b> metadata 里的 chunkTotal，
+     *       断言"每篇文档的块序号从 0 连续、且最大值 = 总数 - 1"。</li>
+     * </ol>
+     * 所以<b>保留</b>：它是能被外部（SQL / 排查）消费的数据，不是死字段。
+     */
     public static final String FIELD_CHUNK_TOTAL = "chunkTotal";
     /** 块级内容哈希（SHA-256，十六进制）。 */
     public static final String FIELD_CONTENT_HASH = "contentHash";

@@ -1,6 +1,6 @@
 package com.hagent.config;
 
-import com.hagent.controller.ChatController;
+import com.hagent.common.ConversationHeaders;
 import com.hagent.security.UserContextInterceptor;
 import com.hagent.security.UserTokenResolver;
 import lombok.extern.slf4j.Slf4j;
@@ -80,7 +80,7 @@ public class WebConfig implements WebMvcConfigurer {
                 //    因此前端现在读它只会得到 null，且不会报错。
                 //    保留原因：删掉容易在实现过滤器时忘了加回来，导致前端读不到又一轮排查。
                 .exposedHeaders("Content-Type", "X-Request-Id",
-                        ChatController.CONVERSATION_ID_HEADER)
+                        ConversationHeaders.ID)
                 // 允许携带凭证（Cookie / Authorization 头 / TLS 客户端证书）。
                 // 规范禁止 allowCredentials(true) 与 allowedOrigins("*") 共存，
                 // 这是"必须用白名单"的第二个理由（第一个理由是安全上不该对全网开放）。

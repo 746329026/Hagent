@@ -1,4 +1,4 @@
-package com.hagent.app;
+package com.hagent.agent;
 
 /**
  * 工具向外<b>同步发出事件</b>的通道。

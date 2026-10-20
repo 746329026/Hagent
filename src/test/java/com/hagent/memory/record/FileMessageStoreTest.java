@@ -33,15 +33,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>测试用临时目录，互不干扰；用例结束即清理。
  */
-class FileConversationRecordStoreTest {
+class FileMessageStoreTest {
 
     private Path tempDir;
-    private FileConversationRecordStore store;
+    private FileMessageStore store;
 
     @BeforeEach
     void setUp() throws IOException {
         tempDir = Files.createTempDirectory("hagent-memory-test-");
-        store = new FileConversationRecordStore(props(), new ObjectMapper());
+        store = new FileMessageStore(props(), new ObjectMapper());
     }
 
     @AfterEach
@@ -85,7 +85,7 @@ class FileConversationRecordStoreTest {
     void newInstanceCanReadExistingData() {
         store.append("c1", List.of(new UserMessage("持久化验证")));
 
-        FileConversationRecordStore reopened = new FileConversationRecordStore(props(), new ObjectMapper());
+        FileMessageStore reopened = new FileMessageStore(props(), new ObjectMapper());
 
         assertThat(reopened.readLatest("c1", 100)).hasSize(1);
         assertThat(reopened.readLatest("c1", 100).get(0).getText()).isEqualTo("持久化验证");
@@ -187,5 +187,27 @@ class FileConversationRecordStoreTest {
         assertThat(status.layer()).isEqualTo("record");
         assertThat(status.implementation()).isEqualTo("file");
         assertThat(status.detail()).contains(tempDir.toString());
+    }
+
+    @Test
+    @DisplayName("★★ 会话 ID 不得穿越目录，也不得撞会话目录的 _catalog.json")
+    void conversationIdCannotEscapeOrCollideWithCatalog() throws IOException {
+        store.append("../../evil", List.of(new UserMessage("hi")));
+        store.append("_catalog", List.of(new UserMessage("hi")));
+
+        assertThat(Files.exists(tempDir.getParent().resolve("evil.json")))
+                .as("../../evil 必须被拦在根目录内 —— 否则 file 模式就是任意路径写入")
+                .isFalse();
+
+        try (var files = Files.list(tempDir)) {
+            var names = files.map(p -> p.getFileName().toString()).toList();
+            assertThat(names)
+                    .as("两个危险 ID 都应落成 c- 前缀的安全文件（同一 ID 永远同一文件）")
+                    .filteredOn(n -> n.startsWith("c-"))
+                    .hasSize(2);
+            assertThat(names)
+                    .as("_catalog 绝不能覆盖会话目录的 sidecar")
+                    .doesNotContain("_catalog.json");
+        }
     }
 }

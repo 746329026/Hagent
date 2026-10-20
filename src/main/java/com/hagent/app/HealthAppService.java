@@ -2,7 +2,7 @@ package com.hagent.app;
 
 import com.hagent.memory.LayerStatus;
 import com.hagent.memory.context.ConversationContextCache;
-import com.hagent.memory.record.ConversationRecordStore;
+import com.hagent.memory.record.MessageStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -54,10 +54,10 @@ import java.util.List;
 @Service
 public class HealthAppService {
 
-    private final ConversationRecordStore recordStore;
+    private final MessageStore recordStore;
     private final ConversationContextCache contextCache;
 
-    public HealthAppService(ConversationRecordStore recordStore,
+    public HealthAppService(MessageStore recordStore,
                             ConversationContextCache contextCache) {
         this.recordStore = recordStore;
         this.contextCache = contextCache;

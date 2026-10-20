@@ -16,17 +16,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class MemoryModeTest {
 
     @Test
-    @DisplayName("线上名称是 chat / workflow，不是枚举名 CONVERSATION / WORKFLOW")
+    @DisplayName("线上名称是 chat / workflow，不是枚举名 CHAT / WORKFLOW")
     void wireNames() {
-        assertThat(MemoryMode.CONVERSATION.wireName()).isEqualTo("chat");
+        assertThat(MemoryMode.CHAT.wireName()).isEqualTo("chat");
         assertThat(MemoryMode.WORKFLOW.wireName()).isEqualTo("workflow");
     }
 
     @Test
     @DisplayName("大小写不敏感，枚举名也认（人输入的参数不该因大小写失败）")
     void fromWireIsLenientAboutCase() {
-        assertThat(MemoryMode.fromWire("chat")).isEqualTo(MemoryMode.CONVERSATION);
-        assertThat(MemoryMode.fromWire("CHAT")).isEqualTo(MemoryMode.CONVERSATION);
+        assertThat(MemoryMode.fromWire("chat")).isEqualTo(MemoryMode.CHAT);
+        assertThat(MemoryMode.fromWire("CHAT")).isEqualTo(MemoryMode.CHAT);
         assertThat(MemoryMode.fromWire(" Workflow ")).isEqualTo(MemoryMode.WORKFLOW);
         assertThat(MemoryMode.fromWire("WORKFLOW")).isEqualTo(MemoryMode.WORKFLOW);
     }

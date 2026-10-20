@@ -1,7 +1,5 @@
 package com.hagent.memory;
 
-import com.hagent.config.MemoryProperties;
-
 /**
  * 记忆的<b>使用模式</b> —— 决定"本次调用愿意为历史付出多少预算"。
  *
@@ -17,14 +15,14 @@ import com.hagent.config.MemoryProperties;
  * 所以模式只有 chat 与 workflow 两种，没有"agent 模式"
  * （见 {@code WORKING-AGREEMENT} 第 12 条的术语表）。
  *
- * <p>⚠️ <b>待办</b>：枚举值 {@code CONVERSATION} 与配置键里的 {@code chat} 用词不一致
- * （配置前缀已是 {@code hagent.memory.chat.*}，枚举值却叫 {@code CONVERSATION}）。
- * 本人已同意<b>单独做这笔改名</b>，不混进阶段 8 的结构重构 ——
- * 因为阶段 8 本身已有大量变更，再混入配置键改名，出问题时
- * <b>分不清是新结构还是改名引起的</b>。改的时候必须同步四处：
- * 枚举值 + {@code MemoryProperties} 的 {@code conversationMax*} 字段 +
- * {@code application.yml} 的 {@code conversation-max-*} 两个键 +
- * {@code AgentPipeline#budgetOf} 的穷尽 switch。
+ * <p><b>★ 两个词不要混</b>（阶段 12 统一；判据是"它是不是模式"）：
+ * <pre>
+ *   chat          工作模式之一（本枚举的 {@link #CHAT}）—— "这次跑哪条链路"
+ *   conversation  会话这个<b>数据实体</b>（{@code conversationId}、
+ *                 {@code conversation-table-name} 指向的会话目录表）
+ * </pre>
+ * 所以预算字段叫 {@code chatMaxTokens}，不叫 {@code conversationMaxTokens} ——
+ * 它约束的是 <b>chat 模式</b>的历史长度，与"会话"这个实体无关。
  *
  * <h2>★ 为什么需要这个枚举（一段设计修正的记录）</h2>
  *
@@ -53,7 +51,7 @@ import com.hagent.config.MemoryProperties;
  *
  * <h2>当前实现状态（诚实声明）</h2>
  *
- * <p>阶段 8 仍然只有 {@link #CONVERSATION} 被真正使用（{@code ChatController} 显式传它）——
+ * <p>阶段 8 仍然只有 {@link #CHAT} 被真正使用（{@code ChatController} 显式传它）——
  * {@link #WORKFLOW} 的常量与整条传参通道都已就位，
  * 但<b>工作流引擎尚未实现</b>（阶段 9），所以暂时没有任何调用方会传它。
  *
@@ -86,9 +84,9 @@ public enum MemoryMode {
      * 会话模式 —— 一次问答。
      *
      * <p>特征：交互频繁、用户在意响应速度、历史通常很短。
-     * 预算取值见 {@code hagent.memory.chat.conversation-max-*}。
+     * 预算取值见 {@code hagent.memory.chat.chat-max-*}。
      */
-    CONVERSATION,
+    CHAT,
 
     /**
      * 工作流模式 —— 多步循环。
@@ -109,7 +107,7 @@ public enum MemoryMode {
      *
      * <p>阶段 8 起它的使用者是 {@code AgentPipeline#run}（参数为 null 时兜底）。
      */
-    public static final MemoryMode DEFAULT = CONVERSATION;
+    public static final MemoryMode DEFAULT = CHAT;
 
     // ========================================================================
     // 线上名称 —— 阶段 10 新增（HTTP 请求体与数据库里存的都是它）
@@ -120,14 +118,12 @@ public enum MemoryMode {
      *
      * <h3>★ 为什么需要这么一层映射，而不是直接用 {@code name()}</h3>
      *
-     * <p>枚举值叫 {@code CONVERSATION}，但<b>产品与配置里这个词一直是 {@code chat}</b>
-     * （配置前缀 {@code hagent.memory.chat.*}，本文件顶部的"待办"也写着
-     * 这笔改名迟早要做）。如果 HTTP 与数据库直接用 {@code name()}，
-     * 那么这笔改名会从"改 4 处代码"升级成"还要迁移历史数据" —— 一个纯粹由
-     * <b>命名不一致</b> 引发的数据迁移，没有任何收益。
+     * <p>{@code name()} 是 {@code CHAT}（全大写），而请求体与数据库列
+     * （{@code chat_conversation.mode}）里一直是小写 {@code chat}，且
+     * <b>已经落库的值不会跟着代码改</b>。所以这不是风格问题，是<b>数据契约</b>。
      *
-     * <p>所以把映射<b>收在这一个方法里</b>：改名时只改枚举常量与下面这个 switch，
-     * 请求体、响应体、数据库三者一个字都不用动。
+     * <p>把映射<b>收在这一个方法里</b>：将来枚举再改名（例如 {@code CHAT} → {@code ONE_SHOT}）
+     * 只改常量与下面这个 switch，请求体、响应体、历史数据三者一个字都不用动。
      *
      * <p>★ 附带的结构好处：{@code switch} 是<b>穷尽</b>的且刻意不写 {@code default}
      * —— 将来新增第三种模式会<b>编译失败</b>，而不是在运行期悄悄漏掉一个映射
@@ -135,7 +131,7 @@ public enum MemoryMode {
      */
     public String wireName() {
         return switch (this) {
-            case CONVERSATION -> "chat";
+            case CHAT -> "chat";
             case WORKFLOW -> "workflow";
         };
     }
@@ -143,7 +139,7 @@ public enum MemoryMode {
     /**
      * 把线上名称（或枚举名）解析成模式。
      *
-     * <p>两种写法都接受：{@code chat} / {@code WORKFLOW} / {@code conversation} 都行 ——
+     * <p>两种写法都接受：{@code chat} / {@code CHAT} / {@code WORKFLOW} 都行 ——
      * 大小写不敏感，因为这是<b>人输入的参数</b>，不该因大小写不同而失败。
      *
      * <p><b>空值 → {@link #DEFAULT}</b>（调用方没声明模式是合法状态：老客户端、

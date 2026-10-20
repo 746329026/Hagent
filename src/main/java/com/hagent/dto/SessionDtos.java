@@ -1,5 +1,6 @@
 package com.hagent.dto;
 
+
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
@@ -16,7 +17,7 @@ import java.util.List;
  *
  * <p>★ 这些 record 的<b>字段名就是前端契约</b>：改名字等于破坏前端，
  * 而它不会报错，只会让前端拿到 {@code undefined}。所以它们刻意不直接复用
- * 存储层的 {@code ConversationCatalog.Session} / {@code ReasoningTrace.Section} ——
+ * 存储层的 {@code SessionStore.Session} / {@code ReasoningTrace.Section} ——
  * 那两个类是<b>存储形态</b>，允许随实现演化。
  */
 public final class SessionDtos {
@@ -30,7 +31,7 @@ public final class SessionDtos {
      * @param conversationId 会话 ID（后续请求要带上它）
      * @param title          <b>可能为 null</b>（会话已创建但标题还没生成）—— 前端显示"新会话"
      * @param mode           模式的线上名称：{@code chat} / {@code workflow}
-     *                       （不是枚举名 {@code CONVERSATION}，见 {@code MemoryMode.wireName()}）
+     *                       （小写；不是枚举名 {@code CHAT}，见 {@code MemoryMode.wireName()}）
      * @param createdAt      创建时间
      * @param updatedAt      最近活跃时间（列表按它倒序）
      */

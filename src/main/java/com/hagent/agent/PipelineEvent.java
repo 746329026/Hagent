@@ -1,4 +1,4 @@
-package com.hagent.app;
+package com.hagent.agent;
 
 import com.hagent.retrieval.RetrievedChunk;
 import org.springframework.ai.chat.metadata.Usage;

@@ -1,6 +1,11 @@
 package com.hagent.tool;
 
-import com.hagent.app.KnowledgeRetrievalService;
+import com.hagent.agent.PipelineEvent;
+import com.hagent.agent.ToolEventSink;
+
+import com.hagent.prompt.PromptFragments;
+
+import com.hagent.retrieval.KnowledgeSearch;
 import com.hagent.retrieval.RetrievedChunk;
 import com.hagent.security.UserContext;
 import lombok.RequiredArgsConstructor;
@@ -64,7 +69,7 @@ import java.util.List;
  * <h2>★★ 权限过滤为什么仍然有效（这条最容易搞错）</h2>
  *
  * <p>检索从"管线第③步"搬到"工具内部"之后，<b>越权风险一点没变</b>：
- * 过滤仍然是 {@code KnowledgeRetrievalService} 内部的 SQL 条件
+ * 过滤仍然是 {@code KnowledgeSearch} 内部的 SQL 条件
  * （{@code level IN (...)}），而<b>调用方身份必须传进工具</b>。
  *
  * <p>通道是框架的 {@link ToolContext}：{@code AgentPipeline} 把它放进
@@ -87,14 +92,6 @@ public class KnowledgeRetrievalTool {
     //   继续挂在"检索工具"名下就是名字指向别处（协议第 12 条）。
     //   身份解析的三条分支同理收进了那里，避免两个工具对"缺身份"给出不同的处理方向。
 
-    /**
-     * 片段块的起始标记 —— 提示词里的约束引用它。
-     *
-     * <p>与阶段 8 的 {@code PromptBuilder.FRAGMENT_HEADER} 同值：
-     * 这次搬迁<b>没有改字样</b>，所以 {@code rag-answer-prompt.md} 里的约束仍然成立
-     * （阶段 9.1 只需把"检索到的片段"的表述改成"工具返回的结果"，见该文件）。
-     */
-    private static final String FRAGMENT_HEADER = "【知识库片段】";
 
     /**
      * 检索<b>不可用</b>时返回给模型的说明。
@@ -115,7 +112,7 @@ public class KnowledgeRetrievalTool {
             【检索不可用】知识库检索这次失败了（系统故障，不是「没有相关资料」）。
             请如实告知用户「知识库检索暂时不可用，请稍后重试」；不要据此断言知识库中没有相关内容，也不要凭常识代答。""";
 
-    private final KnowledgeRetrievalService retrievalService;
+    private final KnowledgeSearch retrievalService;
 
     /**
      * 按查询串检索知识库，返回<b>带来源与相关度的片段文本</b>。
@@ -201,9 +198,9 @@ public class KnowledgeRetrievalTool {
             return;
         }
         Object sink = toolContext.getContext().get(ToolContextSupport.EVENT_SINK);
-        if (sink instanceof com.hagent.app.ToolEventSink eventSink) {
+        if (sink instanceof com.hagent.agent.ToolEventSink eventSink) {
             try {
-                eventSink.emit(new com.hagent.app.PipelineEvent.Retrieved(chunks, query));
+                eventSink.emit(new com.hagent.agent.PipelineEvent.Retrieved(chunks, query));
             } catch (Exception e) {
                 // 见 ToolEventSink 的注释：发事件失败不该把一次成功的检索变成"工具失败"。
                 log.warn("[工具-检索] 发出 Retrieved 事件失败（不影响检索结果本身）：{}", e.toString());
@@ -218,16 +215,16 @@ public class KnowledgeRetrievalTool {
      * （由拼装者把片段拼进 system）。检索工具化之后，片段<b>不再进 system</b>，
      * 而是作为工具结果回到模型手里 —— 于是渲染的职责跟着数据走，落到本类。
      *
-     * <p>格式一字未改（含 {@link #FRAGMENT_HEADER}），因为提示词约束引用着它。
+     * <p>格式一字未改（含 {@link PromptFragments#KNOWLEDGE_FRAGMENT_HEADER}），因为提示词约束引用着它。
      */
     private String render(List<RetrievedChunk> chunks) {
         StringBuilder sb = new StringBuilder();
-        sb.append(FRAGMENT_HEADER).append('\n');
+        sb.append(PromptFragments.KNOWLEDGE_FRAGMENT_HEADER).append('\n');
         for (int i = 0; i < chunks.size(); i++) {
             RetrievedChunk chunk = chunks.get(i);
             sb.append("【知识库片段 ").append(i + 1)
                     .append("／来源：").append(chunk.displaySource())
-                    .append("／相关度：").append(chunk.band().displayName())
+                    .append("／").append(PromptFragments.RELEVANCE_FIELD_LABEL).append("：").append(chunk.band().displayName())
                     .append("】\n");
             sb.append(chunk.content() == null ? "" : chunk.content().trim()).append('\n');
         }

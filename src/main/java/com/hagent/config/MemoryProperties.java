@@ -1,5 +1,9 @@
 package com.hagent.config;
 
+import com.hagent.memory.catalog.SessionStoreSettings;
+import com.hagent.memory.context.ContextCacheSettings;
+import com.hagent.memory.record.MessageStoreSettings;
+
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.beans.factory.InitializingBean;
@@ -39,11 +43,23 @@ import java.util.Set;
  * <p><b>★ 刻意不留旧 {@code type} 的兼容层</b>：本项目尚未上线、没有外部调用方，
  * 兼容层会成为一个<b>永久的负担</b>（两套语义并存，后来者不知道该看哪个）。
  * 配置写错的表现是<b>启动直接失败</b>，而不是悄悄用了别的实现 —— 见 {@link #afterPropertiesSet()}。
+ *
+ * <h2>★ 阶段 12：它同时是三个领域端口的实现者</h2>
+ *
+ * <p>{@code memory} 包不能反向依赖 {@code config} —— 否则"配置依赖领域、领域依赖配置"
+ * 就构成包级环。所以"实现需要哪些参数"由领域自己声明成端口
+ * （{@link MessageStoreSettings}、{@link SessionStoreSettings}、
+ * {@link ContextCacheSettings}），本类去<b>实现</b>它们：
+ * 配置类认识领域，而不是反过来。
+ *
+ * <p>本类<b>没有为此新增任何方法</b> —— 端口里的 {@code getXxx()} 正是 {@code @Getter}
+ * 已经生成的那些访问器。这也是端口为什么要用 JavaBean 命名：否则一个值就得有两个名字。
  */
 @Getter
 @Setter
 @ConfigurationProperties(prefix = "hagent.memory.chat")
-public class MemoryProperties implements InitializingBean {
+public class MemoryProperties implements InitializingBean,
+        MessageStoreSettings, SessionStoreSettings, ContextCacheSettings {
 
     /** 记录层的合法取值。 */
     public static final Set<String> VALID_RECORD_STORES = Set.of("mysql", "file");
@@ -85,52 +101,29 @@ public class MemoryProperties implements InitializingBean {
     // ==================== 预算参数 ====================
 
     /**
-     * 会话模式的 token 预算（主限制，直接对应成本）。
+     * chat 模式的 token 预算（主限制，直接对应成本）。
      *
      * <p><b>口径</b>：只约束<b>历史消息</b>，不含 system 提示词与本次问题。
+     *
+     * <p>★ 名字里的 {@code chat} 指<b>工作模式</b>（{@code MemoryMode.CHAT}）——
+     * 它与"会话数据"是两个东西：会话数据的词是 {@code conversation}
+     * （如 {@link #conversationTableName}、{@code conversationId}）。
      */
-    private int conversationMaxTokens = 5000;
+    private int chatMaxTokens = 5000;
 
-    /** 会话模式的条数上限（兜底：防大量超短消息累积）。 */
-    private int conversationMaxMessages = 30;
+    /** chat 模式的条数上限（兜底：防大量超短消息累积）。 */
+    private int chatMaxMessages = 30;
 
     /**
-     * 工作流 / Agent 模式的 token 预算。
+     * workflow 模式的 token 预算。
      *
-     * <p>比会话模式大一个数量级，因为：多步循环中每一轮的工具返回结果
+     * <p>比 chat 模式大一个数量级，因为：多步循环中每一轮的工具返回结果
      * （如检索到的整篇制度文档）都会成为下一轮的输入，上下文自然更长。
      */
     private int workflowMaxTokens = 50000;
 
-    /** 工作流模式的条数上限。 */
+    /** workflow 模式的条数上限。 */
     private int workflowMaxMessages = 200;
-
-    // ==================== 工具循环上限 ====================
-
-    /**
-     * 一次对话里<b>最多允许的模型调用步数</b>（阶段 9 新增）。
-     *
-     * <p><b>为什么必须有这个上限</b>：工具循环的正常出口是"模型不再请求工具"
-     * （参考实现与主流 harness 都这么做）。但那是一个<b>由模型控制的</b>出口 ——
-     * 模型如果绕圈（反复请求同一个工具、或永远不停），循环就不会自己结束，
-     * 而<b>每一次循环都是一次计费的模型调用</b>。
-     *
-     * <p>所以这是"由我们控制的强制出口"，与下面两条一起构成完整的终止条件：
-     * <pre>
-     *   ① 模型不再请求工具          ← 正常出口（模型决定）
-     *   ② 工具声明 returnDirect      ← 工具决定结束（框架翻译成 finishReason=returnDirect）
-     *   ③ 本上限 + 框架的工具调用次数上限  ← 防御出口（我们决定）
-     *   ④ 上游异常                   ← 错误出口
-     * </pre>
-     *
-     * <p><b>取值依据</b>：10 步足够覆盖"查两次资料 + 追问一次 + 汇总"这类常见形态；
-     * 再多通常意味着模型在绕圈。超限时<b>不抛异常</b>，而是用已累积的内容收尾
-     * （见 {@code AgentPipeline}）—— 用户已经等到了一些结果，丢掉它没有好处。
-     *
-     * <p>★ 与框架的 {@code maxCallsPerTool} / {@code maxTotalToolCalls} 是<b>两层</b>：
-     * 框架那层防"同一个工具被调太多次"，本层防"整轮步数太多"。
-     */
-    private int maxSteps = 10;
 
     // ==================== 各实现的参数 ====================
 
@@ -157,7 +150,7 @@ public class MemoryProperties implements InitializingBean {
      * 记录层 MySQL 的表名。
      *
      * <p>它会被拼进 SQL，因此只允许普通标识符（在
-     * {@code MysqlConversationRecordStore} 的构造器里校验）。
+     * {@code MysqlMessageStore} 的构造器里校验）。
      */
     private String mysqlTableName = "chat_message";
 
@@ -212,11 +205,6 @@ public class MemoryProperties implements InitializingBean {
             throw new IllegalStateException(
                     "hagent.memory.chat.circuit-break-seconds 不能为负：" + circuitBreakSeconds
                             + "（0 表示关闭熔断）");
-        }
-        if (maxSteps <= 0) {
-            throw new IllegalStateException(
-                    "hagent.memory.chat.max-steps 必须为正数：" + maxSteps
-                            + "（它是一次对话里模型调用的步数上限，0 或负数会让工具循环无法进行）");
         }
     }
 

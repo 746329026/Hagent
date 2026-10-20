@@ -1,5 +1,7 @@
 package com.hagent.controller;
 
+import com.hagent.common.ConversationHeaders;
+
 import com.hagent.app.ChatAppService;
 import com.hagent.common.BaseResponse;
 import com.hagent.common.ErrorCode;
@@ -39,7 +41,7 @@ import java.util.UUID;
  * <p><b>★ 阶段 10：模式不再是硬编码</b>。{@code ChatRequest.mode}（{@code chat} / {@code workflow}）
  * 决定本次的历史预算（5k vs 50k token），并会随会话落库
  * （{@code chat_conversation.mode}）—— <b>首次确定后不再由请求改变</b>。
- * 在此之前两处都写死 {@code MemoryMode.CONVERSATION}，于是 workflow 预算虽然配了、
+ * 在此之前两处都写死 {@code MemoryMode.CHAT}，于是 workflow 预算虽然配了、
  * 整条通道也通了，却<b>没有任何真实调用能走到它</b>（"装好了但没通电的开关"）。
  *
  * <h2>★ 阶段 8 删除了两条流式端点（旧 {@code /stream} 与 {@code /stream-flux}）</h2>
@@ -78,7 +80,7 @@ import java.util.UUID;
 public class ChatController {
 
     /** 会话 ID 的响应头名。集中定义，避免裸字符串散落。 */
-    public static final String CONVERSATION_ID_HEADER = "X-Conversation-Id";
+
 
     private final ChatAppService chatAppService;
     private final StreamProperties streamProperties;
@@ -94,7 +96,7 @@ public class ChatController {
                                            @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext,
                                            jakarta.servlet.http.HttpServletResponse servletResponse) {
         String conversationId = resolveConversationId(request.conversationId());
-        servletResponse.setHeader(CONVERSATION_ID_HEADER, conversationId);
+        servletResponse.setHeader(ConversationHeaders.ID, conversationId);
         return BaseResponse.success(chatAppService.chat(
                 request.message(), conversationId, resolveMode(request.mode()), userContext));
     }
@@ -164,7 +166,7 @@ public class ChatController {
         String conversationId = resolveConversationId(request.conversationId());
         // 会话 ID 用响应头返回，前端下次带上即可续用同一会话。
         // 注意必须已暴露在 WebConfig 的 exposedHeaders 里，否则浏览器读不到（且不报错）。
-        servletResponse.setHeader(CONVERSATION_ID_HEADER, conversationId);
+        servletResponse.setHeader(ConversationHeaders.ID, conversationId);
         SseEmitter emitter = new SseEmitter(streamProperties.getSseTimeoutMs());
         chatAppService.stream(request.message(), conversationId,
                 resolveMode(request.mode()), userContext, emitter);
@@ -193,7 +195,7 @@ public class ChatController {
                                    @RequestAttribute(name = UserContext.REQUEST_ATTRIBUTE) UserContext userContext,
                                    jakarta.servlet.http.HttpServletResponse servletResponse) {
         String resolved = resolveConversationId(conversationId);
-        servletResponse.setHeader(CONVERSATION_ID_HEADER, resolved);
+        servletResponse.setHeader(ConversationHeaders.ID, resolved);
         SseEmitter emitter = new SseEmitter(streamProperties.getSseTimeoutMs());
         chatAppService.stream(message, resolved, resolveMode(mode), userContext, emitter);
         return emitter;

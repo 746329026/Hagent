@@ -106,20 +106,27 @@ public class SourceLoader {
      *
      * @param root      知识库根目录（绝对路径）
      * @param source    相对根目录的来源路径（可用 {@code /} 或 {@code \}）
-     * @param fallbackKind 文档未声明 kind 时使用的种类（由调用方提供，作为目录级默认值）
+     * @param fallbackKind 文档未声明 kind 时使用的种类（由调用方提供，作为目录级默认值）`n     * @param extensions   允许的扩展名（<b>由配置提供</b>，不在此硬编码）
      * @throws IllegalArgumentException 路径越界、文件不存在、格式不支持、frontmatter 取值非法
      * @throws IOException              读取失败
      */
-    public LoadedDocument load(Path root, String source, DocumentKind fallbackKind) throws IOException {
+    public LoadedDocument load(Path root, String source, DocumentKind fallbackKind,
+                              java.util.List<String> extensions) throws IOException {
         Path file = resolveWithinRoot(root, source);
         if (!Files.isRegularFile(file)) {
             throw new IllegalArgumentException("知识库文档不存在或不是普通文件：" + source);
         }
+        // ★ 阶段 12：扩展名白名单<b>只从配置来</b>（hagent.rag.ingest.extensions）。
+        //   原先是这里硬编码 ".md/.txt"、而扫描侧吃配置 —— 于是在配置里加 ".markdown" 之后，
+        //   批量入库会"先发现该文件、再拒绝它"，报错文案还指向一个跟配置无关的理由。
         String fileName = file.getFileName().toString().toLowerCase();
-        if (!fileName.endsWith(".md") && !fileName.endsWith(".txt")) {
+        boolean supported = extensions != null && extensions.stream()
+                .anyMatch(ext -> ext != null && fileName.endsWith(ext.toLowerCase()));
+        if (!supported) {
             throw new IllegalArgumentException(
-                    "本阶段只支持 .md 与 .txt（收到：" + source + "）。"
-                            + "docx/pdf 的解析会引入重依赖与大量边界情况，留到后续阶段。");
+                    "不支持的文件类型（收到：" + source + "）。"
+                            + "允许的扩展名来自 hagent.rag.ingest.extensions：" + extensions
+                            + "。docx/pdf 的解析会引入重依赖与大量边界情况，留到后续阶段。");
         }
 
         // ★ 显式 UTF-8：Windows 上 Files.readString 的默认编码是 GBK 而不是 UTF-8，

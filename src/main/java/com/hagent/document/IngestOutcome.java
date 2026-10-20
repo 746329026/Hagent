@@ -38,8 +38,14 @@ public enum IngestOutcome {
      */
     SKIPPED_UNCHANGED;
 
-    /** 本次是否真的写入了向量库（用于统计"实际发生变更的文档数"）。 */
-    public boolean written() {
+    /**
+     * 本次是否<b>没有</b>被跳过（只说明"我们处理过它"，<b>不代表写入了任何东西</b>）。
+     *
+     * <p>★ 阶段 12 改名：原名 {@code written()}，但它对"正文为空 → ADDED、0 块"的文档
+     * 也返回 {@code true} —— 那是<b>契约说谎</b>（协议第 12 条规则 4）。
+     * "是否真的写入了块"看 {@code IngestResult#written()}（{@code chunkCount > 0}）。
+     */
+    public boolean notSkipped() {
         return this != SKIPPED_UNCHANGED;
     }
 }

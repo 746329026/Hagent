@@ -3,7 +3,7 @@ package com.hagent.memory;
 import com.hagent.config.MemoryProperties;
 
 import com.hagent.memory.context.NoOpContextCache;
-import com.hagent.memory.record.FileConversationRecordStore;
+import com.hagent.memory.record.FileMessageStore;
 import org.junit.jupiter.api.io.TempDir;
 import tools.jackson.databind.ObjectMapper;
 
@@ -28,7 +28,7 @@ class FileNoOpContractTest extends ConversationMemoryContractTest {
         MemoryProperties props = new MemoryProperties();
         props.setFileDir(tempDir.toString());
         return new LayeredConversationMemory(
-                new FileConversationRecordStore(props, new ObjectMapper()),
+                new FileMessageStore(props, new ObjectMapper()),
                 new NoOpContextCache(),
                 0);
     }

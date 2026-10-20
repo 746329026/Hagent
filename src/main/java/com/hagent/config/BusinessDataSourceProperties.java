@@ -37,7 +37,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * {@code @ConditionalOnMissingBean(JdbcOperations.class)} 也会因为
  * {@code pgVectorJdbcTemplate} 而退避，所以本项目的 MySQL 访问<b>不要</b>按类型注入
  * {@code JdbcTemplate}，而应按 bean 名取 {@code dataSource}（见
- * {@code MemoryConfig.mysqlConversationRecordStore}）。
+ * {@code MemoryConfig.mysqlMessageStore}）。
  *
  * <h2>关于默认值</h2>
  *

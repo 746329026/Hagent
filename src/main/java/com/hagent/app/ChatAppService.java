@@ -1,9 +1,11 @@
 package com.hagent.app;
 
+import com.hagent.agent.PipelineEvent;
+
 import com.hagent.config.StreamProperties;
 import com.hagent.dto.ChatResponse;
 import com.hagent.memory.MemoryMode;
-import com.hagent.memory.session.ConversationCatalog;
+import com.hagent.memory.catalog.SessionStore;
 import com.hagent.security.UserContext;
 import com.hagent.stream.StreamEventType;
 import lombok.RequiredArgsConstructor;
@@ -77,9 +79,9 @@ public class ChatAppService {
      * <b>会话要等答完才出现在侧栏里</b>，用户发出第一句话后会看到侧栏空着十几秒。
      * 放在这里，会话在请求到达的瞬间就落库。
      *
-     * <p>★ 它失败不能影响对话：见 {@link #touchCatalog} 的容错处理。
+     * <p>★ 它失败不能影响对话：见 {@link #touchSession} 的容错处理。
      */
-    private final ConversationCatalog conversationCatalog;
+    private final SessionStore sessionStore;
 
     // ========================================================================
     // 入口一：阻塞式
@@ -128,7 +130,7 @@ public class ChatAppService {
      */
     public ChatResponse chat(String message, String conversationId,
                              MemoryMode mode, UserContext userContext) {
-        touchCatalog(conversationId, mode, message);
+        touchSession(conversationId, mode, message);
         // 流是冷的：collectList 订阅时才真正发出请求。逻辑上最后一个事件必然是 Final。
         List<PipelineEvent> events = agentPipeline
                 .run(message, conversationId, mode, userContext)
@@ -216,8 +218,8 @@ public class ChatAppService {
         AtomicLong seq = new AtomicLong();
         AtomicBoolean retrySent = new AtomicBoolean(false);
 
-        // 会话先落库（侧栏立刻能看到），再开始跑模型。理由见 touchCatalog。
-        touchCatalog(conversationId, mode, message);
+        // 会话先落库（侧栏立刻能看到），再开始跑模型。理由见 touchSession。
+        touchSession(conversationId, mode, message);
 
         agentPipeline.run(message, conversationId, mode, userContext)
                 .subscribe(event -> sendEvent(emitter, event, seq, retrySent),
@@ -415,11 +417,11 @@ public class ChatAppService {
      *
      * <p>（正常路径上不会发生：Controller 总会生成一个随机 UUID。）
      */
-    private void touchCatalog(String conversationId, MemoryMode mode, String message) {
+    private void touchSession(String conversationId, MemoryMode mode, String message) {
         String cid = (conversationId == null || conversationId.isBlank())
                 ? AgentPipeline.FALLBACK_CONVERSATION_ID : conversationId;
         try {
-            conversationCatalog.touch(cid, mode, message);
+            sessionStore.touch(cid, mode, message);
         } catch (Exception e) {
             log.warn("[会话目录] 记录活跃会话失败（对话继续；只是侧栏可能看不到这个会话，"
                     + "而它的历史消息仍会被正常写入）：会话={} 原因={}", cid, e.toString());

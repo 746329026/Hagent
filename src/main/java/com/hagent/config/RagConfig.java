@@ -1,5 +1,7 @@
 package com.hagent.config;
 
+import com.hagent.retrieval.KnowledgeSearch;
+
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -29,7 +31,7 @@ import java.nio.charset.StandardCharsets;
  *
  * <h2>★ 阶段 6 后半新增：回答约束资源 Bean</h2>
  *
- * <p>检索链路的组件（{@code KnowledgeRetrievalService}、{@code RetrievalFilterBuilder}、
+ * <p>检索链路的组件（{@code KnowledgeSearch}、{@code RetrievalFilterBuilder}、
  * {@code AgentPipeline}）都是 {@code @Component} / {@code @Service}，由组件扫描发现。
  * 唯一需要在这里显式声明的是<b>回答约束提示词</b>——因为它来自类路径资源，
  * 需要一个"存在性检查"的落点。
@@ -105,5 +107,22 @@ public class RagConfig {
         }
 
         return resource;
+    }
+
+    /**
+     * 把 {@code RetrievalProperties} 映射成领域值对象 —— <b>映射只发生在装配层</b>。
+     *
+     * <p>为什么要这一步：领域包（{@code retrieval}）不应该认识 {@code config}，
+     * 否则就是"领域依赖装配"，且会形成结构环（阶段 12 第 3 步解的就是它）。
+     */
+    @Bean
+    public com.hagent.retrieval.RetrievalSettings retrievalSettings(RetrievalProperties properties) {
+        return new com.hagent.retrieval.RetrievalSettings(
+                properties.isEnabled(),
+                properties.getTopK(),
+                properties.similarityThreshold(),
+                properties.getMaxDistance(),
+                properties.getHighMaxDistance(),
+                properties.getMediumMaxDistance());
     }
 }
