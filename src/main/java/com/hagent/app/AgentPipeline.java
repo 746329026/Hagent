@@ -970,6 +970,13 @@ public class AgentPipeline {
 
                 WorkflowRun run = new WorkflowRun(plan);
                 String failure = executeWithRetry(run, seed, conversationId, user, startNanos, sink);
+                if (run.cancelled) {
+                    // ★ 客户端断开（SSE 取消）后不再继续跑：否则一次断线会白烧掉剩下的模型调用。
+                    //   刻意不写回：这轮没跑完，写一条残缺的助手消息比不写更糟。
+                    log.info("[{}] 客户端已断开，工作流在执行第 {} 步前停止（本轮不写回）",
+                            LOG_TAG, run.index);
+                    return;
+                }
                 finishWorkflow(run, seed, conversationId, startNanos, failure, sink);
             } catch (RuntimeException e) {
                 log.error("[{}] 工作流执行异常", LOG_TAG, e);
@@ -1015,6 +1022,10 @@ public class AgentPipeline {
     private String runPlan(WorkflowRun run, LoopState seed, String conversationId,
                            UserContext user, long startNanos, FluxSink<PipelineEvent> sink) {
         while (run.index <= run.plan.size()) {
+            if (sink.isCancelled()) {
+                run.cancelled = true;
+                return null;
+            }
             PlanStep step = run.plan.step(run.index);
             StepResult first = runStep(run, step, seed, conversationId, user, startNanos, sink);
             StepResult result = first;
@@ -1177,6 +1188,8 @@ public class AgentPipeline {
         private final StringBuilder narrative = new StringBuilder();
         private int index = 1;
         private int used;
+        /** 客户端是否已断开（断线后不再继续跑，见 runWorkflow 的注释）。 */
+        private boolean cancelled;
 
         private WorkflowRun(WorkflowPlan plan) {
             this.plan = plan;
