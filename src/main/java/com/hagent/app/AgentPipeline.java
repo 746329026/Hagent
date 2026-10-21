@@ -386,15 +386,30 @@ public class AgentPipeline {
          */
         private final int stepIndexBase;
 
+        /**
+         * 本轮是否允许调工具（阶段 13-P2）。
+         *
+         * <p>工作流的<b>最后一步是"汇总"</b>：它该做的只是把前几步的结论合并成最终答复。
+         * 实测汇总步仍会去检索（因为它手里只有 120 字摘要），把前面两步的查询又跑了一遍 ——
+         * 既费钱又费时。所以汇总步<b>不挂工具</b>：没有检索能力，就只能合并已有材料。
+         */
+        private final boolean toolsEnabled;
+
         private LoopState(List<Message> messages, Message userMessage, int maxSteps) {
-            this(messages, userMessage, maxSteps, 0);
+            this(messages, userMessage, maxSteps, 0, true);
         }
 
         private LoopState(List<Message> messages, Message userMessage, int maxSteps, int stepIndexBase) {
+            this(messages, userMessage, maxSteps, stepIndexBase, true);
+        }
+
+        private LoopState(List<Message> messages, Message userMessage, int maxSteps,
+                          int stepIndexBase, boolean toolsEnabled) {
             this.messages = messages;
             this.userMessage = userMessage;
             this.maxSteps = maxSteps;
             this.stepIndexBase = stepIndexBase;
+            this.toolsEnabled = toolsEnabled;
         }
     }
 
@@ -482,7 +497,7 @@ public class AgentPipeline {
             state.reasoningOffsets.add(state.reasoning.length());
 
             // ---------- 用"克隆配置 + 挂工具 + 带身份"的 options 调模型 ----------
-            Prompt prompt = new Prompt(state.messages, optionsFor(user, null));
+            Prompt prompt = new Prompt(state.messages, optionsFor(user, null, state.toolsEnabled));
 
             Flux<PipelineEvent> stepHead = scope.emitStepEvents()
                     ? Flux.just(new PipelineEvent.StepStarted(step))
@@ -592,7 +607,7 @@ public class AgentPipeline {
             //     而工具内部若要发事件（如检索发出 Retrieved），走 ToolContext 里的
             //     ToolEventSink —— 它也是同步的（见该类注释）。
             List<PipelineEvent> toolPhaseEvents = new ArrayList<>();
-            Prompt prompt = new Prompt(state.messages, optionsFor(user, toolPhaseEvents::add));
+            Prompt prompt = new Prompt(state.messages, optionsFor(user, toolPhaseEvents::add, state.toolsEnabled));
             ToolExecutionResult execution =
                     toolCallingManager.executeToolCalls(prompt, response);
 
@@ -690,11 +705,13 @@ public class AgentPipeline {
      * @param sink 工具执行期间发事件的通道；没有工具要发事件时传 null 也可以
      *             （工具侧取不到出口是正常状态，不告警 —— 见 {@code KnowledgeRetrievalTool}）
      */
-    private ToolCallingChatOptions optionsFor(UserContext user, ToolEventSink sink) {
+    private ToolCallingChatOptions optionsFor(UserContext user, ToolEventSink sink, boolean withTools) {
         var builder = DeepSeekChatOptions.class.cast(baseOptions)
-                .mutate()
-                .toolCallbacks(toolCallbacks)
-                .toolContext(ToolContextSupport.USER, user);
+                .mutate();
+        if (withTools) {
+            builder = builder.toolCallbacks(toolCallbacks);
+        }
+        builder = builder.toolContext(ToolContextSupport.USER, user);
         if (sink != null) {
             builder = builder.toolContext(ToolContextSupport.EVENT_SINK, sink);
         }
@@ -1092,7 +1109,10 @@ public class AgentPipeline {
         messages.add(new SystemMessage(systemMessageOf(seed)));
         messages.addAll(recentTurns(history));
         messages.add(new UserMessage(stepInstruction(run, step, seed)));
-        return new LoopState(messages, null, remaining, run.used);
+        // ★ 汇总步（最后一步）不挂工具：它只能合并已有材料，不能再去检索 ——
+        //   实测它会把前面几步的查询重跑一遍（同一 query、同一批片段）。
+        boolean withTools = step.index() < run.plan.size();
+        return new LoopState(messages, null, remaining, run.used, withTools);
     }
 
     /** 取最近 2 轮对话（一问一答算一轮，所以是末尾 4 条）。 */
@@ -1155,6 +1175,12 @@ public class AgentPipeline {
             }
         }
         String text = reply.toString().trim();
+        if (failure == null && !run.completed.isEmpty()) {
+            // ★ 成功时最终回答 = 【最后一步（汇总步）的产出】，而不是把各步小作文拼起来。
+            //   实测拼接版：428+360+351 ≈ 1374 字，用户拿到的是"三小节小作文"，
+            //   而他要的是"一份说明"。各步过程仍然实时流给了前端，不会丢。
+            text = run.completed.get(run.completed.size() - 1).summary().trim();
+        }
         if (text.isEmpty()) {
             text = "（工作流没有产出任何内容）";
         }

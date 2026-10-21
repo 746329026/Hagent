@@ -219,9 +219,10 @@ class WorkflowPipelineTest {
 
         PipelineEvent.ModelOutput.Final last = (PipelineEvent.ModelOutput.Final) events.getLast();
         assertThat(last.text())
-                .as("最终回答要把各步结论汇总——否则用户只看到最后一步")
-                .contains("条款：满一年 5 天")
-                .contains("结论：按司龄 5/10/15 天");
+                .as("★ 最终回答 = 汇总步（最后一步）的产出，不是各步小作文拼接。"
+                        + "实测拼接版 428+360+351≈1374 字，用户拿到的是三小节而不是一份说明")
+                .isEqualTo("结论：按司龄 5/10/15 天")
+                .doesNotContain("### 第 1 步");
         assertThat(memory.appended)
                 .as("整轮只写回一次（每步各写一次会污染历史）")
                 .hasSize(1);
