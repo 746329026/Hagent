@@ -229,6 +229,27 @@ class WorkflowPipelineTest {
     }
 
     @Test
+    @DisplayName("★★ 模型把工具调用模板当正文吐出来时必须截断 —— 用户不该看到协议文本")
+    void leakedToolMarkupIsStripped() {
+        ChatModel chatModel = model(ONE_STEP_PLAN);
+        when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk(
+                "结论：满一年 5 天年假。<||DSML|| calls><||DSML|| invoke name=\"retrieveKnowledge\">")));
+        RecordingMemory memory = new RecordingMemory();
+
+        List<PipelineEvent> events = run(pipeline(chatModel, memory));
+
+        PipelineEvent.ModelOutput.Final last = (PipelineEvent.ModelOutput.Final) events.getLast();
+        assertThat(last.text())
+                .as("实测事故：汇总步被禁止调工具后，模型把 <||DSML||> 模板当正文输出，"
+                        + "网页上出现一屏协议文本")
+                .isEqualTo("结论：满一年 5 天年假。")
+                .doesNotContain("DSML");
+        assertThat(memory.appended.get(0).get(1).getText())
+                .as("落库的也必须干净 —— 否则历史回放还是脏的")
+                .doesNotContain("DSML");
+    }
+
+    @Test
     @DisplayName("★ 规划失败 → PlanSkipped + 退回普通循环（回答照常，但不假装跑过工作流）")
     void planningFailureFallsBackToNormalLoop() {
         ChatModel chatModel = model("这个问题很复杂，我先不规划了。");

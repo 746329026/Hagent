@@ -386,30 +386,15 @@ public class AgentPipeline {
          */
         private final int stepIndexBase;
 
-        /**
-         * 本轮是否允许调工具（阶段 13-P2）。
-         *
-         * <p>工作流的<b>最后一步是"汇总"</b>：它该做的只是把前几步的结论合并成最终答复。
-         * 实测汇总步仍会去检索（因为它手里只有 120 字摘要），把前面两步的查询又跑了一遍 ——
-         * 既费钱又费时。所以汇总步<b>不挂工具</b>：没有检索能力，就只能合并已有材料。
-         */
-        private final boolean toolsEnabled;
-
         private LoopState(List<Message> messages, Message userMessage, int maxSteps) {
-            this(messages, userMessage, maxSteps, 0, true);
+            this(messages, userMessage, maxSteps, 0);
         }
 
         private LoopState(List<Message> messages, Message userMessage, int maxSteps, int stepIndexBase) {
-            this(messages, userMessage, maxSteps, stepIndexBase, true);
-        }
-
-        private LoopState(List<Message> messages, Message userMessage, int maxSteps,
-                          int stepIndexBase, boolean toolsEnabled) {
             this.messages = messages;
             this.userMessage = userMessage;
             this.maxSteps = maxSteps;
             this.stepIndexBase = stepIndexBase;
-            this.toolsEnabled = toolsEnabled;
         }
     }
 
@@ -497,7 +482,7 @@ public class AgentPipeline {
             state.reasoningOffsets.add(state.reasoning.length());
 
             // ---------- 用"克隆配置 + 挂工具 + 带身份"的 options 调模型 ----------
-            Prompt prompt = new Prompt(state.messages, optionsFor(user, null, state.toolsEnabled));
+            Prompt prompt = new Prompt(state.messages, optionsFor(user, null));
 
             Flux<PipelineEvent> stepHead = scope.emitStepEvents()
                     ? Flux.just(new PipelineEvent.StepStarted(step))
@@ -607,7 +592,7 @@ public class AgentPipeline {
             //     而工具内部若要发事件（如检索发出 Retrieved），走 ToolContext 里的
             //     ToolEventSink —— 它也是同步的（见该类注释）。
             List<PipelineEvent> toolPhaseEvents = new ArrayList<>();
-            Prompt prompt = new Prompt(state.messages, optionsFor(user, toolPhaseEvents::add, state.toolsEnabled));
+            Prompt prompt = new Prompt(state.messages, optionsFor(user, toolPhaseEvents::add));
             ToolExecutionResult execution =
                     toolCallingManager.executeToolCalls(prompt, response);
 
@@ -705,13 +690,19 @@ public class AgentPipeline {
      * @param sink 工具执行期间发事件的通道；没有工具要发事件时传 null 也可以
      *             （工具侧取不到出口是正常状态，不告警 —— 见 {@code KnowledgeRetrievalTool}）
      */
-    private ToolCallingChatOptions optionsFor(UserContext user, ToolEventSink sink, boolean withTools) {
+    /**
+     * 克隆配置好的 options，并按需挂上工具与身份。
+     *
+     * <p>★ <b>工具始终挂上</b>（阶段 13 实测教训）：曾试过"汇总步不挂工具，
+     * 逼它只能合并已有材料" —— 结果模型仍然想检索，而<b>没有工具可调时它把
+     * 工具调用模板（{@code <||DSML||>}）当作正文吐了出来</b>，用户看到一屏协议文本。
+     * 结论：<b>"不给能力"不会让模型放弃这个意图，只会让它用错误的格式表达意图。</b>
+     */
+    private ToolCallingChatOptions optionsFor(UserContext user, ToolEventSink sink) {
         var builder = DeepSeekChatOptions.class.cast(baseOptions)
-                .mutate();
-        if (withTools) {
-            builder = builder.toolCallbacks(toolCallbacks);
-        }
-        builder = builder.toolContext(ToolContextSupport.USER, user);
+                .mutate()
+                .toolCallbacks(toolCallbacks)
+                .toolContext(ToolContextSupport.USER, user);
         if (sink != null) {
             builder = builder.toolContext(ToolContextSupport.EVENT_SINK, sink);
         }
@@ -1048,7 +1039,7 @@ public class AgentPipeline {
                                           String conversationId, UserContext user, long startNanos) {
         run.used += stepState.steps;
         run.lastChunk = stepState.lastChunk;
-        String text = stepState.text.toString().trim();
+        String text = stripToolMarkup(stepState.text.toString()).trim();
         if (!text.isEmpty()) {
             run.recordSuccess(step, text, stepState);
             log.info("[{}] 第 {} 步完成：{} 字（累计模型调用 {} 次）",
@@ -1109,10 +1100,7 @@ public class AgentPipeline {
         messages.add(new SystemMessage(systemMessageOf(seed)));
         messages.addAll(recentTurns(history));
         messages.add(new UserMessage(stepInstruction(run, step, seed)));
-        // ★ 汇总步（最后一步）不挂工具：它只能合并已有材料，不能再去检索 ——
-        //   实测它会把前面几步的查询重跑一遍（同一 query、同一批片段）。
-        boolean withTools = step.index() < run.plan.size();
-        return new LoopState(messages, null, remaining, run.used, withTools);
+        return new LoopState(messages, null, remaining, run.used);
     }
 
     /** 取最近 2 轮对话（一问一答算一轮，所以是末尾 4 条）。 */
@@ -1139,10 +1127,10 @@ public class AgentPipeline {
             sb.append("完成判据：").append(step.doneWhen()).append('\n');
         }
         if (!run.completed.isEmpty()) {
-            sb.append("已完成的部分：\n");
+            sb.append("已完成部分的完整结论（直接用于合并，不要重新去查）：\n");
             for (CompletedStep done : run.completed) {
-                sb.append("- 第 ").append(done.index()).append(" 步（").append(done.goal())
-                        .append("）：").append(brief(done.summary())).append('\n');
+                sb.append("第 ").append(done.index()).append(" 步（").append(done.goal())
+                        .append("）：\n").append(cap(done.summary(), 1200)).append('\n');
             }
         }
         sb.append("只做当前这一步，做完直接给出这一步的结果，不要提前做后面的步骤。\n");
@@ -1263,9 +1251,33 @@ public class AgentPipeline {
         return "";
     }
 
-    private static String brief(String text) {
-        String oneLine = text == null ? "" : text.replaceAll("\\s+", " ").trim();
-        return oneLine.length() <= 120 ? oneLine : oneLine.substring(0, 120) + "…";
+    private static String cap(String text, int limit) {
+        String value = text == null ? "" : text.trim();
+        return value.length() <= limit ? value : value.substring(0, limit) + "…";
+    }
+
+    /**
+     * 剥掉模型误吐进正文的<b>工具调用模板</b>（DeepSeek 的 {@code <||DSML||>...}）。
+     *
+     * <h2>★ 为什么需要这道防御（真实事故）</h2>
+     *
+     * <p>实测：汇总步被"不挂工具"之后，模型仍想检索，于是把工具调用模板当正文输出，
+     * 用户屏幕上出现一屏 {@code <||DSML|| invoke name="retrieveKnowledge">}。
+     * 协议文本到达用户是<b>不可接受的缺陷</b>，所以这里截断并 WARN。
+     *
+     * <p>为什么是"截断到底"而不是"过滤掉那几行"：模板之后的内容是这个非法意图的续写，
+     * 留着只会得到半截错乱文本。宁可只保留模板之前的有效部分。
+     */
+    private String stripToolMarkup(String text) {
+        int marker = text.indexOf("DSML");
+        if (marker < 0) {
+            return text;
+        }
+        int from = Math.max(text.lastIndexOf('<', marker), text.lastIndexOf('＜', marker));
+        log.warn("[{}] ★ 模型把工具调用模板当成正文输出了，已截断（{} 字 → {} 字）。"
+                        + "【排查方向】① 该步是否被阻止调工具却又确实需要；② 工具 schema 是否让模型误用",
+                LOG_TAG, text.length(), Math.max(from, 0));
+        return from <= 0 ? "" : text.substring(0, from);
     }
 
     /**
