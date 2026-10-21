@@ -55,6 +55,15 @@ class WorkflowPipelineTest {
 
     private static final class RecordingMemory implements ConversationMemory {
         private final List<List<Message>> appended = new ArrayList<>();
+        private final List<Message> historyToReturn;
+
+        private RecordingMemory() {
+            this(List.of());
+        }
+
+        private RecordingMemory(List<Message> historyToReturn) {
+            this.historyToReturn = historyToReturn;
+        }
 
         @Override
         public void append(String conversationId, List<Message> messages) {
@@ -63,7 +72,7 @@ class WorkflowPipelineTest {
 
         @Override
         public List<Message> load(String conversationId, TokenBudget budget) {
-            return List.of();
+            return historyToReturn;
         }
 
         @Override
@@ -116,6 +125,55 @@ class WorkflowPipelineTest {
     private List<PipelineEvent> run(AgentPipeline pipeline) {
         return pipeline.run("公司年假怎么算", "conv-1", MemoryMode.WORKFLOW, UserContext.ANONYMOUS)
                 .collectList().block();
+    }
+
+    @Test
+    @DisplayName("★★ 规划看全量历史、每步只看最近 2 轮 —— 因为一次工作流里模型能看到多次提示词")
+    void planningSeesFullHistoryButStepsOnlyRecentTurns() {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(
+                org.springframework.ai.deepseek.DeepSeekChatOptions.builder()
+                        .model("deepseek-flash").build());
+        List<Prompt> planPrompts = new ArrayList<>();
+        when(chatModel.call(any(Prompt.class))).thenAnswer(invocation -> {
+            planPrompts.add(invocation.getArgument(0));
+            return chunk(TWO_STEP_PLAN);
+        });
+        List<Prompt> stepPrompts = new ArrayList<>();
+        when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation -> {
+            stepPrompts.add(invocation.getArgument(0));
+            return Flux.just(chunk("这一步的结论"));
+        });
+        List<Message> history = List.of(
+                new org.springframework.ai.chat.messages.UserMessage("第一轮问"),
+                new org.springframework.ai.chat.messages.AssistantMessage("第一轮答"),
+                new org.springframework.ai.chat.messages.UserMessage("第二轮问"),
+                new org.springframework.ai.chat.messages.AssistantMessage("第二轮答"),
+                new org.springframework.ai.chat.messages.UserMessage("第三轮问"),
+                new org.springframework.ai.chat.messages.AssistantMessage("第三轮答"));
+
+        run(pipeline(chatModel, new RecordingMemory(history)));
+
+        String planText = promptText(planPrompts.get(0));
+        assertThat(planText)
+                .as("规划只发生一次，要让它看到完整上下文才可能拆对")
+                .contains("第一轮问", "第三轮答", "公司年假怎么算");
+        String stepText = promptText(stepPrompts.get(0));
+        assertThat(stepText)
+                .as("每步都带全量历史会让 8 步的成本线性膨胀；最近 2 轮足够支撑指代")
+                .contains("第二轮问", "第三轮答")
+                .doesNotContain("第一轮问");
+        assertThat(stepText)
+                .as("每步的指令里必须带【原始用户问题】—— 只带规划器改写后的 goal 会丢掉细节")
+                .contains("公司年假怎么算");
+    }
+
+    private static String promptText(Prompt prompt) {
+        StringBuilder sb = new StringBuilder();
+        for (Message message : prompt.getInstructions()) {
+            sb.append(message.getText()).append('\n');
+        }
+        return sb.toString();
     }
 
     @Test

@@ -4216,6 +4216,8 @@ com.hagent.memory.longterm.LongTermMemoryStore                  ← 退化为纯
 | 2 | **计划可见、不停下等确认** | 计划以 `workflow` SSE 事件推出，执行立即开始；不做挂起/恢复 |
 | 3 | **两次重试就放弃** | ①同步重试同一步 → ②重规划一次 → 仍失败则停下，并在回答里写明"第 k 步失败、原因、已完成哪几步" |
 | 4 | **不落库** | 计划与每步结论随最终回答写进会话记录；不建表 |
+| 5 | **历史注入分层** | 规划调用带**全量已裁剪历史**；每一步只带**最近 2 轮** + 原始问题 + 已完成摘要。依据：一次工作流里模型能看到 **1 次规划 + 每步至少 1 次**提示词，所以不必每步都塞全量（否则 8 步 × 50k token 线性膨胀） |
+| 6 | **审计步号统一口径** | `chat_tool_invocation.step_index` = **回合内第 N 次模型调用**（工作流用 `stepIndexBase + 本地步数`），不按计划步重新从 1 开始 |
 
 **规划失败**（模型输出不是合法 JSON）→ **退回普通循环并推 `plan_skipped` 事件**。
 理由：配置写错该失败，**模型输出写歪不该让用户拿不到任何回答**；但必须可见，
@@ -4286,6 +4288,30 @@ mindmap
 
 **已做的一条边界处理**：客户端断开（SSE 取消）后**不再继续跑剩余步骤**，且**本轮不写回** ——
 否则一次断线会白烧掉剩下的模型调用，而"写一条残缺的助手消息"比不写更糟。
+
+### 13.5 复盘后的风格统一（2026-10-21，本人要求"chat / workflow 是并立的线，风格必须统一"）
+
+第一版工作流用的是 `Flux.create + boundedElastic + blockLast + 命令式 while`，与 chat 的
+`Flux.defer + concatWith(Flux.defer(...))` 递归**两套写法**。逐条对照后暴露出三个真缺陷
+（不只是风格）：**两条写回路径**、**思考不落库**、**模式布尔渗进 `LoopState`**。已按"甲方案"统一：
+
+| 项 | 第一版 | 现在 |
+|---|---|---|
+| 外壳 | `Flux.create` + `blockLast` + 手工 `isCancelled()` | `Mono.fromCallable(...).subscribeOn(boundedElastic())` + `Flux.defer` 递归（与 chat 同形，取消/背压白拿） |
+| 写回 | `writeBack(state)` 与 `writeBackTurn(...)` **两条** | **一条** `writeBack(cid, userMessage, text, trace, stepCount)`，chat 也只是薄委托 |
+| 思考 | workflow **丢弃**（`Final.reasoning` 空、库里无思考） | 每步思考聚合进一个 `LoopState`，**复用 `markedReasoning`**（步号 = 计划步号），Final 与落库都有 |
+| 模式差异 | `LoopState` 加 `terminal` / `stepEvents` 两个布尔 | 挪成 `loop(..., LoopScope)` 的**参数**（`LoopScope.CHAT` / `STEP`），状态里不再有模式知识 |
+| 提示词 | `PLANNING_SYSTEM` 硬编码在 Java | `classpath:prompts/workflow-plan-prompt.md` + `prompt.WorkflowPlanPrompt`（读不到即失败） |
+| 新一步的消息 | 只有 system + 本步指令 | system + **最近 2 轮历史** + **原始用户问题** + 已完成摘要 + 本步 |
+| 审计步号 | 每个计划步从 1 重新计数（一次运行出现多个 `step_index=1`） | `stepIndexBase + 本地步数`，与 chat 同一口径 |
+
+**证据**：`mvnw test` → `Tests run: 346, Failures: 0, Errors: 0, Skipped: 2`；
+其中新增一条 `WorkflowPipelineTest#planningSeesFullHistoryButStepsOnlyRecentTurns`，
+用<b>抓模型真正收到的 prompt</b> 的方式断言"规划看全量、每步只看最近 2 轮、且带原始问题"。
+
+**已知未覆盖**：审计步号这一条**没有自动化测试** —— 现有 workflow 测试的假模型不产工具调用，
+`recordAudit` 不会被触发。补的落点：用 `TestAudit.recording()` + `TestToolCallbackProvider.of(...)`
+写一条"工作流里第 2 步的工具调用，`step_index` 必须是全局序号而不是 2 次都是 1"。
 
 ---
 

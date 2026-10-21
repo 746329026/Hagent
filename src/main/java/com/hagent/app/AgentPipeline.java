@@ -1,11 +1,12 @@
 package com.hagent.app;
 
+import com.hagent.prompt.WorkflowPlanPrompt;
 import com.hagent.workflow.InvalidPlanException;
 import com.hagent.workflow.PlanStep;
 import com.hagent.workflow.WorkflowPlan;
 import com.hagent.workflow.WorkflowPlanParser;
 import org.springframework.ai.chat.messages.SystemMessage;
-import reactor.core.publisher.FluxSink;
+import reactor.core.publisher.Mono;
 
 import com.hagent.agent.PipelineEvent;
 import com.hagent.agent.ToolEventSink;
@@ -293,9 +294,9 @@ public class AgentPipeline {
                     original.getUserMessage(), maxSteps);
             // ★ 阶段 13：workflow 走"先拆解 → 逐步执行"；chat 的路径一个字都没动。
             if (safeMode == MemoryMode.WORKFLOW) {
-                return runWorkflow(state, cid, user, startNanos);
+                return runWorkflow(state, history, cid, user, startNanos);
             }
-            return loop(state, cid, user, startNanos);
+            return loop(state, cid, user, startNanos, LoopScope.CHAT);
         });
     }
 
@@ -377,31 +378,41 @@ public class AgentPipeline {
         private final int maxSteps;
 
         /**
-         * 是否为<b>终点</b>（阶段 13）：{@code false} 表示这是工作流里"某一步"的内层循环 ——
-         * 它结束时<b>不写回记忆、也不产出 Final</b>，因为整轮还没结束。
+         * 审计里的步号起点（阶段 13）：chat 是 0（回合内第 N 次模型调用），
+         * 工作流的每一步传"此前已用掉的模型调用数" —— 这样两种模式在
+         * {@code chat_tool_invocation.step_index} 上是<b>同一个口径</b>：
+         * 回合内第 N 次模型调用，而不是每个计划步各从 1 开始（那会让一次工作流里
+         * 出现多个 {@code step_index=1}，事后无法定位）。
          */
-        private final boolean terminal;
-
-        /**
-         * 是否发 {@link PipelineEvent.StepStarted}（阶段 13）。
-         *
-         * <p>工作流的"步"是<b>计划步</b>，由外层发；内层每次模型调用再发一层步号，
-         * 会让前端把"第 2 个计划步里的第 3 次模型调用"显示成"第 3 步"。
-         */
-        private final boolean stepEvents;
+        private final int stepIndexBase;
 
         private LoopState(List<Message> messages, Message userMessage, int maxSteps) {
-            this(messages, userMessage, maxSteps, true, true);
+            this(messages, userMessage, maxSteps, 0);
         }
 
-        private LoopState(List<Message> messages, Message userMessage, int maxSteps,
-                          boolean terminal, boolean stepEvents) {
+        private LoopState(List<Message> messages, Message userMessage, int maxSteps, int stepIndexBase) {
             this.messages = messages;
             this.userMessage = userMessage;
             this.maxSteps = maxSteps;
-            this.terminal = terminal;
-            this.stepEvents = stepEvents;
+            this.stepIndexBase = stepIndexBase;
         }
+    }
+
+    /**
+     * 循环的"角色"（阶段 13）—— 把模式差异<b>从状态里挪到参数里</b>。
+     *
+     * <p>为什么不放在 {@link LoopState}：那两个布尔只为工作流存在，挂在 chat 的循环状态上
+     * 就是"模式知识渗进共享状态" —— 再加一种模式，这里会变成一串布尔开关。
+     *
+     * @param terminal       是否终点：{@code false} 表示这是工作流里"某一步"的内层循环，
+     *                       结束时<b>不写回、不产出 Final</b>
+     * @param emitStepEvents 是否发 {@code StepStarted}：工作流的"步"是计划步，由外层发
+     */
+    private record LoopScope(boolean terminal, boolean emitStepEvents) {
+        /** 普通回合：发步事件、结束时写回收尾。 */
+        private static final LoopScope CHAT = new LoopScope(true, true);
+        /** 工作流的一步：不发步事件、不写回、不产 Final。 */
+        private static final LoopScope STEP = new LoopScope(false, false);
     }
 
     /**
@@ -446,7 +457,8 @@ public class AgentPipeline {
     private Flux<PipelineEvent> loop(LoopState state,
                                      String conversationId,
                                      UserContext user,
-                                     long startNanos) {
+                                     long startNanos,
+                                     LoopScope scope) {
         return Flux.defer(() -> {
             if (state.steps >= state.maxSteps) {
                 // ---------- ③ 防御出口：不再调用模型，用已累积的内容收尾 ----------
@@ -455,7 +467,7 @@ public class AgentPipeline {
                                 + "② 工具返回内容是否让模型以为【还没做完】；"
                                 + "③ hagent.agent.chat-max-steps / workflow-max-steps 是否需要调整",
                         LOG_TAG, state.maxSteps, state.text.length());
-                return state.terminal
+                return scope.terminal()
                         ? Flux.just(finish(state, conversationId, startNanos, "maxSteps"))
                         : Flux.empty();
             }
@@ -472,7 +484,7 @@ public class AgentPipeline {
             // ---------- 用"克隆配置 + 挂工具 + 带身份"的 options 调模型 ----------
             Prompt prompt = new Prompt(state.messages, optionsFor(user, null));
 
-            Flux<PipelineEvent> stepHead = state.stepEvents
+            Flux<PipelineEvent> stepHead = scope.emitStepEvents()
                     ? Flux.just(new PipelineEvent.StepStarted(step))
                     : Flux.empty();
             return stepHead.concatWith(chatModel.stream(prompt)
@@ -528,7 +540,7 @@ public class AgentPipeline {
                             //     · then       → 丢弃上游所有元素，只保留完成信号 —— 事件全丢 ❌
                             //   实测踩过：用 then 时前端只会收到一个 Final，
                             //   而断言会以 "Expected size: 3 but was: 1" 的形式暴露它。
-                            .concatWith(Flux.defer(() -> handleToolCalls(state, conversationId, user, startNanos))));
+                            .concatWith(Flux.defer(() -> handleToolCalls(state, conversationId, user, startNanos, scope))));
         });
     }
 
@@ -541,12 +553,13 @@ public class AgentPipeline {
     private Flux<PipelineEvent> handleToolCalls(LoopState state,
                                                 String conversationId,
                                                 UserContext user,
-                                                long startNanos) {
+                                                long startNanos,
+                                                LoopScope scope) {
         return Flux.defer(() -> {
             ChatResponse response = state.lastChunk;
             if (response == null || !response.hasToolCalls()) {
                 // ---------- ① 正常出口 ----------
-                return state.terminal
+                return scope.terminal()
                         ? Flux.just(finish(state, conversationId, startNanos,
                                 response == null ? null : finishReasonOf(response)))
                         : Flux.empty();
@@ -594,7 +607,7 @@ public class AgentPipeline {
             //   ★ 与记忆写回一样：【不在关键路径上】。
             //     实现内部吞掉异常并记 ERROR（见 ToolInvocationStore 的类注释）——
             //     为"审计写不进去"丢掉已经产生的模型回复是双重损失。
-            recordAudit(conversationId, state.steps, requested, results);
+            recordAudit(conversationId, state.stepIndexBase + state.steps, requested, results);
 
             log.debug("[{}] 第 {} 步：执行了 {} 个工具，历史消息数 {} → {}",
                     LOG_TAG, state.steps, requested.size(),
@@ -603,7 +616,7 @@ public class AgentPipeline {
             // ---------- 递归走下一步 ----------
             //   ★ 用 Flux.defer + concatWith 保持整条链响应式；不要 block()（那会在 SSE 线程上阻塞）。
             return callEvents.concatWith(Flux.fromIterable(toolPhaseEvents))
-                    .concatWith(Flux.defer(() -> loop(state, conversationId, user, startNanos)));
+                    .concatWith(Flux.defer(() -> loop(state, conversationId, user, startNanos, scope)));
         });
     }
 
@@ -823,12 +836,25 @@ public class AgentPipeline {
      * 本方法无法也不应感知成败（见类注释的诚实声明）。
      */
     private void writeBack(String conversationId, LoopState state) {
-        String replyText = state.text.toString();
-        String reasoningTrace = markedReasoning(state);
+        writeBack(conversationId, state.userMessage, state.text.toString(), markedReasoning(state),
+                state.reasoningOffsets.size());
+    }
 
+    /**
+     * 写回的<b>唯一实现</b>（阶段 13 起 chat 与工作流共用这一条）。
+     *
+     * <p>为什么参数是"文本 + 用户消息"而不是继续收 {@link LoopState}：工作流没有
+     * "一个累积整轮回答的 LoopState"（它每步一个），第一版因此另写了一份
+     * {@code writeBackTurn} —— 两条写回路径，将来改落库格式必然只改一处。
+     *
+     * @param reasoningTrace 分步思考标记（{@code @@step:N tool:...}），可为 null
+     * @param stepCount      日志用：chat 里是模型调用步数，工作流里是计划步数
+     */
+    private void writeBack(String conversationId, Message userMessage, String replyText,
+                           String reasoningTrace, int stepCount) {
         List<Message> turn = new ArrayList<>(2);
-        if (state.userMessage != null) {
-            turn.add(state.userMessage);
+        if (userMessage != null) {
+            turn.add(userMessage);
         }
         if (replyText != null && !replyText.isBlank()) {
             turn.add(reasoningTrace == null
@@ -845,7 +871,7 @@ public class AgentPipeline {
         log.debug("[{}] 写回记忆：会话={} 消息 {} 条，思考 {} 字（分 {} 步）",
                 LOG_TAG, conversationId, turn.size(),
                 reasoningTrace == null ? 0 : reasoningTrace.length(),
-                state.reasoningOffsets.size());
+                stepCount);
         memory.append(conversationId, turn);
     }
 
@@ -908,28 +934,15 @@ public class AgentPipeline {
     // ========================================================================
 
     /**
-     * 规划调用的系统提示词。
+     * 规划提示词在 <b>classpath:prompts/workflow-plan-prompt.md</b>（阶段 13 起），
+     * 由 {@link com.hagent.prompt.WorkflowPlanPrompt} 读取。
      *
-     * <p>★ <b>它和 {@link WorkflowPlanParser} 是一对契约</b>：这里承诺的 JSON 形状，
-     * 解析器必须能读；解析器拒绝的（步数超限、编号不连续），这里也要提前约束。
-     * 改一处必须改另一处 —— 否则表现为"规划总是失败"，而日志里看不出为什么。
+     * <p>为什么不再写成 Java 常量：本项目所有"给模型看的长文本"都是资源文件
+     * （{@code rag-answer-prompt.md} 等），改提示词不该要求改 Java 并重新理解缩进。
      *
-     * <p>为什么要求"不要用代码块"：解析器虽然能从围栏里抠出 JSON，但那是<b>兜底</b>，
-     * 不是许可。让模型少做一步，成功率更高。
+     * <p>★ <b>它和 {@link WorkflowPlanParser} 是一对契约</b>：提示词承诺的 JSON 形状，
+     * 解析器必须能读；解析器拒绝的（步数超限、编号不连续），提示词里也要提前约束。
      */
-    private static final String PLANNING_SYSTEM = """
-            你是任务规划器。把用户的任务拆成 1 到 8 个可按顺序执行的步骤。
-            只输出一个 JSON 对象，不要输出任何解释，不要用 Markdown 代码块。
-
-            格式：
-            {"goal":"这次要解决的问题","steps":[{"goal":"这一步要做什么","doneWhen":"怎样算做完"}]}
-
-            要求：
-            1) 步骤之间有先后依赖，后一步能用到前一步的产出；
-            2) 每一步都是"一次可以独立完成的事"，不要写"继续思考"这类空话；
-            3) doneWhen 写可验证的判据（如"拿到条款原文"），拿不准就留空串；
-            4) 步骤数不要超过 8。
-            """;
 
     /**
      * 工作流：<b>先拆解，再逐步执行</b>（阶段 13 的核心）。
@@ -939,8 +952,15 @@ public class AgentPipeline {
      * <p>规划是一次<b>同步</b>的模型调用，每一步又是"D 一次阻塞工具循环"。
      * Reactor 里把阻塞调用放在事件循环上会直接抛
      * {@code block() ... not supported in thread reactor-http-nio-*}（阶段 9 的真实事故）。
-     * 所以这里用 {@code Flux.create + boundedElastic}：<b>订阅返回后由池里的线程推进</b>，
-     * 事件仍通过 sink 逐条吐给下游（SSE/聚合口径都不变）。
+     * 所以规划调用用 {@code Mono.fromCallable(...).subscribeOn(boundedElastic())} 包一层 ——
+     * 与 chat 的 {@code publishOn(boundedElastic())} 同一个思路，且<b>取消/背压由 Reactor 负责</b>。
+     *
+     * <h2>★ 为什么不是 {@code Flux.create + blockLast}</h2>
+     *
+     * <p>第一版就是那样写的，代价是：断线取消要手写 {@code sink.isCancelled()}、失败要走返回值
+     * 而不是 onError 通道、外层与 chat 的递归风格完全两样。阶段结束复盘时改成
+     * {@code Mono + Flux.concat + Flux.defer} 递归 —— 与 chat 的
+     * {@code concatWith(Flux.defer(...))} <b>同形</b>，取消与背压白拿。
      *
      * <h2>★ 降级：规划失败 <b>不</b>让请求失败</h2>
      *
@@ -949,139 +969,144 @@ public class AgentPipeline {
      * 否则用户会以为工作流跑过了。
      */
     private Flux<PipelineEvent> runWorkflow(LoopState seed,
+                                            List<Message> history,
                                             String conversationId,
                                             UserContext user,
                                             long startNanos) {
-        return Flux.<PipelineEvent>create(sink -> Schedulers.boundedElastic().schedule(() -> {
-            try {
-                WorkflowPlan plan;
-                try {
-                    plan = WorkflowPlanParser.parse(
-                            draftPlanText(seed.userMessage, null, null));
-                } catch (InvalidPlanException e) {
-                    log.warn("[{}] ★ 规划失败，退回普通循环（回答照常，但不保证按计划执行）：{}",
-                            LOG_TAG, e.getMessage());
-                    sink.next(new PipelineEvent.PlanSkipped(e.getMessage()));
-                    loop(seed, conversationId, user, startNanos).doOnNext(sink::next).blockLast();
-                    return;
-                }
-                log.info("[{}] 工作流计划：{} 步（{}）", LOG_TAG, plan.size(), plan.goal());
-                sink.next(new PipelineEvent.PlanCreated(plan));
-
-                WorkflowRun run = new WorkflowRun(plan);
-                String failure = executeWithRetry(run, seed, conversationId, user, startNanos, sink);
-                if (run.cancelled) {
-                    // ★ 客户端断开（SSE 取消）后不再继续跑：否则一次断线会白烧掉剩下的模型调用。
-                    //   刻意不写回：这轮没跑完，写一条残缺的助手消息比不写更糟。
-                    log.info("[{}] 客户端已断开，工作流在执行第 {} 步前停止（本轮不写回）",
-                            LOG_TAG, run.index);
-                    return;
-                }
-                finishWorkflow(run, seed, conversationId, startNanos, failure, sink);
-            } catch (RuntimeException e) {
-                log.error("[{}] 工作流执行异常", LOG_TAG, e);
-                sink.error(e);
-            } finally {
-                sink.complete();
-            }
-        }), FluxSink.OverflowStrategy.BUFFER);
+        return Mono.fromCallable(() -> draftPlan(seed, history, null, null))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMapMany(drafted -> {
+                    if (drafted.plan() == null) {
+                        log.warn("[{}] ★ 规划失败，退回普通循环（回答照常，但不保证按计划执行）：{}",
+                                LOG_TAG, drafted.error());
+                        return Flux.concat(
+                                Flux.just(new PipelineEvent.PlanSkipped(drafted.error())),
+                                loop(seed, conversationId, user, startNanos, LoopScope.CHAT));
+                    }
+                    log.info("[{}] 工作流计划：{} 步（{}）",
+                            LOG_TAG, drafted.plan().size(), drafted.plan().goal());
+                    WorkflowRun run = new WorkflowRun(drafted.plan(), seed);
+                    return Flux.concat(
+                            Flux.just(new PipelineEvent.PlanCreated(drafted.plan())),
+                            nextStep(run, seed, history, conversationId, user, startNanos));
+                });
     }
 
     /**
-     * 两次重试的编排：<b>①同步重试同一步 → ②重规划一次 → 仍失败就放弃</b>。
+     * 下一步 —— 与 chat 的 {@link #loop} <b>同形</b>：{@code Flux.defer} 里判断"还能不能继续"，
+     * 能就 {@code concatWith(Flux.defer(下一步))}，不能就产出收尾事件。
      *
-     * <p>放弃时<b>不静默</b>：返回的失败原因会写进最终回答（第几步、为什么）。
-     * 刻意<b>不选"跳过"</b> —— 跳过会让"少做了一件事"看起来像"做完了"。
+     * <p>★ 它替代了第一版的 {@code while} + {@code blockLast()}：命令式外壳会让
+     * "取消"必须手写检查，而递归的 Flux 链天然继承取消与背压。
      */
-    private String executeWithRetry(WorkflowRun run, LoopState seed, String conversationId,
-                                    UserContext user, long startNanos, FluxSink<PipelineEvent> sink) {
-        boolean replanned = false;
-        while (true) {
-            String failure = runPlan(run, seed, conversationId, user, startNanos, sink);
-            if (failure == null) {
-                return null;
+    private Flux<PipelineEvent> nextStep(WorkflowRun run, LoopState seed, List<Message> history,
+                                         String conversationId, UserContext user, long startNanos) {
+        return Flux.defer(() -> {
+            if (!run.hasNext()) {
+                return Flux.just(finishWorkflow(run, seed, conversationId, startNanos, null));
             }
-            if (replanned) {
-                return failure;
-            }
-            replanned = true;
-            log.warn("[{}] 工作流第 1 次重试后仍失败，重规划一次：{}", LOG_TAG, failure);
-            WorkflowPlan next;
-            try {
-                next = WorkflowPlanParser.parse(
-                        draftPlanText(seed.userMessage, run.plan.goal(), failure));
-            } catch (InvalidPlanException e) {
-                return failure + "；重规划失败：" + e.getMessage();
-            }
-            sink.next(new PipelineEvent.PlanCreated(next));
-            run.restart(next);
-        }
-    }
-
-    /** 执行当前计划里尚未完成的步骤；返回 null 表示全部完成。 */
-    private String runPlan(WorkflowRun run, LoopState seed, String conversationId,
-                           UserContext user, long startNanos, FluxSink<PipelineEvent> sink) {
-        while (run.index <= run.plan.size()) {
-            if (sink.isCancelled()) {
-                run.cancelled = true;
-                return null;
-            }
-            PlanStep step = run.plan.step(run.index);
-            StepResult first = runStep(run, step, seed, conversationId, user, startNanos, sink);
-            StepResult result = first;
-            if (!first.ok()) {
-                sink.next(new PipelineEvent.StepFinished(step.index(), false, first.summary()));
-                log.warn("[{}] 第 {} 步失败，同步重试一次：{}", LOG_TAG, step.index(), first.summary());
-                result = runStep(run, step, seed, conversationId, user, startNanos, sink);
-            }
-            if (!result.ok()) {
-                sink.next(new PipelineEvent.StepFinished(step.index(), false, result.summary()));
-                return "第 " + step.index() + " 步（" + step.goal() + "）失败：" + result.summary();
-            }
-            sink.next(new PipelineEvent.StepFinished(step.index(), true, result.summary()));
-            run.completed.add(new CompletedStep(step.index(), step.goal(), result.summary()));
-            run.narrative.append("### 第 ").append(step.index()).append(" 步：")
-                    .append(step.goal()).append("\n\n").append(result.summary()).append("\n\n");
-            run.index++;
-        }
-        return null;
+            PlanStep step = run.current();
+            LoopState stepState = newStepState(run, step, seed, history);
+            return Flux.concat(
+                    Flux.just(new PipelineEvent.StepStarted(step.index())),
+                    loop(stepState, conversationId, user, startNanos, LoopScope.STEP),
+                    Flux.defer(() -> afterStep(run, step, stepState, seed, history,
+                            conversationId, user, startNanos)));
+        });
     }
 
     /**
-     * 跑<b>一步</b>：发 StepStarted → 用一个"非终点"的内层循环跑工具循环 → 收集这一步的产出。
+     * 一步结束后：成功 → 下一步；第一次失败 → <b>同步重试</b>；第二次失败 → <b>重规划一次</b>；
+     * 再失败 → 放弃（把失败原因写进最终回答）。
      *
-     * <p>内层循环的失败判定是<b>"有没有产出"</b>，而不是"调了几次模型"：
-     * 模型可能正常收尾但什么都不说（工具失败后常见的形态），那一步等于没做成。
+     * <p>★ 失败判定是<b>"有没有产出"</b>，不是"调了几次模型"：模型可能正常收尾却什么都不说
+     * （工具失败后最常见的形态），那一步等于没做成。
      */
-    private StepResult runStep(WorkflowRun run, PlanStep step, LoopState seed, String conversationId,
-                               UserContext user, long startNanos, FluxSink<PipelineEvent> sink) {
-        sink.next(new PipelineEvent.StepStarted(step.index()));
-        int remaining = Math.max(1, seed.maxSteps - run.used);
-        List<Message> stepMessages = new ArrayList<>(2);
-        stepMessages.add(new SystemMessage(systemMessageOf(seed)));
-        stepMessages.add(new UserMessage(stepInstruction(run, step)));
-        LoopState stepState = new LoopState(stepMessages, null, remaining, false, false);
-        try {
-            loop(stepState, conversationId, user, startNanos)
-                    .doOnNext(sink::next)
-                    .blockLast();
-        } catch (RuntimeException e) {
-            log.warn("[{}] 第 {} 步执行异常：{}", LOG_TAG, step.index(), e.toString());
-            return new StepResult(false, e.toString());
-        }
+    private Flux<PipelineEvent> afterStep(WorkflowRun run, PlanStep step, LoopState stepState,
+                                          LoopState seed, List<Message> history,
+                                          String conversationId, UserContext user, long startNanos) {
         run.used += stepState.steps;
         String text = stepState.text.toString().trim();
-        if (text.isEmpty()) {
-            return new StepResult(false, "这一步没有产出任何内容（模型未给出该步的结果）");
+        if (!text.isEmpty()) {
+            run.recordSuccess(step, text, stepState);
+            log.info("[{}] 第 {} 步完成：{} 字（累计模型调用 {} 次）",
+                    LOG_TAG, step.index(), text.length(), run.used);
+            return Flux.concat(
+                    Flux.just(new PipelineEvent.StepFinished(step.index(), true, text)),
+                    nextStep(run, seed, history, conversationId, user, startNanos));
         }
-        log.info("[{}] 第 {} 步完成：{} 字（累计模型调用 {} 次）",
-                LOG_TAG, step.index(), text.length(), run.used);
-        return new StepResult(true, text);
+        String error = "这一步没有产出任何内容（模型未给出该步的结果）";
+        String failure = "第 " + step.index() + " 步（" + step.goal() + "）失败：" + error;
+        if (run.attempts++ == 0) {
+            log.warn("[{}] 第 {} 步失败，同步重试一次：{}", LOG_TAG, step.index(), error);
+            LoopState retryState = newStepState(run, step, seed, history);
+            return Flux.concat(
+                    Flux.just(new PipelineEvent.StepFinished(step.index(), false, error)),
+                    Flux.just(new PipelineEvent.StepStarted(step.index())),
+                    loop(retryState, conversationId, user, startNanos, LoopScope.STEP),
+                    Flux.defer(() -> afterStep(run, step, retryState, seed, history,
+                            conversationId, user, startNanos)));
+        }
+        if (run.replanned) {
+            return Flux.just(finishWorkflow(run, seed, conversationId, startNanos, failure));
+        }
+        run.replanned = true;
+        log.warn("[{}] 同步重试后仍失败，重规划一次：{}", LOG_TAG, failure);
+        return Flux.concat(
+                Flux.just(new PipelineEvent.StepFinished(step.index(), false, error)),
+                Mono.fromCallable(() -> draftPlan(seed, history, run.plan.goal(), failure))
+                        .subscribeOn(Schedulers.boundedElastic())
+                        .flatMapMany(drafted -> {
+                            if (drafted.plan() == null) {
+                                return Flux.just(finishWorkflow(run, seed, conversationId, startNanos,
+                                        failure + "；重规划失败：" + drafted.error()));
+                            }
+                            run.restart(drafted.plan());
+                            return Flux.concat(
+                                    Flux.just(new PipelineEvent.PlanCreated(drafted.plan())),
+                                    nextStep(run, seed, history, conversationId, user, startNanos));
+                        }));
     }
 
-    /** 该步的指令：总目标 + 第 k/N 步 + 完成判据 + 已完成的部分。 */
-    private String stepInstruction(WorkflowRun run, PlanStep step) {
+    /**
+     * 这一步发给模型的消息：system + <b>最近 2 轮历史</b> + 本步指令。
+     *
+     * <h2>★ 为什么是"最近 2 轮"，而不是全量历史</h2>
+     *
+     * <p>一次工作流里，模型会看到 <b>1 次规划提示词 + 每一步至少 1 次</b>提示词
+     * （每步都是一次独立的工具循环，工具返回后还要再问一次）。既然它<b>能看到多次</b>，
+     * 就没必要每次都塞全量历史 —— 8 步 × 50k token 的历史会让成本线性膨胀。
+     * 最近 2 轮足以支撑"刚才那个呢"这类指代；更早的信息走"已完成摘要"。
+     *
+     * <p>反之，如果将来改成"一次提示词跑完全部步骤"，那就必须带全量已裁剪历史 ——
+     * 那种情况下模型只有一次机会看到它。
+     */
+    private LoopState newStepState(WorkflowRun run, PlanStep step, LoopState seed, List<Message> history) {
+        int remaining = Math.max(1, seed.maxSteps - run.used);
+        List<Message> messages = new ArrayList<>(2 + history.size());
+        messages.add(new SystemMessage(systemMessageOf(seed)));
+        messages.addAll(recentTurns(history));
+        messages.add(new UserMessage(stepInstruction(run, step, seed)));
+        return new LoopState(messages, null, remaining, run.used);
+    }
+
+    /** 取最近 2 轮对话（一问一答算一轮，所以是末尾 4 条）。 */
+    private static List<Message> recentTurns(List<Message> history) {
+        if (history == null || history.isEmpty()) {
+            return List.of();
+        }
+        int keep = Math.min(history.size(), 4);
+        return history.subList(history.size() - keep, history.size());
+    }
+
+    /** 该步的指令：原始问题 + 总目标 + 第 k/N 步 + 完成判据 + 已完成的部分。 */
+    private String stepInstruction(WorkflowRun run, PlanStep step, LoopState seed) {
         StringBuilder sb = new StringBuilder();
+        String question = questionOf(seed);
+        if (!question.isEmpty()) {
+            // ★ 必须带原始问题：只给规划器改写后的 goal，会丢掉用户原话里的细节与限定条件
+            sb.append("用户的问题：\n").append(question).append("\n\n");
+        }
         sb.append("总目标：").append(run.plan.goal()).append('\n');
         sb.append("当前第 ").append(step.index()).append('/').append(run.plan.size())
                 .append(" 步：").append(step.goal()).append('\n');
@@ -1099,9 +1124,13 @@ public class AgentPipeline {
         return sb.toString();
     }
 
-    /** 汇总：把每步结论拼成最终回答；失败时<b>写清在哪一步停下</b>。 */
-    private void finishWorkflow(WorkflowRun run, LoopState seed, String conversationId,
-                                long startNanos, String failure, FluxSink<PipelineEvent> sink) {
+    /**
+     * 汇总并收尾：<b>与 chat 走同一条写回路径</b>（{@link #writeBack}），
+     * 失败时把"停在哪一步"写进回答。
+     */
+    private PipelineEvent.ModelOutput.Final finishWorkflow(WorkflowRun run, LoopState seed,
+                                                           String conversationId, long startNanos,
+                                                           String failure) {
         StringBuilder reply = new StringBuilder(run.narrative);
         if (failure != null) {
             reply.append("### 未完成\n\n").append(failure).append("\n\n已完成的步骤：\n");
@@ -1118,52 +1147,71 @@ public class AgentPipeline {
         if (text.isEmpty()) {
             text = "（工作流没有产出任何内容）";
         }
-        try {
-            writeBackTurn(conversationId, seed.userMessage, text);
-        } catch (RuntimeException e) {
-            // 写回失败不影响本次回答（失败分级本就在 LayeredConversationMemory 里）
-            log.warn("[{}] 工作流写回记忆失败（不影响回答）：{}", LOG_TAG, e.toString());
-        }
-        sink.next(buildFinal(new StringBuilder(text), new StringBuilder(),
-                failure == null ? "stop" : "stepFailed", null, startNanos));
-    }
-
-    /** 工作流的写回：与普通回合同一口径 —— 只写"用户问 + 最终答"，不写工具活动。 */
-    private void writeBackTurn(String conversationId, Message userMessage, String replyText) {
-        List<Message> turn = new ArrayList<>(2);
-        if (userMessage != null) {
-            turn.add(userMessage);
-        }
-        turn.add(new AssistantMessage(replyText));
-        memory.append(conversationId, turn);
+        writeBack(conversationId, seed.userMessage, text, markedReasoning(run.aggregate),
+                run.completed.size());
+        return buildFinal(new StringBuilder(text), run.aggregate.reasoning,
+                failure == null ? "stop" : "stepFailed", null, startNanos);
     }
 
     /**
-     * 规划调用（<b>同步</b>，由调用方保证在 boundedElastic 上）。
+     * 规划调用（<b>同步</b>，由调用方保证在 boundedElastic 上；<b>不带工具</b>）。
      *
-     * <p>★ 刻意<b>不带工具</b>：规划是"想清楚要做什么"，不该在执行前就调工具。
-     * 因此直接 {@code new Prompt(messages)}，让模型使用配置里的那份 options
-     * （省掉一次"克隆 options 再挂工具"的复杂度，也避免规划阶段产生副作用）。
+     * <p>★ 带<b>全量已裁剪历史</b>：规划只发生一次或两次（重规划），让它看到上下文才可能拆对。
+     * 每一步则只带最近 2 轮（见 {@link #newStepState}）—— 那是"能看到多次提示词"这个事实换来的省法。
+     *
+     * <p>★ 刻意<b>不带工具</b>：规划是"想清楚要做什么"，不该在执行前就调工具。于是直接
+     * {@code new Prompt(messages)}，模型用配置里那份 options，规划阶段没有任何副作用。
      */
-    private String draftPlanText(Message userMessage, String previousGoal, String failure) {
-        StringBuilder ask = new StringBuilder("用户的问题：\n")
-                .append(userMessage == null || userMessage.getText() == null
-                        ? "" : userMessage.getText());
+    private String draftPlanText(LoopState seed, List<Message> history,
+                                 String previousGoal, String failure) {
+        StringBuilder ask = new StringBuilder("用户的问题：\n").append(questionOf(seed));
         if (failure != null) {
             ask.append("\n\n上一次计划的执行情况：\n总目标：")
                     .append(previousGoal == null ? "" : previousGoal)
                     .append("\n失败原因：").append(failure)
                     .append("\n请重新规划：已完成的部分不要再安排，只安排剩下的步骤。");
         }
-        ChatResponse response = chatModel.call(new Prompt(List.of(
-                new SystemMessage(PLANNING_SYSTEM),
-                new UserMessage(ask.toString()))));
+        List<Message> messages = new ArrayList<>();
+        messages.add(new SystemMessage(WorkflowPlanPrompt.text()));
+        if (history != null) {
+            messages.addAll(history);
+        }
+        messages.add(new UserMessage(ask.toString()));
+        ChatResponse response = chatModel.call(new Prompt(messages));
         String text = response == null || response.getResult() == null
                 ? null : response.getResult().getOutput().getText();
         if (text == null || text.isBlank()) {
             throw new InvalidPlanException("规划调用返回了空内容");
         }
         return text;
+    }
+
+    /** 规划：把 {@link InvalidPlanException} 收成"失败原因"，让上游只剩一条降级分支。 */
+    private Drafted draftPlan(LoopState seed, List<Message> history,
+                              String previousGoal, String failure) {
+        try {
+            return Drafted.ok(WorkflowPlanParser.parse(
+                    draftPlanText(seed, history, previousGoal, failure)));
+        } catch (InvalidPlanException e) {
+            return Drafted.failed(e.getMessage());
+        }
+    }
+
+    private static String questionOf(LoopState seed) {
+        return seed.userMessage == null || seed.userMessage.getText() == null
+                ? "" : seed.userMessage.getText().trim();
+    }
+
+    /** 规划结果：{@code plan} 与 {@code error} 恰有一个非 null。 */
+    private record Drafted(com.hagent.workflow.WorkflowPlan plan, String error) {
+
+        private static Drafted ok(com.hagent.workflow.WorkflowPlan plan) {
+            return new Drafted(plan, null);
+        }
+
+        private static Drafted failed(String error) {
+            return new Drafted(null, error);
+        }
     }
 
     /** 从拼装好的消息里取回系统提示词 —— 工作流的每一步都要带着它，否则模型会忘掉人设与规则。 */
@@ -1181,31 +1229,59 @@ public class AgentPipeline {
         return oneLine.length() <= 120 ? oneLine : oneLine.substring(0, 120) + "…";
     }
 
-    /** 一次工作流运行的可变状态：记的是"计划进度"，不是"消息累积"（后者在 LoopState 里）。 */
+    /**
+     * 一次工作流运行的可变状态：计划进度 + 思考聚合。
+     *
+     * <p>★ 思考为什么聚合进一个 {@link LoopState}，而不是自己拼一份格式：
+     * 落库的 {@code @@step:N tool:...} 标记逻辑在 {@link #markedReasoning} 里，
+     * 复用它、并把"步号"设成<b>计划步号</b>，两种模式的历史回放格式就完全一致 ——
+     * 否则会长出第二套标记格式，而这正是阶段 12 花整个阶段在清的那类问题。
+     */
     private static final class WorkflowRun {
         private WorkflowPlan plan;
         private final List<CompletedStep> completed = new ArrayList<>();
         private final StringBuilder narrative = new StringBuilder();
+        /** 只用它的 reasoning / reasoningOffsets / stepTools / steps 四个字段。 */
+        private final LoopState aggregate;
         private int index = 1;
         private int used;
-        /** 客户端是否已断开（断线后不再继续跑，见 runWorkflow 的注释）。 */
-        private boolean cancelled;
+        private int attempts;
+        private boolean replanned;
 
-        private WorkflowRun(WorkflowPlan plan) {
+        private WorkflowRun(WorkflowPlan plan, LoopState seed) {
             this.plan = plan;
+            this.aggregate = new LoopState(new ArrayList<>(), seed.userMessage, seed.maxSteps);
         }
 
-        /** 重规划后从新计划的第 1 步开始（已完成的步骤作为上下文写进每一步的指令）。 */
+        private boolean hasNext() {
+            return index <= plan.size();
+        }
+
+        private PlanStep current() {
+            return plan.step(index);
+        }
+
         private void restart(WorkflowPlan next) {
             this.plan = next;
             this.index = 1;
+            this.attempts = 0;
+        }
+
+        private void recordSuccess(PlanStep step, String text, LoopState stepState) {
+            completed.add(new CompletedStep(step.index(), step.goal(), text));
+            narrative.append("### 第 ").append(step.index()).append(" 步：")
+                    .append(step.goal()).append("\n\n").append(text).append("\n\n");
+            aggregate.reasoningOffsets.add(aggregate.reasoning.length());
+            aggregate.reasoning.append(stepState.reasoning);
+            aggregate.stepTools.put(step.index(), stepState.stepTools.values().stream()
+                    .flatMap(List::stream).toList());
+            aggregate.steps = Math.max(aggregate.steps, step.index());
+            index++;
+            attempts = 0;
         }
     }
 
     private record CompletedStep(int index, String goal, String summary) {
-    }
-
-    private record StepResult(boolean ok, String summary) {
     }
 
     // ========================================================================
