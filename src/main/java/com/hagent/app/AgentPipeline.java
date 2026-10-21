@@ -973,6 +973,10 @@ public class AgentPipeline {
                                             String conversationId,
                                             UserContext user,
                                             long startNanos) {
+        // ★ 构建标记：日志里必须能一眼看出"这次是哪套代码在跑"。
+        //   真实事故：一次测试的日志里同时出现新旧两种行为（2 步/有 usage vs 6 步/usage=null），
+        //   排查时无法判断应用是否重启过。这行是为此加的（验证期保留，可以随时删）。
+        log.info("[{}] ★ 工作流外壳=reactive-unified / 规划提示词=P1（含最少步数与汇总约束）", LOG_TAG);
         return Mono.fromCallable(() -> draftPlan(seed, history, null, null))
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMapMany(drafted -> {

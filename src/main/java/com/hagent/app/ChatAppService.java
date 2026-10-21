@@ -221,7 +221,22 @@ public class ChatAppService {
         // 会话先落库（侧栏立刻能看到），再开始跑模型。理由见 touchSession。
         touchSession(conversationId, mode, message);
 
-        agentPipeline.run(message, conversationId, mode, userContext)
+        // ★ 阶段 13 修（真实事故）：客户端断开必须【停止流水线】。
+        //   此前 subscribe() 返回的 Disposable 被丢弃，于是 emitter 已完成之后
+        //   流水线仍在跑、仍在发事件 —— 实测表现为成百上千条
+        //   "ResponseBodyEmitter has already completed" 的 WARN，且继续白烧模型调用。
+        //   （阶段 13 的第一版有手写 sink.isCancelled() 检查，改成 reactive 后
+        //     假设"Reactor 会传播取消"—— 但订阅方从不取消，那条防线等于消失了。）
+        java.util.concurrent.atomic.AtomicReference<reactor.core.Disposable> subscription =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        emitter.onCompletion(() -> disposeQuietly(subscription.get()));
+        emitter.onTimeout(() -> {
+            disposeQuietly(subscription.get());
+            completeQuietly(emitter);
+        });
+        emitter.onError(error -> disposeQuietly(subscription.get()));
+
+        subscription.set(agentPipeline.run(message, conversationId, mode, userContext)
                 .subscribe(event -> sendEvent(emitter, event, seq, retrySent),
                         error -> handleStreamError(emitter, error),
                         () -> {
@@ -231,8 +246,15 @@ public class ChatAppService {
                                             .name(StreamEventType.DONE)
                                             .data("[DONE]"));
                             completeQuietly(emitter);
-                        });
+                        }));
         // subscribe() 非阻塞：它会立刻返回，Flux 在 Reactor 线程上异步推进。
+    }
+
+    /** 取消订阅（幂等：已结束时是空操作）。 */
+    private void disposeQuietly(reactor.core.Disposable disposable) {
+        if (disposable != null && !disposable.isDisposed()) {
+            disposable.dispose();
+        }
     }
 
     /** 把一个管道事件翻译成 SSE 帧并发送。 */
@@ -484,8 +506,13 @@ public class ChatAppService {
         } catch (IOException e) {
             // 客户端断开（关页面/关标签）：用户正常操作，不是故障
             log.debug("[流式对话] 发送 SSE 事件时客户端已断开：{}", e.getMessage());
+        } catch (IllegalStateException e) {
+            // ★ 阶段 13 修：这条几乎总是"emitter 已完成"（客户端断开或已收尾）。
+            //   它曾被归到下面的"序列化问题"分支，且每个事件 WARN 一次 ——
+            //   实测一次断线刷出上百条 WARN，真正的序列化错误反而被淹没。
+            log.debug("[流式对话] 流已结束，丢弃后续事件：{}", e.getMessage());
         } catch (Exception e) {
-            // 非 IO 异常：多半是事件构造/序列化的问题，必须可见
+            // 其余非 IO 异常：多半是事件构造/序列化的问题，必须可见
             log.warn("[流式对话] 发送 SSE 事件失败（事件构造或序列化问题）：{}", e.toString());
         }
     }
