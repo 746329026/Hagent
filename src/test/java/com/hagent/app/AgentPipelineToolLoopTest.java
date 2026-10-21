@@ -198,7 +198,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("杭州今天天气怎么样", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -239,7 +239,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("你好", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -276,7 +276,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(maxSteps),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("一直绕圈", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -333,7 +333,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(2),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("一直绕圈", "conv-1", mode, UserContext.ANONYMOUS)
@@ -367,7 +367,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(2),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("问", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -400,7 +400,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("杭州天气", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -469,7 +469,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("年假几天", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -502,7 +502,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("你好", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -538,7 +538,7 @@ class AgentPipelineToolLoopTest {
                 audit,
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         pipeline.run("杭州天气", "conv-9", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
@@ -554,6 +554,13 @@ class AgentPipelineToolLoopTest {
         assertThat(record.toolName()).isEqualTo("getWeather");
         assertThat(record.arguments()).as("参数原文要留档（审计要能回答『它被喂了什么』）").contains("杭州");
         assertThat(record.result()).as("结果原文要留档（模型看到的同一份）").contains("26 度");
+        // ★ 阶段 14：审计必须能回答"谁、哪一轮" —— 否则它只是操作日志
+        assertThat(record.userId())
+                .as("主体。缺了它，'上周三这个人做了什么'永远答不出来")
+                .isEqualTo(UserContext.ANONYMOUS.userId());
+        assertThat(record.turnId())
+                .as("轮次标识要与 chat_turn.turn_id 同值，否则无法与回合账对账")
+                .isNotBlank();
     }
 
     @Test
@@ -577,7 +584,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         List<PipelineEvent> events = pipeline
                 .run("天气", "conv-8", MemoryMode.CHAT, UserContext.ANONYMOUS)
@@ -614,7 +621,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
 
         pipeline.run("天气", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
@@ -652,7 +659,7 @@ class AgentPipelineToolLoopTest {
                 TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(), TestTurn.noop());
     }
 
     @Test
@@ -729,7 +736,7 @@ class AgentPipelineToolLoopTest {
         new AgentPipeline(chatModel, memory, TestToolCallbackProvider.none(), TestAudit.disabled(),
                 new TraceProperties(), new PromptProperties(), memoryProperties(), agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty())
+                TestLongTermMemory.empty(), TestTurn.noop())
                 .run("你好", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 
@@ -795,7 +802,7 @@ class AgentPipelineToolLoopTest {
                 memoryProperties(),
                 agentLoopProperties(5),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty())
+                TestLongTermMemory.empty(), TestTurn.noop())
                 .run("随便问问", "conv-1", MemoryMode.CHAT, UserContext.ANONYMOUS)
                 .collectList().block();
 

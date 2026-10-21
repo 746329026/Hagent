@@ -119,7 +119,8 @@ class WorkflowPipelineTest {
                 props,
                 new AgentLoopProperties(),
                 new ByteArrayResource("【约束】".getBytes(StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(),
+                TestTurn.noop());
     }
 
     private List<PipelineEvent> run(AgentPipeline pipeline) {
@@ -178,6 +179,22 @@ class WorkflowPipelineTest {
                 .contains("合并");
     }
 
+    /**
+     * 取最后一个 {@link PipelineEvent.ModelOutput.Final}。
+     *
+     * <p>★ 阶段 14 起<b>不能</b>再用 {@code events.getLast()}：流末尾多了
+     * {@link PipelineEvent.TurnFinished}（本轮统计），它排在 Final 之后。
+     * 这里按类型找，而不是按位置 —— 位置会随"又加了一个事件"而变。
+     */
+    private static PipelineEvent.ModelOutput.Final finalOf(List<PipelineEvent> events) {
+        for (int i = events.size() - 1; i >= 0; i--) {
+            if (events.get(i) instanceof PipelineEvent.ModelOutput.Final last) {
+                return last;
+            }
+        }
+        throw new AssertionError("事件流里没有 Final：" + events);
+    }
+
     private static String promptText(Prompt prompt) {
         StringBuilder sb = new StringBuilder();
         for (Message message : prompt.getInstructions()) {
@@ -217,7 +234,7 @@ class WorkflowPipelineTest {
         assertThat(finished).allMatch(PipelineEvent.StepFinished::ok)
                 .extracting(PipelineEvent.StepFinished::step).containsExactly(1, 2);
 
-        PipelineEvent.ModelOutput.Final last = (PipelineEvent.ModelOutput.Final) events.getLast();
+        PipelineEvent.ModelOutput.Final last = finalOf(events);
         assertThat(last.text())
                 .as("★ 最终回答 = 汇总步（最后一步）的产出，不是各步小作文拼接。"
                         + "实测拼接版 428+360+351≈1374 字，用户拿到的是三小节而不是一份说明")
@@ -238,7 +255,7 @@ class WorkflowPipelineTest {
 
         List<PipelineEvent> events = run(pipeline(chatModel, memory));
 
-        PipelineEvent.ModelOutput.Final last = (PipelineEvent.ModelOutput.Final) events.getLast();
+        PipelineEvent.ModelOutput.Final last = finalOf(events);
         assertThat(last.text())
                 .as("实测事故：汇总步被禁止调工具后，模型把 <||DSML||> 模板当正文输出，"
                         + "网页上出现一屏协议文本")
@@ -259,7 +276,7 @@ class WorkflowPipelineTest {
 
         assertThat(events).noneMatch(PipelineEvent.PlanCreated.class::isInstance);
         assertThat(events).anyMatch(PipelineEvent.PlanSkipped.class::isInstance);
-        PipelineEvent.ModelOutput.Final last = (PipelineEvent.ModelOutput.Final) events.getLast();
+        PipelineEvent.ModelOutput.Final last = finalOf(events);
         assertThat(last.text()).isEqualTo("普通回答");
     }
 
@@ -276,7 +293,7 @@ class WorkflowPipelineTest {
         assertThat(events.stream().filter(PipelineEvent.PlanCreated.class::isInstance).count())
                 .as("首次计划 + 重规划各发一次 PlanCreated")
                 .isEqualTo(2);
-        PipelineEvent.ModelOutput.Final last = (PipelineEvent.ModelOutput.Final) events.getLast();
+        PipelineEvent.ModelOutput.Final last = finalOf(events);
         assertThat(last.text())
                 .as("失败必须写清停在哪一步 —— 静默跳过会把『没做成』伪装成『做完了』")
                 .contains("未完成")

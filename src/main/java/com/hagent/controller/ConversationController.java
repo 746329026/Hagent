@@ -6,6 +6,7 @@ import com.hagent.dto.SessionDtos.SessionDetail;
 import com.hagent.dto.SessionDtos.SessionSummary;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,12 +17,13 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 /**
- * 会话的<b>列表 / 历史回放 / 改名</b>（阶段 10 新增）。
+ * 会话的<b>列表 / 历史回放 / 改名 / 删除</b>（阶段 10 新增，删除是阶段 14 补的）。
  *
  * <pre>
- *   GET   /chat/sessions              侧栏：我有哪些会话（最近的在前）
- *   GET   /chat/sessions/{id}/messages 点开一个会话：元信息 + 全部历史
- *   PATCH /chat/sessions/{id}         改名
+ *   GET    /chat/sessions              侧栏：我有哪些会话（最近的在前）
+ *   GET    /chat/sessions/{id}/messages 点开一个会话：元信息 + 全部历史
+ *   PATCH  /chat/sessions/{id}         改名
+ *   DELETE /chat/sessions/{id}         删除（阶段 14）
  * </pre>
  *
  * <h2>★ 为什么单独一个 Controller，不塞进 {@link ChatController}</h2>
@@ -94,5 +96,26 @@ public class ConversationController {
     public SessionSummary rename(@PathVariable String conversationId,
                                  @Valid @org.springframework.web.bind.annotation.RequestBody RenameRequest request) {
         return conversationQueryService.rename(conversationId, request.title());
+    }
+
+    /**
+     * 删除会话（阶段 14 补 —— 侧栏的删除键从这里开始有了后端）。
+     *
+     * <p>用 {@code DELETE} 而不是 {@code POST /delete}：这是对"会话"这个资源的删除，
+     * 语义上就该是 DELETE；且它<b>不可逆</b>，与改名的 {@code PATCH} 明确分开。
+     *
+     * <p><b>返回 200 + 空体</b>（不返回被删对象）：删除之后那个对象已经不存在了，
+     * 回显一份"刚删掉的东西"只会让前端多一个用不上的形状。
+     *
+     * <p>会话不存在 → 404 + {@code SESSION_NOT_FOUND}（与改名 / 历史同一口径）。
+     * <b>不幂等返回 204</b> 是刻意的：两个标签页同时删同一个会话时，
+     * 后一个应当看到"它已经不在了"，而不是收到一个假装成功的 200。
+     *
+     * <p>★ 它删什么、不删什么（审计与回合账保留），见
+     * {@code ConversationService#delete} 的注释 —— 那里是唯一出处。
+     */
+    @DeleteMapping("/{conversationId}")
+    public void delete(@PathVariable String conversationId) {
+        conversationQueryService.delete(conversationId);
     }
 }

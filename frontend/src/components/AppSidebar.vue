@@ -14,7 +14,7 @@ const props = defineProps({
   roles: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['new', 'select', 'rename', 'update:role'])
+const emit = defineEmits(['new', 'select', 'rename', 'remove', 'update:role'])
 
 const renamingId = ref(null)
 const draft = ref('')
@@ -106,6 +106,19 @@ const roleHint = (key) => props.roles.find((r) => r.key === key)?.hint ?? ''
             </span>
             <button class="icon-btn" type="button" title="重命名" @click.stop="startRename(session)">
               ✎
+            </button>
+            <!--
+              ★ 删除键（阶段 14 补）：这个能力在阶段 10 就欠着 —— 后端一直有
+              `chat_tool_invocation`/`chat_message` 的删除语，只是没有接口也没有入口。
+              `@click.stop` 必须保留：父级是"选中会话"，不 stop 会先切过去再弹确认框。
+            -->
+            <button
+              class="icon-btn icon-btn-danger"
+              type="button"
+              title="删除会话"
+              @click.stop="emit('remove', session.conversationId)"
+            >
+              🗑
             </button>
           </span>
         </template>

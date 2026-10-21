@@ -323,7 +323,47 @@ public class ChatAppService {
                     StreamEventType.RETRIEVED, retrievedData(retrieved)));
             return;
         }
+        // ★ 阶段 14：本轮统计（耗时 / 次数 / token / 结局）。
+        //   它在 Final 之后、done 之前到达，前端据此在回答下方显示一行小字。
+        //   失败与取消的轮次【不会】有这个事件（流已经断了），但那两种轮次照样落库 ——
+        //   所以"库里比前端看到的多"是预期的。
+        if (event instanceof PipelineEvent.TurnFinished finished) {
+            sendNamedEvent(emitter, frame(emitter, seq, retrySent,
+                    StreamEventType.STATS, statsData(finished.record())));
+            return;
+        }
         // Final 不在这里发：它由流的 onComplete 统一发 done（见 stream 方法）。
+    }
+
+    /**
+     * 本轮统计 → SSE 数据。
+     *
+     * <h3>★ 为什么用 {@link com.hagent.dto.SessionDtos.TurnStatsView} 而不是临时 Map</h3>
+     *
+     * <p>这一行字有<b>两个来源</b>：实时（本方法）与历史回放（{@code ConversationService#detail}）。
+     * 两边用同一个 record，前端就只有一份渲染逻辑（{@code MessageBubble}）。
+     * 用 Map 就得在两边各拼一次键名 —— 那正是"同一语义两处定义"的经典形态。
+     *
+     * <h3>★ 身份绝不进帧</h3>
+     *
+     * <p>{@code user_id} / {@code role} 只用于落库：浏览器就是这个人，
+     * 回显没有信息量，只是把身份写进前端状态与日志。
+     *
+     * <p>⚠️ {@code firstTokenMs} 与 {@code totalTokens} 可能是 <b>null</b>
+     * （前者：一直没等到首字；后者：没拿到 usage）。<b>不放 0</b> ——
+     * {@code null} 表示"没有数据"，而 0 会被显示成"0.0s / 0 tokens"，
+     * 那是另一种"系统在诚实地撒谎"。
+     */
+    private com.hagent.dto.SessionDtos.TurnStatsView statsData(
+            com.hagent.observability.TurnRecord record) {
+        return new com.hagent.dto.SessionDtos.TurnStatsView(
+                record.status().name(),
+                record.elapsedMs(),
+                record.firstTokenMs(),
+                record.modelCalls(),
+                record.toolCalls(),
+                record.totalTokens(),
+                record.usageMissingCalls());
     }
 
     /**

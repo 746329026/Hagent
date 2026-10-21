@@ -52,6 +52,10 @@
 CREATE TABLE chat_tool_invocation (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     conversation_id VARCHAR(64)     NOT NULL COMMENT '会话 ID（与 chat_message 同源，可用于关联对话）',
+    -- ★ 阶段 14 新增两列：审计必须说得清"谁、哪一轮"
+    --   已有库请执行 src/main/resources/db/migrations/001-chat_tool_invocation-add-who.sql
+    turn_id         CHAR(36)        NULL     COMMENT '本轮唯一标识（= chat_turn.turn_id；阶段 14 之前的行是 NULL）',
+    user_id         VARCHAR(64)     NOT NULL DEFAULT 'unknown' COMMENT '调用方标识；阶段 14 之前的行是 unknown（不伪造）',
     step_index      INT             NOT NULL COMMENT '本轮第几步（从 1 开始；一次对话可能多步循环）',
     tool_name       VARCHAR(64)     NOT NULL COMMENT '工具名（与 @Tool 的 name 一致）',
     arguments       TEXT            NULL     COMMENT '模型给出的参数原文（JSON 字符串）',
@@ -60,7 +64,9 @@ CREATE TABLE chat_tool_invocation (
     PRIMARY KEY (id),
     -- 审计最常见的两个查询：① 某会话的工具活动（按步序）② 某工具最近被怎么用
     KEY idx_tool_conv_step (conversation_id, step_index),
-    KEY idx_tool_name_time (tool_name, created_at)
+    KEY idx_tool_name_time (tool_name, created_at),
+    -- ★ 阶段 14：第三个查询 —— 这一轮调了哪些工具（与 chat_turn.tool_calls 对账）
+    KEY idx_tool_turn (turn_id)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COMMENT='工具调用审计（阶段 9）；与用户可见的对话记录 chat_message 分开存';

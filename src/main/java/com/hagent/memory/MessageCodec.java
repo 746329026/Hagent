@@ -52,6 +52,19 @@ public final class MessageCodec {
      */
     public static final String REASONING_PROPERTY = "hagent_reasoning";
 
+    /**
+     * 本轮 {@code turn_id} 在 properties 里的键（阶段 14 后补）。
+     *
+     * <p><b>为什么它也走 properties</b>：它是"这条回答是哪一次服务产生的"这个元数据，
+     * 与思考同一个性质 —— <b>前端要用，模型绝不该看到</b>。
+     * 走 properties 的好处是<b>接口一行都不用改</b>：{@code MessageStore.append} 仍然
+     * 只收 {@code List<Message>}，而两个实现都通过 {@link #toStored} 统一取值。
+     *
+     * <p>它的唯一用途：历史回放时把这条 assistant 消息关联到 {@code chat_turn} 的那一行，
+     * 从而显示"这一轮花了多久 / 多少 token"。没有它，"刷新页面后那一行数字消失"。
+     */
+    public static final String TURN_ID_PROPERTY = "hagent_turnId";
+
     private MessageCodec() {
     }
 
@@ -64,8 +77,10 @@ public final class MessageCodec {
      * @param text      文本内容
      * @param reasoning 思考内容（阶段 10）。<b>只有 assistant 消息可能有</b>，
      *                  其余为 null；用户消息没有思考这种东西。
+     * @param turnId    产生这条回答的轮次标识（阶段 14 后补）。<b>只有 assistant 消息可能有</b>；
+     *                  阶段 14 之前写入的历史为 null（那时还没有"回合账"）
      */
-    public record StoredMessage(String type, String text, String reasoning) {
+    public record StoredMessage(String type, String text, String reasoning, String turnId) {
 
         /**
          * 两参便捷构造 —— 给"没有思考内容"的场景用。
@@ -74,14 +89,19 @@ public final class MessageCodec {
          * 本来就不带思考（缓存的是<b>给模型看的那一份</b>，模型不看思考）。
          */
         public StoredMessage(String type, String text) {
-            this(type, text, null);
+            this(type, text, null, null);
+        }
+
+        /** 三参构造 —— 阶段 14 之前写入的 file 格式（没有 turnId）。 */
+        public StoredMessage(String type, String text, String reasoning) {
+            this(type, text, reasoning, null);
         }
     }
 
     /** Message → 可持久化结构。 */
     public static StoredMessage toStored(Message message) {
         return new StoredMessage(message.getMessageType().name(),
-                message.getText(), reasoningOf(message));
+                message.getText(), reasoningOf(message), turnIdOf(message));
     }
 
     /**
@@ -104,6 +124,25 @@ public final class MessageCodec {
             return null;
         }
         Object value = metadata.get(REASONING_PROPERTY);
+        return value instanceof String text && !text.isBlank() ? text : null;
+    }
+
+    /**
+     * 从消息的 properties 里取轮次标识。取不到返回 null（"没有回合账"是合法状态：
+     * 阶段 14 之前写入的历史都没有）。
+     *
+     * <p>★ 与 {@link #reasoningOf} 同一模式：<b>"它存在哪"只有一个读取出口</b>。
+     * 读的一侧自己去拼键名，拼错的表现是"历史里那一行统计永远是空的"，而<b>不报错</b>。
+     */
+    public static String turnIdOf(Message message) {
+        if (!(message instanceof AssistantMessage assistant)) {
+            return null;
+        }
+        Map<String, Object> metadata = assistant.getMetadata();
+        if (metadata == null) {
+            return null;
+        }
+        Object value = metadata.get(TURN_ID_PROPERTY);
         return value instanceof String text && !text.isBlank() ? text : null;
     }
 
@@ -134,18 +173,38 @@ public final class MessageCodec {
         String text = stored.text() == null ? "" : stored.text();
         return switch (type) {
             case USER -> new UserMessage(text);
-            // ★ 思考内容挂回 properties（不是 reasoningContent），理由见类注释
-            case ASSISTANT -> stored.reasoning() == null || stored.reasoning().isBlank()
-                    ? new AssistantMessage(text)
-                    : AssistantMessage.builder()
-                            .content(text)
-                            .properties(Map.of(REASONING_PROPERTY, stored.reasoning()))
-                            .build();
+            // ★ 思考内容与 turn_id 挂回 properties（不是 reasoningContent），理由见类注释
+            case ASSISTANT -> assistantOf(text, stored);
             case SYSTEM -> new SystemMessage(text);
             // TOOL 类型当前不持久化（工具活动进审计表 chat_tool_invocation）
             case TOOL -> throw new IllegalStateException(
                     "TOOL 类型消息尚未支持持久化（工具活动记在 chat_tool_invocation 表）");
         };
+    }
+
+    /**
+     * 还原一条 assistant 消息：把落库的思考与轮次标识挂回 properties。
+     *
+     * <p>抽出来只为一件事：<b>两个键都要挂，且缺哪个都不能建空 map</b>
+     * （{@code Map.of()} 空表传给 builder 虽然目前不炸，但没有任何意义）。
+     */
+    private static AssistantMessage assistantOf(String text, StoredMessage stored) {
+        boolean hasReasoning = stored.reasoning() != null && !stored.reasoning().isBlank();
+        boolean hasTurnId = stored.turnId() != null && !stored.turnId().isBlank();
+        if (!hasReasoning && !hasTurnId) {
+            return new AssistantMessage(text);
+        }
+        Map<String, Object> properties = new LinkedHashMap<>();
+        if (hasReasoning) {
+            properties.put(REASONING_PROPERTY, stored.reasoning());
+        }
+        if (hasTurnId) {
+            properties.put(TURN_ID_PROPERTY, stored.turnId());
+        }
+        return AssistantMessage.builder()
+                .content(text)
+                .properties(properties)
+                .build();
     }
 
     /** 批量转换（保序，跳过无法识别的类型并记录）。 */

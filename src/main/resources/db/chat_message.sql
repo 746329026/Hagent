@@ -75,10 +75,17 @@ CREATE TABLE chat_message (
     role            VARCHAR(16)     NOT NULL COMMENT 'SYSTEM / USER / ASSISTANT / TOOL（TOOL 为阶段 8 预留）',
     content         MEDIUMTEXT      NOT NULL COMMENT '消息正文（utf8mb4，可存 emoji 与生僻字）',
     reasoning       MEDIUMTEXT      NULL     COMMENT '阶段 10：该回合模型的完整思考（多步用 @@step:N 标记分隔，见下方说明）',
+    -- ★ 阶段 14 后补：这条回答是哪一轮服务产生的（关联 chat_turn）
+    --   已有库请执行 src/main/resources/db/migrations/002-chat_message-add-turn-id.sql
+    --   为什么它在本表而不是在 chat_turn：方向是 message → turn；反过来会变成
+    --   "一轮挂多条消息"的数组列（不可 join、不可索引）。
+    turn_id         CHAR(36)        NULL     COMMENT '产生该回答的轮次（= chat_turn.turn_id；阶段 14 之前的行是 NULL）',
     extra           JSON            NULL COMMENT '阶段 8 预留：tool_name / tool_call_id 等',
     created_at      DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
-    KEY idx_conv_id (conversation_id)
+    KEY idx_conv_id (conversation_id),
+    -- ★ 阶段 14：历史回放按 turn_id 批量取回合账（IN 查询）
+    KEY idx_msg_turn (turn_id)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COMMENT='会话记忆的记录层（权威·完整·永久）；模型的上下文缓存另在 Redis';

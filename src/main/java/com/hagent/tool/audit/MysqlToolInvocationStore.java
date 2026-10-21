@@ -30,8 +30,11 @@ import java.util.List;
 @Slf4j
 public class MysqlToolInvocationStore implements ToolInvocationStore {
 
-    /** 读审计要走的索引名（启动自检会核对它存在）。 */
+    /** 读审计要走的索引名（启动自检会核对它们存在）。 */
     private static final String CONVERSATION_INDEX = "idx_tool_conv_step";
+
+    /** 阶段 14 新增：按“哪一轮”查工具活动（对账 / 复盘一次运行）。 */
+    private static final String TURN_INDEX = "idx_tool_turn";
 
     private static final String DDL_HINT = """
             表 chat_tool_invocation 不存在，工具调用审计无法工作。
@@ -43,6 +46,18 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
             """;
 
     private static final String TABLE = "chat_tool_invocation";
+
+    /** 阶段 14 新增的两列（启动自检会核对它们存在）。 */
+    private static final String[] REQUIRED_COLUMNS = {"turn_id", "user_id"};
+
+    private static final String MIGRATION_HINT = """
+            表 chat_tool_invocation 缺少阶段 14 新增的列（turn_id / user_id），工具审计无法记录"谁、哪一轮"。
+            本项目的表结构变更由【显式迁移脚本】完成，应用不自动改表 ——
+              原因是 ALTER 失败一半（部分列已加）会让后续启动表现成"看起来正常、实际缺列"。
+            请在项目根目录执行：
+              docker cp src/main/resources/db/migrations/001-chat_tool_invocation-add-who.sql hagent-mysql:/tmp/001.sql
+              docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default-character-set=utf8mb4 -uroot hagent < /tmp/001.sql'
+            """;
 
     private final JdbcTemplate jdbc;
     private final String table;
@@ -69,9 +84,11 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
         }
         try {
             jdbc.update("INSERT INTO " + table
-                            + " (conversation_id, step_index, tool_name, arguments, result)"
-                            + " VALUES (?, ?, ?, ?, ?)",
+                            + " (conversation_id, turn_id, user_id, step_index, tool_name, arguments, result)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?)",
                     invocation.conversationId(),
+                    invocation.turnId(),
+                    invocation.userId(),
                     invocation.stepIndex(),
                     invocation.toolName(),
                     invocation.arguments(),
@@ -88,10 +105,12 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
 
     @Override
     public List<ToolInvocation> latest(String conversationId, int limit) {
-        return jdbc.query("SELECT conversation_id, step_index, tool_name, arguments, result"
+        return jdbc.query("SELECT conversation_id, turn_id, user_id, step_index, tool_name, arguments, result"
                         + " FROM " + table + " WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
                 (rs, rowNum) -> new ToolInvocation(
                         rs.getString("conversation_id"),
+                        rs.getString("turn_id"),
+                        rs.getString("user_id"),
                         rs.getInt("step_index"),
                         rs.getString("tool_name"),
                         rs.getString("arguments"),
@@ -133,8 +152,26 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
                                 + "请按 src/main/resources/db/chat_tool_invocation.sql 重建该表。",
                         table, CONVERSATION_INDEX));
             }
-            log.info("[工具-审计] 启动自检通过：表={} 索引={}（工具调用将逐条落库，可追溯）",
-                    table, CONVERSATION_INDEX);
+            Integer turnIndexCount = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM information_schema.STATISTICS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?",
+                    Integer.class, table, TURN_INDEX);
+            if (turnIndexCount == null || turnIndexCount == 0) {
+                throw new IllegalStateException(MIGRATION_HINT + "缺索引：" + TURN_INDEX);
+            }
+            // ★ 阶段 14：两列也必须校验。只校验表与索引的话，旧库会"自检通过"
+            //   却在第一次写审计时抛 Unknown column —— 而那时这轮对话已经花掉 token。
+            for (String column : REQUIRED_COLUMNS) {
+                Integer columnCount = jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                        Integer.class, table, column);
+                if (columnCount == null || columnCount == 0) {
+                    throw new IllegalStateException(MIGRATION_HINT + "缺列：" + column);
+                }
+            }
+            log.info("[工具-审计] 启动自检通过：表={} 索引={} 列={}（工具调用将逐条落库，可追溯到人）",
+                    table, CONVERSATION_INDEX, String.join("/", REQUIRED_COLUMNS));
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {

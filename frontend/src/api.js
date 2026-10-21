@@ -93,6 +93,22 @@ export function renameSession(conversationId, title, roleKey) {
 }
 
 /**
+ * 删除整个会话（阶段 14）。
+ *
+ * <p>后端删三样：消息（权威）+ Redis 上下文 + 会话目录；<b>审计与回合账按设计保留</b>
+ * （它们是行为痕迹，不是对话内容 —— 理由见后端 {@code ConversationService#delete}）。
+ *
+ * <p>会话不存在时后端返回 404，这里会抛出去 —— 两个标签页同时删时，
+ * 后一个应当看到"它已经不在了"，而不是收到一个假装成功的 200。
+ */
+export function deleteSession(conversationId, roleKey) {
+  return request(`/chat/sessions/${encodeURIComponent(conversationId)}`, {
+    method: 'DELETE',
+    roleKey,
+  })
+}
+
+/**
  * 解析一个 SSE 帧。
  *
  * <p>帧长这样（字段顺序不固定，空行分隔）：

@@ -179,6 +179,38 @@ public sealed interface PipelineEvent {
     }
 
     // ========================================================================
+    // 一·六、一轮的账（阶段 14）
+    // ========================================================================
+    /**
+     * <b>本轮收尾时的账</b>（阶段 14）—— 耗时 / 次数 / token / 结局，全链路只此一份。
+     *
+     * <h3>★ 为什么它是<b>顶层</b>事件，而不是 {@link ModelOutput.Final} 上的几个字段</h3>
+     *
+     * <p>{@code ModelOutput} 的语义是<b>模型的产出</b>（思考、正文、工具请求、结束原因）。
+     * 而 {@code elapsedMs} / {@code modelCalls} / {@code toolCalls} <b>不是模型说的话</b> ——
+     * 它们是我们自己数出来的，和 {@link Retrieved} / {@link StepStarted} 同类：
+     * <b>我们的产物</b>。
+     *
+     * <p>把它们塞进 {@code Final} 会让 {@code ModelOutput} 这个分层当场失效
+     * （"模型输出了本轮耗时"这种说法是错的），而这正是本文件开头那张分层图要防的事。
+     *
+     * <h3>★ 为什么前端需要它（而不是去查库）</h3>
+     *
+     * <p>用户想看到的"这次花了 7.2 秒"必须在<b>回答旁边</b>。
+     * 让前端为了一个数字再发一次 HTTP 请求，等于把"观测"变成"额外的往返"。
+     *
+     * <h3>★ 它只出现在<b>正常收尾</b>的路径上</h3>
+     *
+     * <p>失败（{@code onError}）与取消（客户端断开）时流已经断了，发不出这个事件 ——
+     * 但那两种轮次<b>照样会落库</b>（{@code AgentPipeline#run} 的 {@code doFinally}）。
+     * 所以"库里比前端看到的多"是<b>预期的</b>：账是给事后查的，不是给前端补发的。
+     *
+     * @param record 本轮的完整账；前端只消费其中五项（见 {@code ChatAppService#statsData}）
+     */
+    record TurnFinished(com.hagent.observability.TurnRecord record) implements PipelineEvent {
+    }
+
+    // ========================================================================
     // 二、模型的产物
     // ========================================================================
     /**
@@ -229,9 +261,13 @@ public sealed interface PipelineEvent {
          * @param reasoning    拼接后的完整思考。<b>可能为空</b>（模型未返回思考内容）。
          *                     它让 `/chat` 也能回看思考 —— 否则刷新页面后思考永久丢失
          * @param finishReason 结束原因（如 {@code STOP}）；取不到时为 null
-         * @param usage        token 用量。<b>流式路径可能取不到</b>（实测未观察到），
-         *                     取不到时为 {@code EmptyUsage} 而非 null —— 由框架保证。
-         *                     ★ 这条限制直接影响阶段 9 的可观测性，见 HANDOFF
+         * @param usage        <b>整轮</b>的 token 用量（阶段 14 起）。
+         *                     ★ 语义变更：此前它是<b>最后一片响应</b>的量 —— 实测一次 3 步工作流
+         *                     调了 7 次模型、只记了最后一次的 3419。现在由 {@code TurnStats}
+         *                     逐次累加（流式路径上 usage 只出现在每次调用的收尾片）。
+         *                     一次都没拿到时是 {@code EmptyUsage} 而<b>不是 null</b> ——
+         *                     与框架的约定一致，日志里一眼能看出"没数据"。
+         *                     缺口计数在 {@code TurnRecord.usageMissingCalls}（不在本字段里）。
          */
         record Final(String text,
                      String reasoning,

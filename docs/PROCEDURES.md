@@ -6,25 +6,25 @@
 
 一个**高扩展性的企业办公 Agent**，以 Spring Boot + Spring AI 为底座，按"能力可替换、配置可切换"的方式组织代码。
 
-**已经能做的事**（阶段 0–11）：
+**已经能做的事**（阶段 0–14）：
 
-- 静/流式对话（SSE，带思考过程）；前端可用：会话列表 / 改名 / 历史回放
+- 静/流式对话（SSE，带思考过程）；前端可用：会话列表 / 改名 / **删除** / 历史回放
 - RAG 知识库：**由模型自主决定何时检索**（工具化，不是每轮必跑）+ 密级过滤在 SQL 层完成
 - 会话记忆：MySQL 权威层 + Redis 缓存层（派生关系，不是"两种存法"）
 - 长期记忆：`{dir}/{userId}/MEMORY.md` + 索引常驻注入，模型通过三个工具自主读写
 - 思考过程按步落库（`@@step:` 标记），刷新页面仍能回看
-- 工具循环 + 工具调用审计表；启动探针自动核对装配
+- 工作流模式：先拆解 → 逐步执行 → 两次重试后放弃（计划可见，见 §13）
+- **回合账（阶段 14）**：每轮一行（耗时 / 首字 / 模型与工具次数 / **整轮 token** / 结局），
+  工具审计可追溯到"谁、哪一轮"；前端回答下方一行小字
 - 配置类归位由 `PackagePlacementTest` 强制（5 条规则、零例外）
 
-**还没做**（能力上顺延为阶段 13–17；★ **阶段 12 是"结构治理"，不是新能力**）：
+**还没做**（能力上顺延为阶段 15–17；★ **阶段 12 是"结构治理"，不是新能力**）：
 
-- 工作流模式：计划 → 逐步执行 → 汇总（现在 `mode=workflow` 只差预算）—— **阶段 13**
-- 可观测性与审计：耗时 / 成功率 / 工具计数 / token 成本（`Final.usage` 已实测可用）—— **阶段 14**
 - 新工具追加（工具分组 / 最小权限）—— **阶段 15**
 - MCP 引入（外部工具生态）—— **阶段 16**（仅占位，三问未答）
 - 工程收尾：README / 演示脚本 / 限流 / 部署说明 —— **阶段 17**
 - ❌ **鉴权**：现在只有明文 `X-Hagent-Token` 的身份传递，**没有真正的认证授权**
-  （"我的会话"其实是"所有会话"）—— 这是已知缺口，不是疏忽；**排期未定**
+  （"我的会话"其实是"所有会话"；`chat_turn.user_id` 也是**自报**的）—— 这是已知缺口，不是疏忽；**排期未定**
   （候选：并入阶段 15，或单独立一阶段）
 
 ## 阶段总览
@@ -4451,6 +4451,246 @@ done                                      ← 流收尾（Final 由 onComplete �
 
 ---
 
+## 阶段 14：可观测性与审计（回合账）
+
+> **状态**：本阶段完成。**它不改变任何一句回答的内容** —— 补的是"事后能回答四个问题"的能力：
+> 这一轮花了多少 token / 为什么慢 / 成功率多少 / 上周三那次为什么失败。
+>
+> ★ 顺手补了一笔**旧账**：**会话删除接口**（阶段 10 起就欠着，前端一直没有删除键）。见 14.6。
+
+### 14.1 数据流向
+
+```mermaid
+flowchart TD
+    A["/stream-sse 或 /chat"] --> B["AgentPipeline.run()"]
+    B --> C["Flux.defer：建 TurnStats（turnId = UUID）"]
+    C --> D["loop / runWorkflow：每步 noteModelCallStart()"]
+    D --> E["该次模型流完成 → noteModelUsage(最后一片的 usage)"]
+    D --> F["工具段前后计时 → noteToolPhase(ms, 个数)"]
+    D --> G["规划调用（workflow）→ noteModelCallStart + noteModelUsage"]
+    E --> H["buildFinal：noteFinal(停止原因, 回答)<br/>Final.usage = 整轮合计（不再是最后一片）"]
+    F --> H
+    G --> H
+    H --> I["concatWith → TurnFinished(record)"]
+    I --> J["ChatAppService → stats 帧<br/>只含 5 项，不含身份"]
+    H --> K["doFinally(信号)"]
+    K --> L{"信号"}
+    L -- ON_COMPLETE --> M["SUCCESS（除非流程自己放弃/回答为空）"]
+    L -- ON_ERROR --> N["FAILED"]
+    L -- CANCEL --> O["CANCELLED"]
+    M --> P["TurnStore.record（唯一落账点）"]
+    N --> P
+    O --> P
+    P --> Q[("chat_turn 一行")]
+    D -.-> R["recordAudit：带 turn_id + user_id"]
+    R -.-> S[("chat_tool_invocation")]
+    Q -.-> T["SQL：成功率 / P95 耗时 / 单轮成本 / 与审计对账"]
+    S -.-> T
+```
+
+```mermaid
+mindmap
+  root(("阶段 14 回合账"))
+    ("计数点（三处）")
+      ("loop：每次模型调用")
+        ("开始时计数（失败的调用也算）")
+        ("完成时取 usage（只到最后一片）")
+        ("首片 token → first_token_ms")
+      ("handleToolCalls：工具段耗时 + 个数")
+      ("draftPlanText：规划那次也是钱")
+    ("收尾（唯一）")
+      ("Flux.doFinally 看三种信号")
+        ("ON_COMPLETE → SUCCESS")
+        ("ON_ERROR → FAILED")
+        ("CANCEL → CANCELLED")
+      ("status 判定矩阵只在 TurnStats.finish")
+    ("落点")
+      ("chat_turn（一轮一行）")
+      ("chat_tool_invocation 补 turn_id / user_id")
+      ("stats 事件 → 前端回答下方一行")
+    ("刻意不做")
+      ("Micrometer / Actuator")
+      ("单工具耗时（框架无钩子）")
+      ("RUNNING 状态与僵尸行")
+```
+
+### 14.2 四个问题：之前 vs 现在
+
+| 问题 | 之前（本阶段开始前的事实） | 现在 |
+|---|---|---|
+| **花了多少钱** | 只有日志里一行 `usage=…`，且是**最后一次调用**的量。实测一轮 workflow 调了 **7 次**模型，只记了最后一次的 `3419` tokens | `chat_turn.total_tokens` = 整轮累加；`usage_missing_calls` 区分"没拿到"与"0 token" |
+| **为什么慢** | 只有整轮总耗时（且是最后才打的一行日志） | `elapsed_ms` + `first_token_ms` + `tool_ms` + `model_calls`：慢在等首字 / 慢在工具 / 慢在轮数 |
+| **成功率多少** | **分母不存在** —— 失败与取消的轮次在 MySQL 里零痕迹（`writeBack` 只在收尾执行，异常/断线根本走不到） | 三种结局都落一行，成功率 = `SUCCESS / 全部` |
+| **上周三那次为什么失败** | 翻已轮转的 `.gz` 日志 | `WHERE status='FAILED' AND created_at ...`，带 `error_message` |
+
+### 14.3 三问的答案（协议第 7 条）
+
+| 产出 | ① 解决什么具体问题 | ② 谁消费 | ③ 不做会怎样 |
+|---|---|---|---|
+| `chat_turn` 表（一轮一行） | 上面四个问题 | **人**用 SQL 查；**前端**那一行小字 | 成本与成功率只剩日志里的抽样；失败轮连分母都没有 |
+| `TurnStats`（一轮的账本） | 把三个计数点（模型调用 / 工具段 / 首 token）汇成一条 | `AgentPipeline`（写）→ `TurnRecord`（读） | 计数散在三个 lambda 里，必然各记一半 |
+| `stats` SSE 事件 | 用户想看到"这次花了 7.2 秒"| 前端 `MessageBubble` | 要么再发一次 HTTP（多一次往返），要么看不见 |
+| `chat_message.turn_id` + `TurnStore#find`（**后补**） | ★ **刷新页面后那一行统计不能消失** —— 历史回放要能找回"这一轮花了多少" | 前端 `MessageBubble`（同一条渲染路径） | 数字只在流式时可见，刷新即丢 —— 用户只能"当场看到"，事后无从核对 |
+| 工具审计补 `turn_id`/`user_id` | 审计说不清"**谁**、**哪一轮**" | 人（事后追溯）；与本表**对账** | 审计只是"操作日志"，且历史补不回来 |
+| 会话删除接口 | 侧栏有会话但删不掉（阶段 10 起欠着） | **前端侧栏** | 用户的数据只能越攒越多，无法清理 |
+
+### 14.4 五个口径（先定义，否则表里是假数据）
+
+| 口径 | 定义 | 为什么必须写死 |
+|---|---|---|
+| `elapsed_ms` | 订阅开始 → `Final` 产出（**不含**写回与落库） | 口径变成"含写库"会让它随数据库抖动，失去可比性 |
+| `first_token_ms` | 第一片 Token/Reasoning 到达；`NULL` = 一个字都没出来 | ★ "首字 0ms" 与 "根本没等到" 是两件事 |
+| `*_tokens` | **每次模型调用的 usage 累加**；`EmptyUsage`/`null` 计缺失 | ★ 实测：`EmptyUsage.getPromptTokens()` 返回 **0**（javap），按数值累加会把"没数据"记成"0 token" |
+| `usage_missing_calls` | `model_calls - 真正拿到 usage 的次数`（**派生值，不是第三个计数器**） | 失败的调用天然落在"缺失"里；三处各记一次必然漂移（协议第 13 条） |
+| `status` vs `finish_reason` | 两个维度：**状态**（成没成）+ **原因**（为什么停） | `maxSteps` 是"跑完但被截断"：算 SUCCESS，靠 `finish_reason` 单独统计截断率 |
+
+**status 判定矩阵**（唯一实现在 `TurnStats#decide`）：
+
+```
+CANCEL 信号                        → CANCELLED（用户关页面不是故障）
+ON_ERROR 信号                      → FAILED
+工作流自己放弃（finish_reason=stepFailed） → FAILED
+一个字的回答都没有                 → FAILED
+其余（含 maxSteps）                → SUCCESS
+```
+
+### 14.5 落点
+
+| 文件 | 作用 |
+|---|---|
+| `src/main/resources/db/chat_turn.sql` | 新表 DDL（19 列 + 3 索引），头部写清"为什么失败轮必须独立成表" |
+| `src/main/resources/db/migrations/001-chat_tool_invocation-add-who.sql` | ★ **本项目第一次表迁移**：给已有库补 `turn_id` / `user_id` + 索引 |
+| `observability/TurnStatus` / `TurnRecord` / `TurnStore` / `MysqlTurnStore` / `TurnStats` | 账本的契约、落库实现（含启动自检）、一轮的账 |
+| `config/TurnStoreConfig` | `@Bean TurnStore`（`@Qualifier("dataSource")`；**没有 enabled 开关**，理由写在类注释） |
+| `agent/PipelineEvent.TurnFinished` + `stream/StreamEventType.STATS` | 账外发的唯一通道（**顶层事件**，不是 `ModelOutput` 的字段） |
+| `app/AgentPipeline` | 三个计数点 + `doFinally` 唯一落账点 + `Final.usage` 改为整轮合计 |
+| `app/ChatAppService#statsData` | 帧的**收窄器**：复用 `SessionDtos.TurnStatsView`（**身份不发**） |
+| `tool/audit/*` | `ToolInvocation` 7 组件 + INSERT/SELECT + 自检补两列一索引 |
+| `memory/MessageCodec`（**后补**） | `TURN_ID_PROPERTY` + `turnIdOf`；`StoredMessage` 加 `turnId` —— 两个存储实现都自动带走它 |
+| `chat_message.turn_id` + `db/migrations/002-*.sql`（**后补**） | 消息 → 轮次 的关联键（NULL = 阶段 14 之前的历史），索引 `idx_msg_turn` |
+| `observability/TurnStore#find`（**后补**） | 批量读账（一次 `IN` 查询，不是 N+1） |
+| `dto/SessionDtos.TurnStatsView` + `SessionMessage.stats`（**后补**） | **实时与历史共用的那个形状** —— 前端只有一份渲染逻辑 |
+
+### 14.5.1 一个数字、两个出口、一个来源（后补：刷新之后也要看得见）
+
+第一版把这行统计**只**放进 SSE 的 `stats` 事件 —— 于是刷新页面就没了。补法的全部要点：
+
+```
+实时：TurnFinished(TurnRecord) ──▶ ChatAppService#statsData ──▶ stats 帧
+                                         │
+历史：GET /messages ──▶ ConversationService#detail
+                         ├─ chat_message.turn_id（写回时挂进 assistant 的 properties）
+                         └─ TurnStore#find(turnIds)  ← 一次 IN 查询
+                                  │
+                                  └──────────────▶ 同一个 TurnStatsView
+```
+
+四条硬约束：
+
+1. **数字只有一个来源**（`chat_turn`）。写回时**不把数字抄进消息** —— 抄一份就是两处定义，
+   迟早出现"库里一行、历史另一行"，而它不报错（协议第 13 条）；
+2. **关联键走 properties**（`hagent_turnId`）→ 落进 `chat_message.turn_id`。
+   好处是**接口一行没改**：`MessageStore.append` 仍然只收 `List<Message>`，
+   两个实现都从 `MessageCodec.toStored` 统一取值；
+3. **实时与历史共用 `TurnStatsView`** —— 前端只有一份渲染逻辑；
+4. **账读不出来时历史照常返回**（`stats=null` + WARN），与检索/长期记忆同一降级立场。
+
+**真机取证**（2026-10-21，另起实例在 8124，不动用户正在跑的 8123；用一条**合成**历史对照真实账）：
+
+```
+GET /api/chat/sessions/conv-hist-demo/messages
+→ "messages":[
+     {"role":"USER",      "content":"你好", … , "stats":null},
+     {"role":"ASSISTANT", "content":"你好，有什么可以帮你？", … ,
+      "stats":{"status":"SUCCESS","elapsedMs":2559,"firstTokenMs":1599,
+               "modelCalls":1,"toolCalls":0,"totalTokens":1350,"usageMissingCalls":0}}
+   ]
+```
+
+数字与 `chat_turn` 里那一行**逐字一致**（`elapsed_ms=2559 / first_token_ms=1599 / total_tokens=1350`）
+—— 这就是"一个来源"的证据。验证后合成数据已删除。
+
+### 14.6 会话删除（阶段 10 起欠着的那笔）
+**接口**：`DELETE /chat/sessions/{id}` → `ConversationService#delete`。
+
+**删三样，顺序不能换**：
+
+```
+① chat_message（记录层，权威）   ← 失败就抛：用户看得见、能重试
+② Redis 上下文（可重建）         ← 失败只 WARN
+③ chat_conversation（目录）      ← 最后删：侧栏那一行是"它还在"的唯一可见标志
+```
+
+* **为什么内容先、目录后**：两种失败模式的**可见性**不同。先删内容、目录失败 → 侧栏留着空壳（看得见，会再点一次）；先删目录、内容失败 → **用户以为删掉了，数据还在库里**（看不见的失败）。
+* **为什么不走门面 `ConversationMemory#delete`**：它**吞掉**记录层异常（对"写回"是对的，对"删除"是**假删除**：接口 200 而数据还在）。
+* **为什么必须清 Redis**：上下文层命中即用、不与记录层比对 —— 不删缓存的话，用户删完继续在同一个页面说话，**模型仍然记得被删的内容**。
+* ★ **不删** `chat_turn` 与 `chat_tool_invocation`：它们是"系统被调用过"的事实，不是对话内容。审计随业务删除而消失就不再是审计。
+  ⚠️ **代价（已登记待办）**：审计表的 `arguments`/`result` 含用户原话与检索片段原文 ⇒ 本项目的"删除"目前是**删内容、不删痕迹**。
+
+**真机取证**（2026-10-21，本机真实 HTTP 往返 + SQL + Redis）：
+
+```
+GET    /api/chat/sessions/37cc…/messages  → 200                                    （删除前）
+DELETE /api/chat/sessions/37cc…           → 200 {"code":0,"message":"success"}
+GET    /api/chat/sessions/37cc…/messages  → 404 {"code":41001,"message":"会话不存在"}（删除后）
+DELETE 同一个 id 再来一次                   → 404                                    （刻意不幂等）
+
+SQL : chat_message = 0 行 | chat_conversation = 0 行 | chat_turn = 1 行  ← ★ 前三样删了，回合账保留
+Redis: SET hagent:chat:memory:<cid> → EXISTS=1 → DELETE 会话 → EXISTS=0   ← ★ 缓存真的被清了
+```
+
+最后一行是这条链路上最容易漏的一半：**不删缓存，用户删完继续说话时模型仍然记得被删的内容**。
+
+### 14.7 踩坑（都换了可迁移的认知）
+
+| # | 现象 | 根因 | 认知 |
+|---|---|---|---|
+| 44 | ★★ **一次 7 次调用的工作流，只记了最后一次的 token（3419）** | `buildFinal` 的 usage 取 `state.lastChunk`（最后一片）；而真正该累加的是"每次调用的收尾片" | **"最后一个"不等于"总共"**。凡"从流里取一个值当整轮结果"的地方，都要问：这次调用之前的那几次去哪了？ |
+| 45 | ★★ **`EmptyUsage.getPromptTokens()` 返回 0**（javap 实证） | 框架用"零值对象"表达"没有数据" | **零值对象与真值同形**：直接累加会把"没数据"记成"0"。必须另记一个计数（本项目用派生值 `modelCalls - 有 usage 的次数`） |
+| 46 | ★ 加了一个事件后，4 个用例 `ClassCastException`（`getLast()` 拿到 `TurnFinished`） | 断言写的是**位置**（"最后一个就是 Final"），而位置会随"又加了一个事件"而变 | **对事件流的断言要按类型找，不要按位置取**。位置的语义是"当前实现恰好这样" |
+| 47 | ★ 只在 `doOnComplete` 打点 → 失败与取消的轮次一条账都没有 | Reactor 的三条终止通道（onComplete / onError / cancel）**只有 `doFinally` 都看得到** | **"成功率的分母"必须在三出口都能打点的位置算**；否则"失败"与"正常"在数据上同形（HANDOFF §十 第 4 条的又一实例） |
+| 48 | ★ 失败轮在 MySQL 里**零痕迹**（不是"少统计"，是"根本不存在"） | `writeBack` 只在 `finish()` 里执行；异常/断线到不了那里 | **"有一张记录对话的表"不等于"记录下了每次服务"** —— 要问的是"没成功的那次记在哪" |
+| 49 | ★★ **刷新页面后那一行统计消失了** | 数字只放在 SSE 事件里。事件是**一次性的**，页面重建时它已经过去了 | **凡是"用户要看到"的东西，都要问一句：刷新之后它从哪来？** 事件是通道，不是存储 —— 能重建的必须能重建 |
+
+### 14.8 本阶段没做（诚实清单）
+
+* **Micrometer / Actuator / Prometheus**：消费者是监控系统，本项目没有；且会暴露未鉴权的端点（理由写在 `TurnStoreConfig` 的类注释）
+* **单工具耗时**：`ToolCallingManager.executeToolCalls` 是整体调用，**没有单工具钩子**；要它得装饰 `ToolCallback`
+* **`RUNNING` 状态 / 两段式写入**：会让"进程被 kill 的轮次"也留痕，代价是 UPDATE + 僵尸行清理；本项目选"一次性 INSERT"
+* ~~历史回放不显示那一行统计~~ ✅ **后补做完了**（`chat_message.turn_id` + `TurnStore#find`，见 14.5.1）
+* **删除时脱敏审计**：见 14.6 的代价说明
+* **前端计划面板**（阶段 13 遗留，纯前端）
+
+### 14.9 阶段结果
+
+`mvnw.cmd -B -ntp clean test` → **`Tests run: 362, Failures: 0, Errors: 0, Skipped: 2`**（48 个测试类）。
+
+本阶段**新增 15 条用例**：`TurnMetricsTest` 8 / `MysqlTurnStoreTest` 2 / `StatsFrameTest` 1 / `HistoryStatsTest` 3 / `MysqlMessageStoreTest` +1。
+⇒ 反推本阶段开始前的基线是 **347**，而阶段 13 的文档记的是 **346** —— 那 1 条的差是**文档笔误**，
+以实测为准（本阶段第一次全量跑是 357，减去当时已存在的 10 条新用例 = 347）。
+
+**真实运行取证（假 Key，只验证失败路径）**：启动后用 `tools/hagent-test.ps1` 发一次对话（上游 401），
+`chat_turn` 里落下一行：
+
+```
+turn_id     = e94caf26-…
+status      = FAILED
+elapsed_ms  = 468
+first_token_ms = NULL          ← 一个字都没出来（不是 0ms）
+model_calls = 1                ← 发起了 1 次调用（失败的也算）
+tool_calls  = 0
+total_tokens = NULL            ← 没拿到 usage
+usage_missing_calls = 1        ← 与"0 token"区分开
+error_message = Unauthorized: 401 Unauthorized from POST https://api.deepseek.com/…
+```
+
+⇒ **这就是本阶段最重要那条性质的反向证据**：以前这次失败在库里**一行都没有**。
+
+**待你在真 Key 下补的那条**（不阻塞）：一次成功的 workflow，`SELECT model_calls, total_tokens, plan_steps, first_token_ms`
+应当看到 `model_calls ≈ 7`、`total_tokens` **远大于** 3419（旧的"最后一片"值）。
+
+---
+
 ## 待推进
 
 - ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`282 用例全绿`）
@@ -4481,11 +4721,12 @@ done                                      ← 流收尾（Final 由 onComplete �
     ~~④步数预算是否与 chat 分开~~ ✅ **已在阶段 12 拍板：分开（chat 10 / workflow 20）**
   - ★ ④ 与阶段 12 的待拍板 ① 是**同一个变量**（`MemoryProperties.maxSteps`）——
     阶段 12 把它迁进 `AgentLoopProperties` 时已顺手把两档分开写死
-- **阶段 14：可观测性与审计** ← ★ **下一步** —— 关键路径耗时 / 成功率 / 工具调用计数 / **token 用量**
-  - ✅ **流式路径的 token 用量已实测拿得到**（2026-10-19）：
-    `usage=DefaultUsage{promptTokens=2591, completionTokens=446, totalTokens=3037}` ——
-    `Final.usage` 可以直接用于成本统计（换提供方要重测）。旧结论"可能拿到 EmptyUsage"已作废
-  - ★ 工具调用审计表已经落地，调用计数可以直接查库（见 `chat_tool_invocation`）
+- ✅ **阶段 14：可观测性与审计** —— 已完成，见 §14（`358 用例全绿`）
+  - 落点：`chat_turn`（一轮一行：耗时 / 首字 / 次数 / token / 结局）+ 工具审计补 `turn_id`/`user_id`
+  - ★ **修正了一条旧结论**：`Final.usage` 是"最后一次调用"的量，**不能**直接当整轮成本
+    （实测一轮 workflow 调 7 次、只记了最后一次的 3419）。现在它是**整轮累加**
+  - 顺手补了**会话删除接口**（`DELETE /chat/sessions/{id}` + 前端侧栏删除键）—— 见 §14.6
+  - 欠的一条真机取证：**真 Key 下的一次成功 workflow**，`model_calls ≈ 7` 且 `total_tokens` 远大于 3419
 - **阶段 15：新工具追加**（工具分组 / 最小权限）—— 阶段 9 的决定"只有 1 个工具时不做分组"仍有效，
   第二个工具出现时才需要；**鉴权缺口若要一并解决，最自然的落点是这里**
 - **阶段 16：MCP 引入**（外部工具生态）—— ⚠️ **仅占位，三问未答**（协议第 7 条）。

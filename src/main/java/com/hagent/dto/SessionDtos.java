@@ -57,6 +57,37 @@ public final class SessionDtos {
     }
 
     /**
+     * 一轮对话的统计（阶段 14 后补）—— <b>SSE 与历史回放共用的形状</b>。
+     *
+     * <p>★ 它存在这里的理由与 {@link ReasoningSection} 完全相同：实时那一行小字来自
+     * {@code stats} SSE 事件，刷新页面后那一行来自历史接口。两条路径**必须给同一份形状**，
+     * 否则前端要为"同一行字"写两套渲染逻辑 —— 而那正是最容易各自演化出差异的地方。
+     *
+     * <p>★ <b>数字只有一个来源</b>（{@code chat_turn}）：实时那条直接来自刚算出的
+     * {@code TurnRecord}，历史那条按 {@code turn_id} 查库。所以"刷新前后数字不一样"
+     * 在结构上不可能发生。
+     *
+     * <p>⚠️ <b>不含身份</b>（{@code user_id} / {@code role}）：浏览器就是这个人，
+     * 回显没有信息量，只是把身份写进前端状态。
+     *
+     * @param status            {@code SUCCESS} / {@code FAILED} / {@code CANCELLED}
+     * @param elapsedMs         整轮耗时（毫秒）
+     * @param firstTokenMs      首个 token 耗时；<b>null = 一个字都没吐出来</b>
+     * @param modelCalls        本轮模型调用次数
+     * @param toolCalls         本轮工具调用次数
+     * @param totalTokens       整轮 token；<b>null = 没拿到 usage</b>（不是 0）
+     * @param usageMissingCalls 其中几次没拿到 usage（前端据此显示"token 未知"）
+     */
+    public record TurnStatsView(String status,
+                                long elapsedMs,
+                                Long firstTokenMs,
+                                int modelCalls,
+                                int toolCalls,
+                                Integer totalTokens,
+                                int usageMissingCalls) {
+    }
+
+    /**
      * 历史里的一条消息。
      *
      * <p>★ <b>没有时间戳</b>：消息表有 {@code created_at}，但"一条消息是几点"目前
@@ -67,8 +98,12 @@ public final class SessionDtos {
      * @param content   正文
      * @param reasoning 该条消息的思考分段。<b>空列表表示没有思考</b>（不是 null）；
      *                  只有 {@code ASSISTANT} 可能有内容
+     * @param stats     这一轮的统计（阶段 14 后补）。<b>可能为 null</b>：
+     *                  阶段 14 之前写入的历史、或账写入失败的轮次都没有数字 ——
+     *                  <b>不编造</b>，前端据此决定不显示那一行
      */
-    public record SessionMessage(String role, String content, List<ReasoningSection> reasoning) {
+    public record SessionMessage(String role, String content, List<ReasoningSection> reasoning,
+                                 TurnStatsView stats) {
     }
 
     /**

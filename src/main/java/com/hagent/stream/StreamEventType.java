@@ -141,6 +141,28 @@ public final class StreamEventType {
      */
     public static final String WORKFLOW = "workflow";
 
+    /**
+     * <b>本轮统计</b>（阶段 14 新增）—— 耗时 / 次数 / token / 结局，在 {@code done} 之前发一次。
+     *
+     * <p>数据是 JSON 对象：
+     * <pre>
+     *   {"status":"SUCCESS","elapsedMs":7270,"firstTokenMs":1203,"modelCalls":2,
+     *    "toolCalls":2,"totalTokens":3032}
+     * </pre>
+     * {@code firstTokenMs} 与 {@code totalTokens} <b>可能缺失</b>（前者：模型一个字都没吐；
+     * 后者：没拿到 usage）—— 字段缺失表示"没有数据"，<b>不要当成 0</b>。
+     *
+     * <p><b>为什么单独一个事件名，而不是塞进 {@code done} 的载荷</b>：
+     * {@code done} 现在的载荷是字面量 {@code [DONE]}（前端按"解析失败原样返回"处理），
+     * 改它会同时动到前端的 done 分支与 api.js 的注释；而"加了什么"和"改了已有契约"
+     * 是两种风险量级。新事件是<b>纯增量</b>：不认识它的消费者忽略即可
+     * （前端对未知事件名本来就走 default 分支）。
+     *
+     * <p>★ 刷新页面后这一行数字会消失 —— 历史回放不 join {@code chat_turn}。
+     * 这是刻意的取舍（避免为一行小字再改一次历史接口的契约），已写进 HANDOFF 的诚实清单。
+     */
+    public static final String STATS = "stats";
+
     // ==========================================================================
     // 扩展位（未来阶段启用，当前不定义，见类注释）：
     //   QUESTION  —— 阶段 10 之后：中断续跑（模型停下来问用户）

@@ -21,6 +21,10 @@ import com.hagent.memory.MessageCodec;
 import com.hagent.memory.ReasoningTrace;
 import com.hagent.memory.TokenBudget;
 import com.hagent.memory.longterm.LongTermMemoryStore;
+import com.hagent.observability.TurnRecord;
+import com.hagent.observability.TurnStats;
+import com.hagent.observability.TurnStatus;
+import com.hagent.observability.TurnStore;
 import com.hagent.security.UserContext;
 import com.hagent.tool.ToolContextSupport;
 import com.hagent.tool.audit.ToolInvocationStore;
@@ -46,6 +50,7 @@ import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
@@ -84,6 +89,7 @@ import java.util.Map;
  *   ⑥ 调模型            ← chatModel.stream(prompt)，逐片累积 text / reasoning
  *   ⑦ 有工具 → 执行并回灌 → 回到 ⑤（N+1）；没有工具 → 收尾
  *   ⑧ 收尾：写回记忆（问 + 答 + 思考）→ 发出 Final
+ *   ⑨ 本轮统计          ← 阶段 14：TurnFinished 事件 + doFinally 落账（三出口都记）
  * </pre>
  *
  * <h2>★★ 四条来自实测的硬约束（改本类前必读）</h2>
@@ -186,6 +192,17 @@ public class AgentPipeline {
      */
     private final LongTermMemoryStore longTermMemory;
 
+    /**
+     * 回合账的存储（阶段 14）—— <b>必填</b>，不是 {@code ObjectProvider}。
+     *
+     * <p>与 {@link #auditStore} 刻意不同：工具审计<b>可关闭</b>（表增长快），
+     * 所以"关掉"在装配上的正确表现是"Bean 不存在"；
+     * 而回合账<b>没有开关</b>（见 {@code TurnStoreConfig} 的理由），
+     * 于是它应当<b>一定存在</b> —— 用 {@code ObjectProvider} 只会让
+     * "忘了装配"退化成"静默不记"，而那种缺失是看不见的。
+     */
+    private final TurnStore turnStore;
+
     public AgentPipeline(ChatModel chatModel,
                          ConversationMemory memory,
                          ToolCallbackProvider toolCallbackProvider,
@@ -195,7 +212,8 @@ public class AgentPipeline {
                          MemoryProperties memoryProperties,
                          AgentLoopProperties agentLoopProperties,
                          Resource ragAnswerPromptResource,
-                         LongTermMemoryStore longTermMemory) {
+                         LongTermMemoryStore longTermMemory,
+                         TurnStore turnStore) {
         this.chatModel = chatModel;
         this.memory = memory;
         this.memoryProperties = memoryProperties;
@@ -205,6 +223,7 @@ public class AgentPipeline {
         this.toolCallingManager = ToolCallingManager.builder().build();
         this.auditStore = auditStoreProvider.getIfAvailable();
         this.longTermMemory = longTermMemory;
+        this.turnStore = turnStore;
 
         // ★★ 启动自检：模型必须是 DeepSeek，否则"克隆配置 + 加工具"这条路走不通
         //    （getOptions() 返回的不是 DeepSeekChatOptions 就无法 mutate 出带工具的 DeepSeek options）。
@@ -265,7 +284,10 @@ public class AgentPipeline {
         int maxSteps = maxStepsOf(safeMode);
 
         return Flux.defer(() -> {
-            long startNanos = System.nanoTime();
+            // ★ 阶段 14：一轮的账本。建在 defer 内部（与 LoopState 同理）——
+            //   建在方法里会让并发两条流往同一组计数器写，表现为"耗时/token 互相串台"。
+            TurnStats stats = new TurnStats(cid, user.userId(), user.role().name(),
+                    safeMode.wireName());
 
             // ---------- ① 记请求（进入时的样子） ----------
             logRequest(cid, safeMode, user, original);
@@ -291,13 +313,69 @@ public class AgentPipeline {
 
             // 本轮循环状态：从拼装好的 prompt 开始，随工具结果不断增长
             LoopState state = new LoopState(new ArrayList<>(assembled.getInstructions()),
-                    original.getUserMessage(), maxSteps);
+                    original.getUserMessage(), maxSteps, 0, stats);
             // ★ 阶段 13：workflow 走"先拆解 → 逐步执行"；chat 的路径一个字都没动。
-            if (safeMode == MemoryMode.WORKFLOW) {
-                return runWorkflow(state, history, cid, user, startNanos);
-            }
-            return loop(state, cid, user, startNanos, LoopScope.CHAT);
+            Flux<PipelineEvent> turn = (safeMode == MemoryMode.WORKFLOW)
+                    ? runWorkflow(state, history, cid, user)
+                    : loop(state, cid, user, LoopScope.CHAT);
+
+            return turn
+                    // ---------- ★ 阶段 14：正常收尾时把这一轮的账外发 ----------
+                    //   位置很关键：它必须在 Final 之后（前端先有回答，再有数字），
+                    //   且必须在流完成之前（doFinally 发不出元素）。
+                    .concatWith(Flux.defer(() -> Flux.just(
+                            new PipelineEvent.TurnFinished(stats.finish(TurnStatus.SUCCESS)))))
+                    // ---------- ★ 唯一的收尾点：成功 / 失败 / 取消都写一次账 ----------
+                    //   doOnError 先记下原因，doFinally 再判定结局 —— 顺序不能换
+                    //   （doFinally 里读的是 noteError 写进去的那条 message）。
+                    .doOnError(stats::noteError)
+                    .doFinally(signal -> recordTurn(stats, signal));
         });
+    }
+
+    /**
+     * 把这一轮的账写进 {@code chat_turn}（阶段 14）—— <b>全项目唯一的落账点</b>。
+     *
+     * <h3>★ 为什么是 {@code doFinally}</h3>
+     *
+     * <p>一轮有<b>三种</b>收尾方式，而它们走的是三条不同的通道：
+     * <pre>
+     *   正常完成  → onComplete  （有 Final，有回答）
+     *   上游异常  → onError     （没有 Final，MySQL 里连 chat_message 都没有）
+     *   客户端断开 → cancel      （同上）
+     * </pre>
+     * 若只在成功路径打点，<b>成功率永远是 100%</b> —— 而"失败与正常同形"正是
+     * 本项目反复在防的那类错误（HANDOFF §十 第 4 条）。
+     * {@code doFinally} 是 Reactor 里<b>唯一</b>能同时看到这三条通道的位置。
+     *
+     * <h3>★ 为什么它<b>同步</b>落库（不在 boundedElastic 上异步发）</h3>
+     *
+     * <p>到这里时流的信号已在 {@code publishOn(boundedElastic)} 的下游（见 {@code loop}），
+     * 与同一条链里的 {@code recordAudit} / {@code writeBack} 是同一处境：
+     * <b>整条管道允许阻塞，所以整条管道都不该在事件循环上跑</b>（阶段 10 踩坑 35）。
+     * 异步发会让"账是否写完"变得不确定 —— 而测试与排查都需要它确定。
+     */
+    private void recordTurn(TurnStats stats, SignalType signal) {
+        TurnStatus observed = switch (signal) {
+            case CANCEL -> TurnStatus.CANCELLED;
+            case ON_ERROR -> TurnStatus.FAILED;
+            default -> TurnStatus.SUCCESS;
+        };
+        TurnRecord record = stats.finish(observed);
+        turnStore.record(record);
+        if (record.status() == TurnStatus.SUCCESS) {
+            log.debug("[{}] 回合账：轮次={} 状态={} 耗时={}ms 首字={}ms 模型={}次 工具={}次/{}ms token={}"
+                            + "（缺 {} 次）",
+                    LOG_TAG, record.turnId(), record.status(), record.elapsedMs(),
+                    record.firstTokenMs(), record.modelCalls(), record.toolCalls(),
+                    record.toolMs(), record.totalTokens(), record.usageMissingCalls());
+        } else {
+            // ★ 非成功必须可见：它是成功率的分子之一，也是"用户说卡住了"的第一条线索
+            log.warn("[{}] 回合账：轮次={} 状态={} 耗时={}ms 模型={}次 token={}（缺 {} 次）原因={}",
+                    LOG_TAG, record.turnId(), record.status(), record.elapsedMs(),
+                    record.modelCalls(), record.totalTokens(), record.usageMissingCalls(),
+                    record.errorMessage());
+        }
     }
 
     /**
@@ -364,10 +442,24 @@ public class AgentPipeline {
         private final Map<Integer, List<String>> stepTools = new LinkedHashMap<>();
         /** 已执行的步数（= 已发生的模型调用次数）。 */
         private int steps;
-        /** 最后一片响应 —— {@code Final} 的 finishReason / usage 取自它。 */
+        /**
+         * 最后一片响应 —— {@code Final} 的 <b>finishReason</b> 取自它。
+         *
+         * <p>★ 阶段 14 起它<b>不再</b>提供 {@code usage}：那个数改由 {@link #stats} 整轮累加
+         * （此前取最后一片 = 只记最后一次调用，实测一轮 workflow 调 7 次、只记了最后一次）。
+         */
         private ChatResponse lastChunk;
         /** 本次的用户消息。<b>只有这一条会写进会话记忆</b>（工具活动不写）。 */
         private final Message userMessage;
+
+        /**
+         * 这一轮的账（阶段 14）—— <b>工作流的每一步共享同一个实例</b>。
+         *
+         * <p>★ 它必须由 {@code run()} 创建后一路传下来，不能在 {@code newStepState} 里新建：
+         * 那样每步都从 0 开始计，一次 3 步的工作流只会统计到最后一步
+         * （与"usage 只记最后一次"是同一个错误的另一种形态）。
+         */
+        private final TurnStats stats;
 
         /**
          * 本次运行的步数上限 —— 由 {@code run()} 按模式解析一次（chat 10 / workflow 20）。
@@ -386,15 +478,13 @@ public class AgentPipeline {
          */
         private final int stepIndexBase;
 
-        private LoopState(List<Message> messages, Message userMessage, int maxSteps) {
-            this(messages, userMessage, maxSteps, 0);
-        }
-
-        private LoopState(List<Message> messages, Message userMessage, int maxSteps, int stepIndexBase) {
+        private LoopState(List<Message> messages, Message userMessage,
+                          int maxSteps, int stepIndexBase, TurnStats stats) {
             this.messages = messages;
             this.userMessage = userMessage;
             this.maxSteps = maxSteps;
             this.stepIndexBase = stepIndexBase;
+            this.stats = stats;
         }
     }
 
@@ -457,7 +547,6 @@ public class AgentPipeline {
     private Flux<PipelineEvent> loop(LoopState state,
                                      String conversationId,
                                      UserContext user,
-                                     long startNanos,
                                      LoopScope scope) {
         return Flux.defer(() -> {
             if (state.steps >= state.maxSteps) {
@@ -468,7 +557,7 @@ public class AgentPipeline {
                                 + "③ hagent.agent.chat-max-steps / workflow-max-steps 是否需要调整",
                         LOG_TAG, state.maxSteps, state.text.length());
                 return scope.terminal()
-                        ? Flux.just(finish(state, conversationId, startNanos, "maxSteps"))
+                        ? Flux.just(finish(state, conversationId, "maxSteps"))
                         : Flux.empty();
             }
             state.steps++;
@@ -484,6 +573,9 @@ public class AgentPipeline {
             // ---------- 用"克隆配置 + 挂工具 + 带身份"的 options 调模型 ----------
             Prompt prompt = new Prompt(state.messages, optionsFor(user, null));
 
+            // ★ 阶段 14：在"发起调用"时就计数 —— 失败的那次同样花了钱、同样让用户等了
+            state.stats.noteModelCallStart();
+
             Flux<PipelineEvent> stepHead = scope.emitStepEvents()
                     ? Flux.just(new PipelineEvent.StepStarted(step))
                     : Flux.empty();
@@ -498,7 +590,18 @@ public class AgentPipeline {
                                 if (reasoning != null && !reasoning.isEmpty()) {
                                     state.reasoning.append(reasoning);
                                 }
+                                // ★ 阶段 14：首个 token 的到达时刻（幂等，只有第一次生效）。
+                                //   它是"慢在等首字"与"慢在后半段"的分界 ——
+                                //   只记总耗时的话，这两种慢看起来一模一样。
+                                if ((text != null && !text.isEmpty())
+                                        || (reasoning != null && !reasoning.isEmpty())) {
+                                    state.stats.noteFirstToken();
+                                }
                             })
+                            // ★ 阶段 14：这一次模型调用的用量在【这一次流完成时】结算。
+                            //   ★ 为什么在 doOnComplete 而不是 doOnNext：流式路径上
+                            //     usage 只出现在【收尾片】，每片都记会把同一个数重复累加 N 次。
+                            .doOnComplete(() -> state.stats.noteModelUsage(usageOf(state.lastChunk)))
                             // ★ 过滤空片：实测首片是 text=null / reasoning=空串。不过滤会往 SSE 里发空事件
                             .flatMap(this::emit)
                             // ★★ 阶段 10 修：把阻塞段搬到 boundedElastic —— 这条链里【有阻塞调用】。
@@ -540,7 +643,7 @@ public class AgentPipeline {
                             //     · then       → 丢弃上游所有元素，只保留完成信号 —— 事件全丢 ❌
                             //   实测踩过：用 then 时前端只会收到一个 Final，
                             //   而断言会以 "Expected size: 3 but was: 1" 的形式暴露它。
-                            .concatWith(Flux.defer(() -> handleToolCalls(state, conversationId, user, startNanos, scope))));
+                            .concatWith(Flux.defer(() -> handleToolCalls(state, conversationId, user, scope))));
         });
     }
 
@@ -553,14 +656,13 @@ public class AgentPipeline {
     private Flux<PipelineEvent> handleToolCalls(LoopState state,
                                                 String conversationId,
                                                 UserContext user,
-                                                long startNanos,
                                                 LoopScope scope) {
         return Flux.defer(() -> {
             ChatResponse response = state.lastChunk;
             if (response == null || !response.hasToolCalls()) {
                 // ---------- ① 正常出口 ----------
                 return scope.terminal()
-                        ? Flux.just(finish(state, conversationId, startNanos,
+                        ? Flux.just(finish(state, conversationId,
                                 response == null ? null : finishReasonOf(response)))
                         : Flux.empty();
             }
@@ -593,8 +695,12 @@ public class AgentPipeline {
             //     ToolEventSink —— 它也是同步的（见该类注释）。
             List<PipelineEvent> toolPhaseEvents = new ArrayList<>();
             Prompt prompt = new Prompt(state.messages, optionsFor(user, toolPhaseEvents::add));
+            // ★ 阶段 14：工具段计时。粒度只能到"这一批" —— 框架的 executeToolCalls
+            //   是一次整体调用，没有单工具钩子（要单工具耗时要装饰 ToolCallback）。
+            long toolStartNanos = System.nanoTime();
             ToolExecutionResult execution =
                     toolCallingManager.executeToolCalls(prompt, response);
+            state.stats.noteToolPhase(System.nanoTime() - toolStartNanos, requested.size());
 
             state.messages.clear();
             state.messages.addAll(execution.conversationHistory());
@@ -607,7 +713,11 @@ public class AgentPipeline {
             //   ★ 与记忆写回一样：【不在关键路径上】。
             //     实现内部吞掉异常并记 ERROR（见 ToolInvocationStore 的类注释）——
             //     为"审计写不进去"丢掉已经产生的模型回复是双重损失。
-            recordAudit(conversationId, state.stepIndexBase + state.steps, requested, results);
+            //   ★ 阶段 14：带上 turn_id 与 user_id —— 审计的核心是"谁在这一轮做了什么"。
+            //     缺了这两列，本表只能叫"操作日志"（答不出主体），而表只会变长，
+            //     越晚补越亏（历史行补不回来）。
+            recordAudit(conversationId, state.stats.turnId(), user.userId(),
+                    state.stepIndexBase + state.steps, requested, results);
 
             log.debug("[{}] 第 {} 步：执行了 {} 个工具，历史消息数 {} → {}",
                     LOG_TAG, state.steps, requested.size(),
@@ -616,7 +726,7 @@ public class AgentPipeline {
             // ---------- 递归走下一步 ----------
             //   ★ 用 Flux.defer + concatWith 保持整条链响应式；不要 block()（那会在 SSE 线程上阻塞）。
             return callEvents.concatWith(Flux.fromIterable(toolPhaseEvents))
-                    .concatWith(Flux.defer(() -> loop(state, conversationId, user, startNanos, scope)));
+                    .concatWith(Flux.defer(() -> loop(state, conversationId, user, scope)));
         });
     }
 
@@ -633,6 +743,8 @@ public class AgentPipeline {
      * 审计要如实反映"这次调用发生了"，而不是因为拿不到结果就整条不记。
      */
     private void recordAudit(String conversationId,
+                             String turnId,
+                             String userId,
                              int stepIndex,
                              List<AssistantMessage.ToolCall> requested,
                              List<PipelineEvent.ModelOutput.ToolResult> results) {
@@ -646,8 +758,10 @@ public class AgentPipeline {
         for (int i = 0; i < requested.size(); i++) {
             AssistantMessage.ToolCall call = requested.get(i);
             String result = i < results.size() ? results.get(i).result() : null;
+            // ★ 阶段 14：与回合账同一个 turn_id → 可以按轮对账
+            //   （SELECT turn.tool_calls 与 COUNT(*) 必须相等；不等说明审计写入失败过）
             auditStore.record(new ToolInvocationStore.ToolInvocation(
-                    conversationId, stepIndex, call.name(), call.arguments(), result));
+                    conversationId, turnId, userId, stepIndex, call.name(), call.arguments(), result));
         }
     }
 
@@ -712,10 +826,9 @@ public class AgentPipeline {
     /** 收尾：写回记忆 + 产出 {@link PipelineEvent.ModelOutput.Final}。 */
     private PipelineEvent.ModelOutput.Final finish(LoopState state,
                                                    String conversationId,
-                                                   long startNanos,
                                                    String finishReason) {
         writeBack(conversationId, state);
-        return buildFinal(state.text, state.reasoning, finishReason, state.lastChunk, startNanos);
+        return buildFinal(state.text, state.reasoning, finishReason, state.stats);
     }
 
     /**
@@ -789,15 +902,18 @@ public class AgentPipeline {
     private PipelineEvent.ModelOutput.Final buildFinal(StringBuilder textAcc,
                                                        StringBuilder reasoningAcc,
                                                        String finishReason,
-                                                       ChatResponse lastChunk,
-                                                       long startNanos) {
+                                                       TurnStats stats) {
         String text = textAcc.toString();
         String reasoning = reasoningAcc.toString();
-        Usage usage = usageOf(lastChunk);
-        long costMillis = (System.nanoTime() - startNanos) / 1_000_000;
+        // ★ 阶段 14 的语义变更：这是【整轮累加】的用量，不再是"最后一片"的量。
+        //   实测反例：一轮 workflow 调 7 次模型，旧实现只记了最后一次的 3419 token。
+        Usage usage = stats.totalUsage();
+        // ★ 把"停止原因 + 回答"交给账本 —— 判定 status 要用（maxSteps 算成功、空回答算失败）
+        stats.noteFinal(finishReason, text);
 
-        log.info("[{}] ← 响应 | 耗时={}ms | 回答 {} 字 | 思考 {} 字 | finishReason={} | usage={}",
-                LOG_TAG, costMillis, text.length(), reasoning.length(), finishReason, usage);
+        log.info("[{}] ← 响应 | 耗时={}ms | 回答 {} 字 | 思考 {} 字 | finishReason={} | 模型 {} 次 | usage={}",
+                LOG_TAG, stats.elapsedMs(), text.length(), reasoning.length(),
+                finishReason, stats.modelCalls(), usage);
         if (reasoning.isEmpty()) {
             // ★ 取不到思考时明确告警，而不是静默为空：
             //   reasoningContent 是 DeepSeek 专属字段，换掉模型后这里会一直是空的，
@@ -845,7 +961,7 @@ public class AgentPipeline {
      */
     private void writeBack(String conversationId, LoopState state) {
         writeBack(conversationId, state.userMessage, state.text.toString(), markedReasoning(state),
-                state.reasoningOffsets.size());
+                state.reasoningOffsets.size(), state.stats.turnId());
     }
 
     /**
@@ -857,29 +973,38 @@ public class AgentPipeline {
      *
      * @param reasoningTrace 分步思考标记（{@code @@step:N tool:...}），可为 null
      * @param stepCount      日志用：chat 里是模型调用步数，工作流里是计划步数
+     * @param turnId         本轮的账的标识（阶段 14 后补）。★ 挂在 assistant 消息的
+     *                       properties 上 → 落进 {@code chat_message.turn_id} →
+     *                       历史回放据此把那行统计找回来（否则刷新页面就消失）
      */
     private void writeBack(String conversationId, Message userMessage, String replyText,
-                           String reasoningTrace, int stepCount) {
+                           String reasoningTrace, int stepCount, String turnId) {
         List<Message> turn = new ArrayList<>(2);
         if (userMessage != null) {
             turn.add(userMessage);
         }
         if (replyText != null && !replyText.isBlank()) {
-            turn.add(reasoningTrace == null
+            // ★ 两个键都走 properties：它们都是"前端要用、模型不该看到"的元数据。
+            //   尤其 turnId 绝不能进 prompt —— 模型不需要知道自己的账单编号。
+            Map<String, Object> properties = new LinkedHashMap<>(2);
+            if (reasoningTrace != null) {
+                properties.put(MessageCodec.REASONING_PROPERTY, reasoningTrace);
+            }
+            if (turnId != null && !turnId.isBlank()) {
+                properties.put(MessageCodec.TURN_ID_PROPERTY, turnId);
+            }
+            turn.add(properties.isEmpty()
                     ? new AssistantMessage(replyText)
-                    : AssistantMessage.builder()
-                            .content(replyText)
-                            .properties(Map.of(MessageCodec.REASONING_PROPERTY, reasoningTrace))
-                            .build());
+                    : AssistantMessage.builder().content(replyText).properties(properties).build());
         }
         if (turn.isEmpty()) {
             log.debug("[{}] 本次没有可写回的内容，跳过", LOG_TAG);
             return;
         }
-        log.debug("[{}] 写回记忆：会话={} 消息 {} 条，思考 {} 字（分 {} 步）",
+        log.debug("[{}] 写回记忆：会话={} 消息 {} 条，思考 {} 字（分 {} 步），轮次={}",
                 LOG_TAG, conversationId, turn.size(),
                 reasoningTrace == null ? 0 : reasoningTrace.length(),
-                stepCount);
+                stepCount, turnId);
         memory.append(conversationId, turn);
     }
 
@@ -979,8 +1104,7 @@ public class AgentPipeline {
     private Flux<PipelineEvent> runWorkflow(LoopState seed,
                                             List<Message> history,
                                             String conversationId,
-                                            UserContext user,
-                                            long startNanos) {
+                                            UserContext user) {
         // ★ 构建标记：日志里必须能一眼看出"这次是哪套代码在跑"。
         //   真实事故：一次测试的日志里同时出现新旧两种行为（2 步/有 usage vs 6 步/usage=null），
         //   排查时无法判断应用是否重启过。这行是为此加的（验证期保留，可以随时删）。
@@ -993,14 +1117,16 @@ public class AgentPipeline {
                                 LOG_TAG, drafted.error());
                         return Flux.concat(
                                 Flux.just(new PipelineEvent.PlanSkipped(drafted.error())),
-                                loop(seed, conversationId, user, startNanos, LoopScope.CHAT));
+                                loop(seed, conversationId, user, LoopScope.CHAT));
                     }
                     log.info("[{}] 工作流计划：{} 步（{}）",
                             LOG_TAG, drafted.plan().size(), drafted.plan().goal());
+                    // ★ 阶段 14：计划步数进账（chat 没有这个概念 → 落库为 NULL）
+                    seed.stats.notePlanSteps(drafted.plan().size());
                     WorkflowRun run = new WorkflowRun(drafted.plan(), seed);
                     return Flux.concat(
                             Flux.just(new PipelineEvent.PlanCreated(drafted.plan())),
-                            nextStep(run, seed, history, conversationId, user, startNanos));
+                            nextStep(run, seed, history, conversationId, user));
                 });
     }
 
@@ -1012,18 +1138,18 @@ public class AgentPipeline {
      * "取消"必须手写检查，而递归的 Flux 链天然继承取消与背压。
      */
     private Flux<PipelineEvent> nextStep(WorkflowRun run, LoopState seed, List<Message> history,
-                                         String conversationId, UserContext user, long startNanos) {
+                                         String conversationId, UserContext user) {
         return Flux.defer(() -> {
             if (!run.hasNext()) {
-                return Flux.just(finishWorkflow(run, seed, conversationId, startNanos, null));
+                return Flux.just(finishWorkflow(run, seed, conversationId, null));
             }
             PlanStep step = run.current();
             LoopState stepState = newStepState(run, step, seed, history);
             return Flux.concat(
                     Flux.just(new PipelineEvent.StepStarted(step.index())),
-                    loop(stepState, conversationId, user, startNanos, LoopScope.STEP),
+                    loop(stepState, conversationId, user, LoopScope.STEP),
                     Flux.defer(() -> afterStep(run, step, stepState, seed, history,
-                            conversationId, user, startNanos)));
+                            conversationId, user)));
         });
     }
 
@@ -1036,9 +1162,8 @@ public class AgentPipeline {
      */
     private Flux<PipelineEvent> afterStep(WorkflowRun run, PlanStep step, LoopState stepState,
                                           LoopState seed, List<Message> history,
-                                          String conversationId, UserContext user, long startNanos) {
+                                          String conversationId, UserContext user) {
         run.used += stepState.steps;
-        run.lastChunk = stepState.lastChunk;
         String text = stripToolMarkup(stepState.text.toString()).trim();
         if (!text.isEmpty()) {
             run.recordSuccess(step, text, stepState);
@@ -1046,7 +1171,7 @@ public class AgentPipeline {
                     LOG_TAG, step.index(), text.length(), run.used);
             return Flux.concat(
                     Flux.just(new PipelineEvent.StepFinished(step.index(), true, text)),
-                    nextStep(run, seed, history, conversationId, user, startNanos));
+                    nextStep(run, seed, history, conversationId, user));
         }
         String error = "这一步没有产出任何内容（模型未给出该步的结果）";
         String failure = "第 " + step.index() + " 步（" + step.goal() + "）失败：" + error;
@@ -1056,12 +1181,12 @@ public class AgentPipeline {
             return Flux.concat(
                     Flux.just(new PipelineEvent.StepFinished(step.index(), false, error)),
                     Flux.just(new PipelineEvent.StepStarted(step.index())),
-                    loop(retryState, conversationId, user, startNanos, LoopScope.STEP),
+                    loop(retryState, conversationId, user, LoopScope.STEP),
                     Flux.defer(() -> afterStep(run, step, retryState, seed, history,
-                            conversationId, user, startNanos)));
+                            conversationId, user)));
         }
         if (run.replanned) {
-            return Flux.just(finishWorkflow(run, seed, conversationId, startNanos, failure));
+            return Flux.just(finishWorkflow(run, seed, conversationId, failure));
         }
         run.replanned = true;
         log.warn("[{}] 同步重试后仍失败，重规划一次：{}", LOG_TAG, failure);
@@ -1071,13 +1196,13 @@ public class AgentPipeline {
                         .subscribeOn(Schedulers.boundedElastic())
                         .flatMapMany(drafted -> {
                             if (drafted.plan() == null) {
-                                return Flux.just(finishWorkflow(run, seed, conversationId, startNanos,
+                                return Flux.just(finishWorkflow(run, seed, conversationId,
                                         failure + "；重规划失败：" + drafted.error()));
                             }
                             run.restart(drafted.plan());
                             return Flux.concat(
                                     Flux.just(new PipelineEvent.PlanCreated(drafted.plan())),
-                                    nextStep(run, seed, history, conversationId, user, startNanos));
+                                    nextStep(run, seed, history, conversationId, user));
                         }));
     }
 
@@ -1100,7 +1225,7 @@ public class AgentPipeline {
         messages.add(new SystemMessage(systemMessageOf(seed)));
         messages.addAll(recentTurns(history));
         messages.add(new UserMessage(stepInstruction(run, step, seed)));
-        return new LoopState(messages, null, remaining, run.used);
+        return new LoopState(messages, null, remaining, run.used, seed.stats);
     }
 
     /** 取最近 2 轮对话（一问一答算一轮，所以是末尾 4 条）。 */
@@ -1148,7 +1273,7 @@ public class AgentPipeline {
      * 失败时把"停在哪一步"写进回答。
      */
     private PipelineEvent.ModelOutput.Final finishWorkflow(WorkflowRun run, LoopState seed,
-                                                           String conversationId, long startNanos,
+                                                           String conversationId,
                                                            String failure) {
         StringBuilder reply = new StringBuilder(run.narrative);
         if (failure != null) {
@@ -1173,11 +1298,14 @@ public class AgentPipeline {
             text = "（工作流没有产出任何内容）";
         }
         writeBack(conversationId, seed.userMessage, text, markedReasoning(run.aggregate),
-                run.completed.size());
-        // ★ 阶段 13 修：原来这里传 null，导致工作流的 Final 永远 usage=null
-        //   （实测日志：chat 有 usage、workflow 没有）—— 而阶段 14 的成本统计要靠它。
+                run.completed.size(), seed.stats.turnId());
+        // ★ 阶段 14：放弃要记进账 —— 用户拿到的是一份"未完成说明"，
+        //   这一轮不能算成功（否则成功率会把"没做完"统计成"做好了"）。
+        if (failure != null) {
+            seed.stats.noteFailure(failure);
+        }
         return buildFinal(new StringBuilder(text), run.aggregate.reasoning,
-                failure == null ? "stop" : "stepFailed", run.lastChunk, startNanos);
+                failure == null ? "stop" : "stepFailed", seed.stats);
     }
 
     /**
@@ -1204,7 +1332,11 @@ public class AgentPipeline {
             messages.addAll(history);
         }
         messages.add(new UserMessage(ask.toString()));
+        seed.stats.noteModelCallStart();
         ChatResponse response = chatModel.call(new Prompt(messages));
+        // ★ 阶段 14：规划也是一次真实的模型调用（计费 + 耗时），必须进账。
+        //   不记它会让一次 3 步工作流的 model_calls 少 1（规划 → 6 而不是 7）。
+        seed.stats.noteModelUsage(usageOf(response));
         String text = response == null || response.getResult() == null
                 ? null : response.getResult().getOutput().getText();
         if (text == null || text.isBlank()) {
@@ -1298,12 +1430,12 @@ public class AgentPipeline {
         private int used;
         private int attempts;
         private boolean replanned;
-        /** 最后一步的收尾片 —— 汇总 {@code Final} 的 usage 从这里取（阶段 13 修：原先是 null）。 */
-        private ChatResponse lastChunk;
 
         private WorkflowRun(WorkflowPlan plan, LoopState seed) {
             this.plan = plan;
-            this.aggregate = new LoopState(new ArrayList<>(), seed.userMessage, seed.maxSteps);
+            // ★ 聚合器与各步共享同一个账本（seed.stats）—— 否则每一步都从 0 开始计数
+            this.aggregate = new LoopState(new ArrayList<>(), seed.userMessage,
+                    seed.maxSteps, 0, seed.stats);
         }
 
         private boolean hasNext() {

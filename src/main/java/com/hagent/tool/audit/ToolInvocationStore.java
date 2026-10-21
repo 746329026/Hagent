@@ -58,13 +58,32 @@ public interface ToolInvocationStore {
     /**
      * 一条工具调用的审计快照。
      *
+     * <h3>★ 阶段 14 为什么加了两列（{@code turnId} / {@code userId}）</h3>
+     *
+     * <p>审计的核心问题一直是「<b>谁</b>在什么时候对<b>什么</b>做了什么」，
+     * 而本表在阶段 9 只回答了后两问：它有一条 {@code conversation_id}，但<b>没有主体</b>
+     * （会话本身也不按用户隔离 —— 现在还没有真正的鉴权）。一张答不出主体的表只能叫"操作日志"。
+     *
+     * <p>而审计数据<b>只能从现在开始攒</b>：不加列，这段历史就永久缺失。所以：
+     * <ul>
+     *   <li>{@code turnId} —— 与 {@code chat_turn.turn_id} 同值，把工具活动<b>归到具体一轮</b>，
+     *       从而能和 {@code chat_turn.tool_calls} 对账（不等即说明审计写入失败过）；</li>
+     *   <li>{@code userId} —— 主体。★ <b>历史行一律是 {@code "unknown"}</b>：
+     *       迁移脚本给了这个默认值，<b>不伪造</b>（假装知道比如实承认更糟）。</li>
+     * </ul>
+     *
      * @param conversationId 会话标识（可与 {@code chat_message} 关联）
-     * @param stepIndex      本轮第几步（从 1 开始）
+     * @param turnId         本轮唯一标识（与 {@code chat_turn.turn_id} 同值；
+     *                       阶段 14 之前的行是 {@code null}）
+     * @param userId         调用方标识（阶段 14 之前的行是 {@code "unknown"}）
+     * @param stepIndex      本轮第几步（从 1 开始；一次对话可能多步循环）
      * @param toolName       工具名
      * @param arguments      模型给出的参数原文（JSON 字符串；可能为 null）
      * @param result         工具返回的文本原文（模型看到的同一份；可能为 null）
      */
     record ToolInvocation(String conversationId,
+                          String turnId,
+                          String userId,
                           int stepIndex,
                           String toolName,
                           String arguments,

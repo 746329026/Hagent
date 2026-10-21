@@ -225,6 +225,30 @@ select {
   color: var(--text);
 }
 
+/**
+ * 删除键（阶段 14）—— 只有 hover 到那一行时才出现（与重命名同一规则），
+ * 但 hover 到它自己时变红：不可恢复的操作必须在按下去之前就有视觉区分。
+ */
+.icon-btn-danger:hover {
+  background: #fde8e8;
+  color: #b42318;
+}
+
+/**
+ * 回答下方那一行"本轮统计"（阶段 14）。
+ *
+ * 刻意做得很淡：它是**旁证**，不是内容。用户读的是回答，
+ * 需要时才对一眼"这次花了多久"。
+ */
+.msg-stats {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 .sidebar-footer {
   border-top: 1px solid var(--line);
   padding: 10px;

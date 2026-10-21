@@ -95,7 +95,8 @@ class ChatBudgetTest {
                 props,
                 new AgentLoopProperties(),
                 new ByteArrayResource("测试用约束".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
-                TestLongTermMemory.empty());
+                TestLongTermMemory.empty(),
+                TestTurn.noop());
     }
 
     /**

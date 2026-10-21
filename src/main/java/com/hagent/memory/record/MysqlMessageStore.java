@@ -63,8 +63,14 @@ public class MysqlMessageStore implements MessageStore {
     /** 读"某会话最近 N 条"要走的索引名（启动自检会核对它存在）。 */
     private static final String CONVERSATION_INDEX = "idx_conv_id";
 
+    /** 阶段 14 后补：历史回放按轮次批量取账要走它。 */
+    private static final String TURN_INDEX = "idx_msg_turn";
+
     /** 阶段 10 新增的思考列名（启动自检会核对它存在）。 */
     private static final String REASONING_COLUMN = "reasoning";
+
+    /** 阶段 14 后补的轮次列（启动自检会核对它存在）。 */
+    private static final String TURN_ID_COLUMN = "turn_id";
 
     private static final String DDL_HINT = """
             表 %s 不存在，会话记忆的记录层无法工作。
@@ -123,7 +129,7 @@ public class MysqlMessageStore implements MessageStore {
         // 只读 N 行 —— 不随会话长度增长。
         // ★ 排序用 id 而不是"会话内序号"：id 是自增主键，写入顺序即会话顺序，且无需任何锁。
         List<MessageCodec.StoredMessage> rows = jdbc.query(
-                "SELECT role, content, reasoning FROM " + table
+                "SELECT role, content, reasoning, turn_id FROM " + table
                         + " WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
                 (rs, rowNum) -> toStored(rs),
                 conversationId, maxMessages);
@@ -153,7 +159,7 @@ public class MysqlMessageStore implements MessageStore {
     @Override
     public List<Message> readAll(String conversationId) {
         List<MessageCodec.StoredMessage> rows = jdbc.query(
-                "SELECT role, content, reasoning FROM " + table
+                "SELECT role, content, reasoning, turn_id FROM " + table
                         + " WHERE conversation_id = ? ORDER BY id ASC",
                 (rs, rowNum) -> toStored(rs),
                 conversationId);
@@ -168,7 +174,8 @@ public class MysqlMessageStore implements MessageStore {
      */
     private MessageCodec.StoredMessage toStored(java.sql.ResultSet rs) throws java.sql.SQLException {
         return new MessageCodec.StoredMessage(
-                rs.getString("role"), rs.getString("content"), rs.getString("reasoning"));
+                rs.getString("role"), rs.getString("content"),
+                rs.getString("reasoning"), rs.getString("turn_id"));
     }
 
     @Override
@@ -204,6 +211,10 @@ public class MysqlMessageStore implements MessageStore {
                 return LayerStatus.down("record", "mysql",
                         "缺少 " + REASONING_COLUMN + " 列（阶段 10 新增，思考内容无法落库）");
             }
+            if (!columnExists(TURN_ID_COLUMN)) {
+                return LayerStatus.down("record", "mysql",
+                        "缺少 " + TURN_ID_COLUMN + " 列（阶段 14 新增，历史回放看不到本轮统计）");
+            }
             return LayerStatus.up("record", "mysql",
                     "表 " + table + " 可用，content 字符集=" + charset + "，索引 " + CONVERSATION_INDEX + " 就位");
         } catch (Exception e) {
@@ -221,11 +232,13 @@ public class MysqlMessageStore implements MessageStore {
             MessageCodec.StoredMessage stored = MessageCodec.toStored(message);
             // ★ 阶段 10：reasoning 与 content 同一行 —— 一个回合就是一行，
             //   思考是该回合的附属事实，拆表只会让"读一个回合"变成两次查询。
-            batchArgs.add(new Object[]{conversationId, stored.type(), stored.text(), stored.reasoning()});
+            // ★ 阶段 14：turn_id 同理（它让历史回放能找回那一轮的账）。
+            batchArgs.add(new Object[]{conversationId, stored.type(), stored.text(),
+                    stored.reasoning(), stored.turnId()});
         }
         // extra 列刻意不写（保持 NULL）：它留给真正结构化的数据，思考不是（见 chat_message.sql）
         jdbc.batchUpdate("INSERT INTO " + table
-                + " (conversation_id, role, content, reasoning) VALUES (?, ?, ?, ?)", batchArgs);
+                + " (conversation_id, role, content, reasoning, turn_id) VALUES (?, ?, ?, ?, ?)", batchArgs);
     }
 
     private String contentCharset() {
@@ -300,8 +313,27 @@ public class MysqlMessageStore implements MessageStore {
                               AFTER content;
                         """, table, REASONING_COLUMN, table));
             }
-            log.info("[记忆-记录-mysql] 启动自检通过：表={} content 字符集={} 索引={} 列={}",
-                    table, charset, CONVERSATION_INDEX, REASONING_COLUMN);
+            if (!columnExists(TURN_ID_COLUMN)) {
+                throw new IllegalStateException(String.format("""
+                        表 %s 缺少 %s 列（阶段 14 后补：历史回放要按轮次找回那一轮的账）。
+                        不修的话【刷新页面后那一行统计永远是空的】，而且不报错。
+                        请执行（存量库升级，只跑一次）：
+                          docker cp src/main/resources/db/migrations/002-chat_message-add-turn-id.sql hagent-mysql:/tmp/002.sql
+                          docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default-character-set=utf8mb4 -uroot hagent < /tmp/002.sql'
+                        """, table, TURN_ID_COLUMN));
+            }
+            Integer turnIndex = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM information_schema.STATISTICS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?",
+                    Integer.class, table, TURN_INDEX);
+            if (turnIndex == null || turnIndex == 0) {
+                throw new IllegalStateException(String.format(
+                        "表 %s 缺少索引 %s —— 历史回放要按 turn_id 批量取账，缺它就会全表扫描。"
+                                + "请按 src/main/resources/db/migrations/002-chat_message-add-turn-id.sql 升级。",
+                        table, TURN_INDEX));
+            }
+            log.info("[记忆-记录-mysql] 启动自检通过：表={} content 字符集={} 索引={}/{} 列={}/{}",
+                    table, charset, CONVERSATION_INDEX, TURN_INDEX, REASONING_COLUMN, TURN_ID_COLUMN);
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {

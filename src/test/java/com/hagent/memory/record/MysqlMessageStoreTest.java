@@ -1,10 +1,12 @@
 package com.hagent.memory.record;
 
 import com.hagent.memory.LayerStatus;
+import com.hagent.memory.MessageCodec;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -13,6 +15,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -175,5 +178,31 @@ class MysqlMessageStoreTest {
         assertThat(recordStore.readLatest(conversationId, 100))
                 .extracting(m -> m.getText())
                 .containsExactly("问", "答");
+    }
+
+    @Test
+    @DisplayName("★★ turn_id 随 assistant 消息落库、并能从 readAll 读回来（历史回放靠它找账）")
+    void turnIdRoundTripsThroughDatabase() {
+        String turnId = UUID.randomUUID().toString();
+
+        recordStore.append(conversationId, List.of(
+                new UserMessage("问"),
+                AssistantMessage.builder()
+                        .content("答")
+                        .properties(Map.of(MessageCodec.TURN_ID_PROPERTY, turnId))
+                        .build()));
+
+        assertThat(mysql.queryForObject(
+                "SELECT COUNT(*) FROM chat_message WHERE conversation_id = ? AND turn_id = ?",
+                Integer.class, conversationId, turnId))
+                .as("★ 落库侧：历史回放按这一列批量查 chat_turn（IN 查询）")
+                .isEqualTo(1);
+
+        assertThat(recordStore.readAll(conversationId))
+                .as("★ 读回侧：assistant 消息必须把 turn_id 带回来（挂回 properties），"
+                        + "否则 'Chat_message 有列、但读不出来' —— 症状是历史里那一行统计永远是空的")
+                .hasSize(2)
+                .extracting(MessageCodec::turnIdOf)
+                .containsExactly(null, turnId);
     }
 }

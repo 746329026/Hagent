@@ -522,6 +522,7 @@ messages.addAll(instructions);
 | **workflow 模式** | `MemoryMode.WORKFLOW` | 多步循环（工作流引擎在阶段 13）。预算比 chat 大一个数量级；步数上限 `hagent.agent.workflow-max-steps` |
 | **会话（数据实体）** | `conversation`：`conversationId`、`conversation-table-name`、`chat_conversation` 表 | ★ 与"chat 模式"**不是一个东西**：conversation 是数据，chat 是模式取值。判据："它是不是一次运行的模式？"是 → chat；是"一堆数据/一个实体"→ conversation |
 | **会话目录（哪几个会话）** | `memory.catalog.SessionStore`（`File` / `Mysql`） | 一会话一行：标题 / 模式 / 时间。它管的是"有哪些会话"，不是"会话里有什么"（那是 `memory.record.MessageStore`） |
+| **回合（一次服务）** | `turn`：`chat_turn` 表 / `TurnRecord` / `TurnStats` / `TurnStore` / `TurnStatus` / `TurnStatsView` | ★ 阶段 14 新增。**一次用户输入 → 一次收尾**（成功 / 失败 / 取消三种结局都算一个回合）。它与"会话"是 1:N —— 会话是数据实体，回合是**一次服务的事实**。★ 代码里已有的中文词就是"回合"（`AgentPipeline` 的注释用了 17 处），英文名沿用 `turn`。`chat_message.turn_id` 是"这条回答由哪一轮产生"的唯一关联键 |
 | **领域端口 vs 配置绑定** | 端口 `*Settings`（在领域包）／绑定 `*Properties`（在 `config`） | ★ 阶段 12 新增的区分：`*Properties` 是**外部配置的唯一绑定**；`*Settings` 是**领域声明的取参契约**，由 `*Properties` 去 `implements`。所以"改一个参数"只动两者，构造器与装配一行不改；反过来若让领域直接收 `*Properties`，就形成包级环 |
 | **模型的产出** | `ModelOutput`（sealed） | 含 `Reasoning`（思考）/ `Token`（回答增量）/ `Final`（收尾）。阶段 9 新增 `ToolCall` / `ToolResult` |
 | **检索的产出** | `Retrieved` | **与 `ModelOutput` 平级**，不属于模型产出 |

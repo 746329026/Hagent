@@ -27,7 +27,7 @@ import AppSidebar from './components/AppSidebar.vue'
 import TaskPanel from './components/TaskPanel.vue'
 import MessageBubble from './components/MessageBubble.vue'
 import Composer from './components/Composer.vue'
-import { ROLES, listSessions, loadSession, renameSession, streamChat } from './api'
+import { ROLES, deleteSession, listSessions, loadSession, renameSession, streamChat } from './api'
 
 const sessions = ref([])
 const currentId = ref(null)
@@ -95,6 +95,9 @@ async function openSession(id) {
       role: message.role,
       content: message.content,
       reasoning: message.reasoning || [],
+      // ★ 阶段 14 后补：历史回放也带统计（后端按 chat_message.turn_id 查 chat_turn）
+      //   实时的那一条来自 stats 事件、历史这一条来自这里 —— 两者同一个形状
+      stats: message.stats || null,
     }))
     steps.value = stepsFromHistory(messages.value)
     sources.value = []
@@ -150,6 +153,38 @@ function onRoleChange(key) {
   refreshSessions()
 }
 
+/**
+ * 删除一个会话（阶段 14）—— <b>二次确认是必须的</b>。
+ *
+ * <p>它不可恢复：后端会真删消息（记录层），并清掉 Redis 上下文 ——
+ * 所以不能做成"点一下就没"。确认框里带上标题，用户能看清删的是哪一个
+ * （侧栏里一行多个会话时，误点的概率不低）。
+ *
+ * <p>★ 删的正好是"当前打开的那个"时，必须同时清空主区：
+ * 否则输入框还在、currentId 还指着已被删除的会话，下一句话会写进一个
+ * 目录里不存在的会话 —— 而那种"半截状态"查起来很费劲。
+ */
+async function onRemove(id) {
+  if (streaming.value) {
+    return
+  }
+  const target = sessions.value.find((s) => s.conversationId === id)
+  const title = target?.title || '这个会话'
+  if (!window.confirm(`删除「${title}」？\n对话内容会从数据库里删除，且不可恢复。`)) {
+    return
+  }
+  try {
+    error.value = ''
+    await deleteSession(id, role.value)
+    sessions.value = sessions.value.filter((s) => s.conversationId !== id)
+    if (currentId.value === id) {
+      newChat()
+    }
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 发送
 // ---------------------------------------------------------------------------
@@ -168,7 +203,7 @@ async function send(text) {
    *   （Vue 的响应式靠 Proxy 拦截，改原始对象等于绕过 Proxy）。
    *   症状是"流式过程中界面完全不动，刷新一次才出现完整回答"，极难归因。
    */
-  const assistant = reactive({ id: Date.now() + 1, role: 'ASSISTANT', content: '', reasoning: [] })
+  const assistant = reactive({ id: Date.now() + 1, role: 'ASSISTANT', content: '', reasoning: [], stats: null })
   messages.value.push(assistant)
 
   steps.value = []
@@ -323,6 +358,12 @@ function handleEvent(name, data, assistant) {
       sources.value = data?.sources || []
       break
     }
+    case 'stats': {
+      // ★ 阶段 14：本轮统计（耗时 / 次数 / token / 结局）。它在 Final 之后、done 之前到达。
+      //   失败与取消的轮次收不到它（流已经断了），那两种轮次只在库里有账。
+      assistant.stats = data
+      break
+    }
     case 'error': {
       error.value = data?.message || String(data)
       break
@@ -375,6 +416,7 @@ refreshSessions()
       @new="newChat"
       @select="openSession"
       @rename="onRename"
+      @remove="onRemove"
       @update:role="onRoleChange"
     />
 
@@ -400,7 +442,8 @@ refreshSessions()
           v-if="effectiveMode === 'workflow' && currentId"
           class="banner"
         >
-          工作流编排开发中 —— 当前它的行为与"对话"一致，只有历史预算不同（5 万 vs 5 千 token）。
+          工作流模式：先拆解成步骤、再逐步执行，失败会重试并重规划一次。
+          （计划与每步结论由后端通过 workflow 事件推送，当前前端还<strong>不渲染计划面板</strong>。）
         </div>
 
         <div v-if="!messages.length" class="empty-state">
