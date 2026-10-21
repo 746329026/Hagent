@@ -1026,6 +1026,7 @@ public class AgentPipeline {
                                           LoopState seed, List<Message> history,
                                           String conversationId, UserContext user, long startNanos) {
         run.used += stepState.steps;
+        run.lastChunk = stepState.lastChunk;
         String text = stepState.text.toString().trim();
         if (!text.isEmpty()) {
             run.recordSuccess(step, text, stepState);
@@ -1120,7 +1121,13 @@ public class AgentPipeline {
                         .append("）：").append(brief(done.summary())).append('\n');
             }
         }
-        sb.append("只做当前这一步，做完直接给出这一步的结果，不要提前做后面的步骤。");
+        sb.append("只做当前这一步，做完直接给出这一步的结果，不要提前做后面的步骤。\n");
+        sb.append("输出要求：只给要点，不超过 300 字；不要写成完整文章，不要重复前面步骤已经说过的内容。");
+        if (step.index() == run.plan.size()) {
+            // ★ 最后一步必须是"汇总"：否则各步小作文会被原样拼起来（实测 6 步拼出 12187 字）
+            sb.append("\n这是最后一步：请把前面各步的要点**合并**成给用户的最终答复 ——"
+                    + "去掉重复、按用户能直接照着做的顺序组织，并保留每条的出处。");
+        }
         return sb.toString();
     }
 
@@ -1149,8 +1156,10 @@ public class AgentPipeline {
         }
         writeBack(conversationId, seed.userMessage, text, markedReasoning(run.aggregate),
                 run.completed.size());
+        // ★ 阶段 13 修：原来这里传 null，导致工作流的 Final 永远 usage=null
+        //   （实测日志：chat 有 usage、workflow 没有）—— 而阶段 14 的成本统计要靠它。
         return buildFinal(new StringBuilder(text), run.aggregate.reasoning,
-                failure == null ? "stop" : "stepFailed", null, startNanos);
+                failure == null ? "stop" : "stepFailed", run.lastChunk, startNanos);
     }
 
     /**
@@ -1247,6 +1256,8 @@ public class AgentPipeline {
         private int used;
         private int attempts;
         private boolean replanned;
+        /** 最后一步的收尾片 —— 汇总 {@code Final} 的 usage 从这里取（阶段 13 修：原先是 null）。 */
+        private ChatResponse lastChunk;
 
         private WorkflowRun(WorkflowPlan plan, LoopState seed) {
             this.plan = plan;

@@ -166,6 +166,16 @@ class WorkflowPipelineTest {
         assertThat(stepText)
                 .as("每步的指令里必须带【原始用户问题】—— 只带规划器改写后的 goal 会丢掉细节")
                 .contains("公司年假怎么算");
+        assertThat(stepText)
+                .as("P1：每步要求只给要点（≤300 字），否则 6 步会拼出上万字的小作文")
+                .contains("300");
+        assertThat(stepText)
+                .as("非最后一步不该被告知『这是最后一步』")
+                .doesNotContain("这是最后一步");
+        assertThat(promptText(stepPrompts.get(1)))
+                .as("最后一步必须要求汇总（去重 + 保留出处）—— 否则各步小作文被原样拼接")
+                .contains("这是最后一步")
+                .contains("合并");
     }
 
     private static String promptText(Prompt prompt) {
