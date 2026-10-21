@@ -4339,6 +4339,116 @@ mindmap
 `recordAudit` 不会被触发。补的落点：用 `TestAudit.recording()` + `TestToolCallbackProvider.of(...)`
 写一条"工作流里第 2 步的工具调用，`step_index` 必须是全局序号而不是 2 次都是 1"。
 
+### 13.7 Workflow 模式机制总览（代码流程 · 阶段 13 收尾）
+
+> 行号为本节提交时的快照（`AgentPipeline.java`），方法名优先于行号。
+> 本节是"接手时先读哪一段"的地图，不是新决策。
+
+#### 一、它到底加在哪一层
+
+`workflow` 与 `chat` **共用**同一个 `loop()`（同一套工具循环、同一套事件、同一套写回）。
+差别只有**一处分叉**：
+
+```java
+// AgentPipeline.run()：唯一分叉点
+if (safeMode == MemoryMode.WORKFLOW) {
+    return runWorkflow(state, history, cid, user, startNanos);
+}
+return loop(state, cid, user, startNanos, LoopScope.CHAT);
+```
+
+三处参数差异：预算 `budgetOf`（50k token / 200 条）、步数上限 `maxStepsOf`（20）、以及走 `runWorkflow`。
+
+#### 二、机制清单（每个机制解决什么问题 · 已知局限）
+
+| # | 机制 | 落在哪 | 解决什么 | 已知局限 |
+|---|---|---|---|---|
+| 1 | **规划**（一次同步模型调用，不带工具） | `draftPlanText` (:1192) / `draftPlan` (:1217) | 把"要做什么"先想清楚，产出可校验的步骤清单 | 规划看不到工具执行结果；提示词只能"劝"模型 |
+| 2 | **计划校验**（1..8 步、编号连续、goal 非空） | `workflow.WorkflowPlan` / `WorkflowPlanParser` | 拒绝不可执行的计划，而不是"尽量凑一份" | 超限即拒绝 → 降级 chat |
+| 3 | **计划可见**（`PlanCreated` / `PlanSkipped`） | `PipelineEvent` / `StreamEventType.WORKFLOW` | 用户知道打算怎么做、有没有降级 | 前端尚未渲染计划面板 |
+| 4 | **逐步执行**（每步一个独立内层循环） | `nextStep` (:1014) → `loop(..., LoopScope.STEP)` | 步与目标对应；每步可单独失败/重试 | 步间只传结论文本，没有结构化证据 |
+| 5 | **非终点循环**（不写回、不产 Final、不发 StepStarted） | `LoopScope` (:411) + `loop` (:457) | 复用 chat 循环而不污染整轮语义 | — |
+| 6 | **步上下文**（system + 最近 2 轮 + 原始问题 + 已完成全文结论） | `newStepState` (:1097) / `recentTurns` (:1107) / `stepInstruction` (:1116) | 每步知道自己在全局哪一格；汇总步有材料可合并 | "最近 2 轮"是**会话历史**尾巴，不含前几步检索原文 |
+| 7 | **失败处理**（同步重试 1 次 → 重规划 1 次 → 放弃并指认步骤） | `afterStep` (:1037) | 不静默跳过、不死循环 | 重规划后从新计划第 1 步重跑 |
+| 8 | **收尾**（最终回答 = 汇总步产出；失败写"未完成 + 已完成清单"） | `finishWorkflow` (:1150) | 用户拿到"一份说明"，而不是 N 篇小作文 | 依赖模型真把最后一步写成汇总 |
+| 9 | **写回**（与 chat 同一条 `writeBack`；思考按计划步落库） | `writeBack` (:861) / `recordSuccess` (:1323) | 历史回放与 chat 同格式（`@@step:N` 的 N 是计划步号） | — |
+| 10 | **预算与步数**（全局 20 次调用，跨步共享） | `WorkflowRun.used` + `newStepState.remaining` | 一次运行有硬上界 | 单步可能吃掉大部分预算 |
+| 11 | **断线即停** | `ChatAppService.stream` 的 `onCompletion/onTimeout/onError → dispose` | 客户端断开后不再白烧调用 | 断线后本轮不写回 |
+| 12 | **协议泄漏防御**（`DSML` 模板截断） | `stripToolMarkup` (:1271) | 用户永远看不到模型内部的工具调用模板 | 只截断，不重试 |
+| 13 | **构建标记** | `runWorkflow` 首行日志 | 一眼分辨"这次跑的是哪套代码" | 验证期用，可删 |
+
+#### 三、代码流程（一次 workflow 运行）
+
+```mermaid
+flowchart TD
+    A["run(message, mode=WORKFLOW)"] --> B["读历史 memory.load(50k/200)<br/>读长期记忆索引 → 拼 system"]
+    B --> C["runWorkflow（Mono.subscribeOn(boundedElastic)）"]
+    C --> D{"draftPlan 成功？"}
+    D -- 否 --> E["PlanSkipped → loop(..., CHAT)<br/>降级：回答照常，但明示没按计划"]
+    D -- 是 --> F["PlanCreated → WorkflowRun(plan, seed)"]
+    F --> G["nextStep：还有下一步？"]
+    G -- 否 --> Z["finishWorkflow"]
+    G -- 是 --> H["newStepState：system + 最近2轮 + 本步指令（含已完成全文结论）"]
+    H --> I["loop(stepState, LoopScope.STEP)<br/>内层工具循环：发 Token/Reasoning/ToolCall/ToolResult，不发 StepStarted/Final"]
+    I --> J["afterStep：stripToolMarkup(text)"]
+    J --> K{"有产出？"}
+    K -- 是 --> L["StepFinished(ok) + recordSuccess → nextStep"]
+    K -- 否 --> M{"attempts == 0？"}
+    M -- 是 --> N["StepFinished(false) + 同步重试一次"]
+    M -- 否 --> O{"已重规划过？"}
+    O -- 否 --> P["重规划一次 → PlanCreated + restart → nextStep"]
+    O -- 是 --> Q["StepFinished(false) → finishWorkflow(failure)<br/>写清第 k 步失败 + 已完成清单"]
+    L --> G
+    N --> I
+    P --> G
+    Z --> R["writeBack（唯一路径）<br/>Final(text=汇总步产出, reasoning=聚合思考, usage=最后一片)"]
+```
+
+#### 四、事件序列（前端/日志看到的骨架）
+
+```
+workflow{type:plan, steps:[...]}          ← 计划（重规划时再发一次）
+step{step:1}                              ← 计划步开始（内层模型调用不再发 step）
+  tool_call / tool_result / retrieved …   ← 该步内的明细
+workflow{type:step_finished, step:1, ok:true, summary:"…"}
+step{step:2} …
+workflow{type:step_finished, step:2, ok:false, summary:"失败原因"}   ← 失败也发
+workflow{type:plan, steps:[...]}          ← 重规划（如有）
+…
+done                                      ← 流收尾（Final 由 onComplete 统一转 done）
+```
+
+#### 五、关键不变量（踩坑换来的，改代码时别破）
+
+1. **工具始终挂上** —— "不给工具"不会让模型放弃检索，只会让它把 `<||DSML||>` 模板当正文吐出来；
+2. **汇总步必须有材料** —— 跨步传"已完成步骤的全文结论（≤1200 字/步）"，不是 120 字摘要；
+3. **最终回答 = 汇总步产出** —— 不是 `narrative` 拼接（拼接实测 1374 字 = 三篇小作文）；
+4. **写回只有一条路径**（`writeBack` 5 参重载），chat 与 workflow 共用；
+5. **内层循环是"非终点"**（`LoopScope.STEP`）：不写回、不产 Final、不发 StepStarted；
+6. **审计 `step_index` 是回合内全局序号**（`stepIndexBase + 本地步数`），不是每步从 1 重数；
+7. **断线要 dispose**（`emitter.onCompletion → dispose`），否则 emitter 已完成而流水线继续跑；
+8. **协议文本必须截断**（`stripToolMarkup`），任何情况下不得到达用户或落库。
+
+#### 六、失败与降级矩阵
+
+| 场景 | 行为 | 用户看到 |
+|---|---|---|
+| 规划失败（非法 JSON / 无 steps / >8 步 / 编号不连续） | `PlanSkipped` + 退回 chat 循环 | 回答照常，另有"计划未生成"事件 |
+| 某步无产出 | `StepFinished(false)` + 同步重试一次 | 该步失败提示，随后重试 |
+| 重试仍失败 | 重规划一次（带已完成 + 失败原因） | 新计划事件 |
+| 重规划后仍失败 | `finishWorkflow(failure)` | "未完成：第 k 步（目标）失败：原因 + 已完成清单" |
+| 预算/步数耗尽 | 内层循环按 `remaining` 收尾，整轮仍出汇总 | 部分结果（不报错） |
+| 客户端断开 | `dispose` 停止流水线，本轮不写回 | 前端已断开，无输出 |
+| 模型吐协议模板 | 截断 + WARN | 只看到模板之前的有效内容 |
+
+#### 七、已知局限（下一步的入口）
+
+1. **跨步没有结构化证据**：只传结论文本，出处是模型复述的（P2：传"要点 + 出处清单"）；
+2. **本次运行内无检索缓存**：同一 query 在同一 run 里可能被查多次（P2：归一化后复用）；
+3. **前端不渲染计划面板**：`workflow` 事件已发出，纯前端工作；
+4. **`recentTurns` 名字误导**（实际是"会话历史尾巴"），应改名 `conversationTail`；
+5. **审计步号仍无自动化测试**（假模型不产工具调用，`recordAudit` 不触发）。
+
 ---
 
 ## 待推进
