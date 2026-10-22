@@ -151,6 +151,23 @@
             <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>
         </dependency>
 
+        <!-- ===== 阶段 16：MCP 客户端 =====
+             本项目只做【客户端】：工具来自 MCP/time-server 这类**独立进程**
+             （它们各自是独立项目，见 MCP/ 目录），本应用负责连上、把工具交给模型。
+
+             ★ 注意它不是 server starter：把 server starter 放进主应用，会让主应用
+               自己也对外提供 MCP 服务（多一个协议端点），而我们要的只是消费方。
+
+             ★ 它带来的一个副作用必须同时处理：它会自动注册一个 SyncMcpToolCallbackProvider
+               （也是一个 ToolCallbackProvider）。若不管，容器里就有【两个】同类型 Bean，
+               而 AgentPipeline 按类型注入单个 —— 启动即报"找到两个"。
+               处置：在 application.yml 里 spring.ai.mcp.client.toolcallback.enabled=false，
+               工具清单统一由 ToolRegistration 合并（唯一注册入口，协议第 13 条）。 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-mcp-client</artifactId>
+        </dependency>
+
         <!-- 业务持久层：MyBatis-Plus。
              为什么不用 JPA：企业办公场景有大量报表型 / 条件复杂的查询，
              这类 SQL 用 JPA 的 Criteria/JPQL 表达很别扭，而 MyBatis 允许直接写 SQL，

@@ -4691,6 +4691,168 @@ error_message = Unauthorized: 401 Unauthorized from POST https://api.deepseek.co
 
 ---
 
+## 阶段 16：MCP（工具来源可插拔）
+
+> **状态**：**已完成**（2026-10-22）—— 范围**收束为"只接一个时间 server"**：
+> 客户端接入 + 一个独立项目的 MCP server + 端到端验证（含**模型真的调用了它**，见 §16.6）。
+> ★ **Excel 合并 server 与其余工具已移出范围**（不是延期），理由见 §16.7。
+>
+> **一句话**：把"工具从哪来"从**编译期**（写 Java 类 → 重启）变成**进程边界**（挂一条连接）。
+> 主应用为它<b>一行 Java 都没改业务代码</b>（只加了一个合并点 + 一份 profile 配置）。
+
+### 16.1 数据流向
+
+```mermaid
+flowchart LR
+    subgraph 主应用["Hagent（MCP 客户端）"]
+        A["AgentPipeline"] --> B["ToolCallbackProvider<br/>（唯一注册入口）"]
+        B --> C["ToolRegistration<br/>本地工具 4 + MCP 工具 N"]
+        C --> D["McpSyncClient"]
+    end
+    subgraph 独立进程["MCP/time-server（独立 Spring Boot 项目）"]
+        E["McpServer（stdio）"] --> F["@McpTool getCurrentTime"]
+    end
+    D -- "JSON-RPC over stdin/stdout" --> E
+    D -. "启动时拉起子进程<br/>java -jar …" .-> 独立进程
+```
+
+```mermaid
+sequenceDiagram
+    participant App as Hagent
+    participant TR as ToolRegistration
+    participant Cli as McpSyncClient
+    participant Srv as time-server(JVM)
+    App->>TR: 取工具清单
+    TR->>Cli: listTools()
+    Cli->>Srv: initialize / tools/list（stdio）
+    Srv-->>Cli: tools=[getCurrentTime]
+    Cli-->>TR: ToolCallback[]
+    TR-->>App: 本地4 + MCP1（前缀 mcp_hagent_time_）
+    Note over App: 模型请求调用 getCurrentTime
+    App->>Cli: ToolCallback.call()
+    Cli->>Srv: tools/call
+    Srv-->>Cli: "当前时间：…"
+    Cli-->>App: 文本结果（进上下文 + 进审计表）
+```
+
+### 16.2 三问（协议第 7 条）
+
+| | 答案 |
+|---|---|
+| **① 解决什么具体问题**（MCP 整体） | "工具从哪来"从编译期变成进程/配置边界：挂一条连接就多一组工具，且工具可以是**别的语言/别的进程**写的 |
+| **② 产出谁消费** | `ToolRegistration`（唯一注册入口）→ `ToolCallbackProvider` → `AgentPipeline` → 模型 |
+| **③ 不做会怎样** | 每个工具都得写 Java 类、重新部署；跨语言或第三方能力无法复用 |
+| **① 解决什么具体问题**（第一个工具 `getCurrentTime`） | 模型**不知道今天是几号**。而办公场景大量问题与相对日期有关（"提前几天申请""满一年从哪天算"）；猜错**不会报错**，答案一样通顺 |
+| **② 产出谁消费** | 模型（工具返回值进上下文）→ 最终回答；同时进 `chat_tool_invocation` 审计表 |
+| **③ 不做会怎样** | 日期推算全部建立在"模型的印象时间"上（训练数据的时间），可能差几个月且无任何提示 |
+
+> ⚠️ **诚实备注**：本项目的工具都是自研的，**没有"接社区工具"的刚性需求**。
+> 所以这一阶段的真实收益是**工具来源可插拔**这条架构性质 + 阶段 15 跳过的
+> `getCurrentTime` 有了着落 —— 而不是"生态复用"。
+
+### 16.3 关键决策（取舍，不是细节）
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | **只做客户端**，不把 server starter 放进主应用 | 否则主应用自己也对外提供 MCP 服务（多一个协议端点、多一份未鉴权面），而我们要的是消费方 |
+| 2 | **MCP server 是独立项目**（`MCP/time-server`） | 独立 pom / 独立构建 / 独立进程；不污染主应用 classpath；边界清晰（server 看不到知识库/记忆/库） |
+| 3 | **stdio**，不是 HTTP | 无端口、无未鉴权端点、不用手动起两个服务；MCP 的本地惯例形态。**换 HTTP 只改 `application-mcp.yml` 两行** |
+| 4 | 工具清单合并点 = **`ToolRegistration`** | 保持"唯一注册入口"（阶段 9 定的）。若让 `AgentPipeline` 直接收 MCP 回调，它就知道两种来源，过滤/改名/审计开关会变成两处 |
+| 5 | 关掉 starter 的 `SyncMcpToolCallbackProvider`（`spring.ai.mcp.client.toolcallback.enabled=false`） | 否则容器里出现**两个** `ToolCallbackProvider`，而 `AgentPipeline` 按类型注入单个 → 启动即失败 |
+| 6 | MCP 工具名一律 `mcp_<server>_<tool>` | 工具名由**外部进程**决定，无法假设它不叫 `retrieveKnowledge`；撞名会让本地工具被悄悄顶掉 |
+| 7 | 连不上 → **启动失败**（不是降级） | 工具缺了不会报错，模型只会说"我没有这个能力" —— 静默的能力缺失比起不来更难发现 |
+| 8 | **单独** `application-mcp.yml`，仅 `mcp` profile 生效 | 否则 362 条 `@SpringBootTest` 每次都会拉起 JVM：测试变慢变脆，还依赖"jar 已构建" |
+| 9 | 加**前置检查**（`McpServerPreflight`）：jar 不存在 → 启动期立刻失败 | 实测不拦的话要等 **20 秒**，且报 `TimeoutException … in 'map'` —— 一个字都没提"jar 不存在" |
+
+### 16.4 落点
+
+| 文件 | 作用 |
+|---|---|
+| `MCP/time-server/pom.xml` | 独立项目（Spring Boot 4.1.1 + `spring-ai-starter-mcp-server:2.0.1`） |
+| `MCP/time-server/.../TimeServerApplication` | 非 web 应用入口（`web-application-type: none`） |
+| `MCP/time-server/.../TimeTools` | `@McpTool getCurrentTime(zone)` —— **本 server 的全部能力** |
+| `MCP/time-server/src/main/resources/logback-spring.xml` | ★ 日志全部改到 **stderr**（stdout 是协议通道） |
+| `src/main/resources/application-mcp.yml` | stdio 连接（`command` / `args`）；默认不生效 |
+| `src/main/resources/application.yml` | 加 `spring.ai.mcp.client.toolcallback.enabled: false` |
+| `config/ToolRegistration` | 合并本地 + MCP 工具；工具名前缀 `mcp_<server>_<tool>` |
+| `config/McpServerPreflight` + `META-INF/spring.factories` | 启动期检查 jar 是否存在（唯一新增的 EnvironmentPostProcessor 之一） |
+| `tools/mcp-probe.mjs` | ★ **stdio 握手探针**：initialize / tools/list / tools/call + 断言 stdout 纯净 |
+
+### 16.5 踩坑（3 条实测 + 1 条预判）
+
+| # | 现象 | 根因 | 认知 |
+|---|---|---|---|
+| 50 | ★★ 缺 jar 时启动**等 20 秒**，最后报 `TimeoutException: Did not observe any item … in 'map'` | 真正的错误（`Error: Unable to access jarfile …`）出现在更早的一行 server stderr 里；`request-timeout` 把失败包装成了超时 | **超时是最没信息量的失败形式**：它只说"没等到"，不说"为什么"。前置检查要放在**能说清原因**的那一层（这里：启动期查文件存在性） |
+| 51 | ★★ 前置检查第一版**静默什么都没查** | 用 `Binder` 绑定到 `Object` 时，`args[0]/args[1]` 被绑成 **`Map{"0":…,"1":…}`** 而不是 `List` —— 而第一版只判了 `instanceof List` | **"检查写了"≠"检查跑了"**。凡是"不满足就 fail"的守卫，必须有一条**会红的用例**（本次是它自己的单测先红，才暴露出类型假设错了） |
+| 52 | ★ `spring.factories` 里多了一个反引号 → `ClassNotFoundException: \`com.hagent…` | 手工拼续行符时写错；而它**没有让应用起不来**（EPP 加载失败被当成警告），只是检查不生效 | **注册文件写错可能"看起来正常"**。修好后必须**实跑一次"该失败时失败"**才算验证（本次：3.4s + 可执行修法） |
+| 53（预判） | 日志写进 stdout 会污染 JSON-RPC 帧，症状是"进程活着但一个工具都看不到" | stdio 用 stdout 传协议，而 Spring Boot 默认日志走 stdout | `logback-spring.xml` 把 appender 的 target 改成 `System.err`；探针**断言 stdout 全是 JSON** |
+| 54 | ★★ **不带 `mcp` profile 启动**：应用一切正常、4 个工具、回答流畅 —— 但模型手里**根本没有**时间工具（实测 2026-10-22：问"现在是什么时间"，`工具=0 次`，模型凭印象作答） | `application-mcp.yml` 只在 `mcp` profile 下加载；而"少一个工具"不报错，只表现为"模型没有那个能力" | **能力缺失与正常工作在观测上同形** —— 装配点必须把"外部工具没启用"说出来（已加 WARN + 启动参数提示）。★ 协议第 6 条：**不要用"记得加 profile"解决第二次** |
+| 55 | ★ IDEA 报 `Java file is located outside of the module source root`（`MCP/*.java`） | 根 pom 把整个 `Hagent/` 当作 content root，而 `MCP/time-server` 是**另一个** Maven 项目 —— IDEA 不知道这些源码属于谁 | 嵌套的独立 Maven 项目要在 IDEA 里 **Add as Maven Project**（`.idea/` 不进仓库 ⇒ 每个 clone 一次）；**命令行构建不受影响**（`mvnw -f MCP/…/pom.xml` 照常出 jar、369 条测试全绿） |
+
+### 16.6 证据（全部实跑）
+
+**① 样板 server 的 stdio 握手**（`node tools/mcp-probe.mjs`）：
+
+```
+[探针] 拉起：java -jar …\MCP\time-server\target\time-server-0.0.1-SNAPSHOT.jar
+✅ initialize 成功 —— hagent-time 1.0.0（protocol 2025-06-18）
+✅ tools/list 返回了工具 —— getCurrentTime
+✅ 工具 getCurrentTime 在列表里 —— 获取当前的日期与时间（含星期与时区）。
+✅ 调用 getCurrentTime 返回内容 —— 当前时间：2026-10-22 15:54:10 星期四（时区 Asia/Shanghai，UTC+08:00）
+✅ stdout 里没有非 JSON 行（日志没污染协议通道） —— 3 行全是 JSON
+```
+
+**② 主应用接上之后**（`--spring.profiles.active=local,mcp`）：
+
+```
+[工具] 已注册 5 个工具（本地 4 + MCP 1，连接 1 个）：
+   [retrieveKnowledge, forgetMemory, readMemory, saveMemory, mcp_hagent_time_getCurrentTime]
+[管道] AgentPipeline 已就绪：… 已注册工具 5 个：[…同上…]
+```
+
+⇒ 这一行同时证明了三件事：**客户端连上了外部进程**、**工具被列出并转成了 `ToolCallback`**、
+**名字带上了我们的前缀**（否则撞名会静默顶掉本地工具）。
+
+**③ 缺 jar 的失败路径**（前置检查上线后）：
+
+```
+耗时 3.4s（此前 20s+）
+java.lang.IllegalStateException: MCP 连接 'time' 要拉起的 server 不存在：
+  …\MCP\time-server\target\time-server-0.0.1-SNAPSHOT.jar
+【为什么】… 先单独构建它：
+  .\mvnw.cmd -B -ntp -f C:/Users/…/Hagent/MCP/time-server/pom.xml package
+【只想先关掉 MCP】… --spring.profiles.active=local
+【为什么不让你等到超时】… TimeoutException: Did not observe any item … within 20000ms
+```
+
+**④ 模型真的调用了它**（你那次真实运行，2026-10-22 16:38 —— 这是本阶段最后一块证据）：
+
+```
+16:38:09  启动：profiles active: "local", "mcp"
+16:38:12  [工具] 已注册 5 个工具（本地 4 + MCP 1，连接 1 个）：… mcp_hagent_time_getCurrentTime
+16:38:30  审计表：chat_tool_invocation 新增一行
+            tool_name = mcp_hagent_time_getCurrentTime   ← ★ 模型真的走了 MCP 这条路
+```
+
+⇒ 整条链闭合：**模型选择工具 → 我们的 `ToolCallback` → stdio → 外部进程 → 结果回灌 → 审计落库**。
+
+### 16.7 范围**收束**：Excel server 与其余工具移出本项目
+
+**2026-10-22 拍板**：本项目只做**一个** MCP server（时间），Excel 合并 server 与"其余工具"
+（`listKnowledgeSources` / `queryChatHistory`）**移出范围 —— 不是延期**。
+
+| 原来在计划里的 | 新状态 | 为什么 |
+|---|---|---|
+| `MCP/excel-server`（多文件并排拼宽） | ❌ **移出** | 它的形状在 §16.3 已经证明过（"多一条 connection 即可，主应用一行不改"）；再实现一遍是**第二个实例**，边际信息量低，而它会带来"文件读写沙箱 + 表头语义 + 空值对齐"一整套新决策 |
+| `listKnowledgeSources` | ❌ **移出** | 与检索工具职责重叠（"有哪些文件"可以由检索+提示词兜住） |
+| `queryChatHistory` | ❌ **移出** | 它要求先给 `chat_conversation` 加 owner 列并做归属过滤，属于**鉴权**范畴；而鉴权已定"只预留、不深究"（决策 71） |
+| `getCurrentTime` | ✅ **已交付** | 由本阶段的 MCP server 提供 |
+
+> ★ 这不是"没做完"，是**主动砍范围**：一个已经证明过的形状，第二个实例只增加维护面，
+> 不增加可讲的东西。项目转入**阶段 17（工程收尾）**。
+
+---
+
 ## 待推进
 
 - ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成，见第 10 节（`282 用例全绿`）
@@ -4727,13 +4889,17 @@ error_message = Unauthorized: 401 Unauthorized from POST https://api.deepseek.co
     （实测一轮 workflow 调 7 次、只记了最后一次的 3419）。现在它是**整轮累加**
   - 顺手补了**会话删除接口**（`DELETE /chat/sessions/{id}` + 前端侧栏删除键）—— 见 §14.6
   - 欠的一条真机取证：**真 Key 下的一次成功 workflow**，`model_calls ≈ 7` 且 `total_tokens` 远大于 3419
-- **阶段 15：新工具追加**（工具分组 / 最小权限）—— 阶段 9 的决定"只有 1 个工具时不做分组"仍有效，
-  第二个工具出现时才需要；**鉴权缺口若要一并解决，最自然的落点是这里**
-- **阶段 16：MCP 引入**（外部工具生态）—— ⚠️ **仅占位，三问未答**（协议第 7 条）。
-  它与阶段 15 强相关：MCP 会把"工具从哪来"变成**动态注册**，而那正是 `ToolRegistration` 该有的形状
-- **阶段 17（提议，尚未拍板）：工程收尾** —— README / 演示脚本 / token 预算与限流 / 部署说明
+- ⏭️ **阶段 15：新工具追加**（工具分组 / 最小权限）—— **2026-10-22 移出范围**（不是延期）
+  - 阶段 9 的判断"只有 1 个工具时不做分组"一直成立到项目结束：**"按角色裁剪工具清单"始终零实例**
+  - 三个候选工具：`getCurrentTime` 已由阶段 16 的 MCP server 交付；
+    `listKnowledgeSources` / `queryChatHistory` **移出**（理由见 §16.7：一个与检索重叠、一个属鉴权范畴）
+  - 鉴权：**只预留接口、不深究**（决策 71）
+- ✅ **阶段 16：MCP（工具来源可插拔）** —— 已完成，见 §16（`369 用例全绿`）
+  - 只接**一个** server（时间）：`MCP/time-server` 是独立项目，stdio 拉起；
+    主应用侧只多了 `application-mcp.yml` + `ToolRegistration` 的合并点
+  - ★ 端到端已证：模型真的调用了 `mcp_hagent_time_getCurrentTime`，并落进审计表（§16.6 ④）
+  - **Excel server 与其余工具移出范围**（§16.7）
+- **阶段 17（下一步）：工程收尾** —— README / 演示脚本 / 限流与预算 / 部署说明
   - 它不是一个"能力阶段"，而是"让别人能跑起来并看懂"的交付阶段
 - **一个待补的验证**（不是新功能，是欠的证据）：`docs/STAGE5-VERIFICATION.md` 里的"下一轮能否答出名字"
   —— ⚠️ 这一条**已于 2026-10-19 结清**（见该文件末尾「验证记录」），此处仅留档
-- **工具清单的其余 3 个**（`listKnowledgeSources` / `queryChatHistory` / `getCurrentTime`）——
-  三问的答案已在阶段 9 讨论中给出，见 `HANDOFF` 的工具清单小节；**归入阶段 15**

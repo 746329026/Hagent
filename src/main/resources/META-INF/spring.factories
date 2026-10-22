@@ -25,4 +25,5 @@
 # 详见 MemoryConfigValidator#getOrder() 的注释。
 # ============================================================================
 org.springframework.boot.EnvironmentPostProcessor=\
-com.hagent.config.MemoryConfigValidator
+com.hagent.config.MemoryConfigValidator,\
+com.hagent.config.McpServerPreflight

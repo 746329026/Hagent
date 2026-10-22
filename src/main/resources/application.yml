@@ -37,6 +37,19 @@ spring.ai:
     chat: deepseek
     embedding: ollama
 
+  # ---------- MCP 客户端（阶段 16）----------
+  # 本项目只做【客户端】：工具来自独立进程里的 MCP server（见 MCP/time-server）。
+  # 连接配置单独放在 application-mcp.yml（默认不生效，演示时加 mcp profile）。
+  mcp:
+    client:
+      # ★★★ 这一行不是可选项，是"唯一注册入口"的守门人 ★★★
+      #  starter 默认会注册一个 SyncMcpToolCallbackProvider（它也是 ToolCallbackProvider）。
+      #  若与 ToolRegistration 里的那个并存，容器里就有两个同类型 Bean，
+      #  而 AgentPipeline 按类型注入单个 → 启动直接失败（expected single matching bean but found 2）。
+      #  关掉它之后，工具清单只从 ToolRegistration 出：本地工具 + MCP 工具在那里合并。
+      toolcallback:
+        enabled: false
+
   # ---------- chat：DeepSeek 云端 ----------
   # ★ 模型名必须与账号实际可用的一致。实测该账号 /models 只返回：
   #     deepseek-flash · deepseek-v4-pro
@@ -76,8 +89,7 @@ spring.ai:
         #   （这条不是猜的：注解值 "high"/"max" 就在字节码常量池里。）
         reasoning-effort: HIGH
 
-  # ---------- embedding：Ollama 本地（1024 维）----------
-  # 为什么 embedding 放本地：RAG 入库要对成百上千个切片做向量化，调用量远大于对话；
+  # ---------- embedding：Ollama 本地（1024 维）----------  # 为什么 embedding 放本地：RAG 入库要对成百上千个切片做向量化，调用量远大于对话；
   # 本地 mxbai-embed-large 已够用且零边际成本。
   # 补充事实：DeepSeek 官方不提供 embedding API，所以这一层必须换实现。
   ollama:

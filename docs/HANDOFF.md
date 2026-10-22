@@ -5,6 +5,8 @@
 >
 > **最后更新（2026-10-21）**：**阶段 14 已完成**（回合账：耗时 / 成功率 / 工具计数 / token 成本；
 > 工具审计补 `turn_id`+`user_id`；顺手补了**会话删除接口**），`362 用例全绿`。
+> **2026-10-22 更新**：阶段 15 **移出范围**、阶段 16（MCP）**已完成**（只接一个时间 server；模型已真实调用过，见 §七）；
+> `369 用例全绿`。★ **下一步 = 阶段 17（工程收尾）**。
 > 阶段 13 的成绩保留在下方：工作流 = 先拆解 → 逐步执行 → 两次重试后放弃。
 > 详细记录见 `docs/PROCEDURES.md` §13 与 §14。
 
@@ -36,12 +38,12 @@
 | **12** | **结构治理**：修守卫 → 修"现在就在错" → 收敛唯一出处 → **解包级环** | ✅ **已完成**（环 **8 → 0**；详见 `PROCEDURES` §12，下一步 = 阶段 13） |
 | **13** | 工作流模式（真实编排）：计划 → 逐步执行 → 汇总 | ✅ **已完成**（`chat` 早就跑完整工具循环；本阶段补的是显式计划 + 步对应 + 重规划，见 §七） |
 | **14** | 可观测性与**审计**（耗时 / 成功率 / 工具计数 / token 成本）+ **会话删除接口** | ✅ **已完成**（`chat_turn` 一轮一行；`Final.usage` 改为整轮累加；见 `PROCEDURES` §14） |
-| **15** | 新工具追加（工具分组 / 最小权限）+ **鉴权缺口** | ⏳ 下一步 |
-| **16** | MCP 引入（外部工具生态） | 顺延 —— **仅占位，尚未论证**（协议第 7 条三问还没答） |
-| **17** | 工程收尾（README / 演示脚本 / 限流 / 部署说明） | 顺延（本就未拍板） |
+| **15** | 新工具追加（工具分组 / 最小权限）+ **鉴权缺口** | ❌ **移出范围**（2026-10-22 拍板，不是延期；见 §七） |
+| **16** | **MCP（工具来源可插拔）**：时间 server + 客户端接入 | ✅ **已完成**（模型已真实调用 `mcp_hagent_time_getCurrentTime`；见 `PROCEDURES` §16） |
+| **17** | 工程收尾（README / 演示脚本 / 限流 / 部署说明） | ⏳ **下一步** |
 
-**当前测试状态**：`362 个用例全绿，2 skipped`（`mvnw.cmd -B -ntp clean test`；
-48 个测试类 + 1 个抽象契约类由 3 个子类继承）
+**当前测试状态**：`369 个用例全绿，2 skipped`（`mvnw.cmd -B -ntp clean test`；
+49 个测试类 + 1 个抽象契约类由 3 个子类继承 + `MCP/time-server` 自己的 3 条）
 
 **能力现状（这个项目现在能做什么）**：
 
@@ -508,6 +510,20 @@ boolean memInside = advisors.stream()
 | 70 | ★ **实时与历史共用 `SessionDtos.TurnStatsView`** | 同一行字只有一个形状 ⇒ 前端一份渲染逻辑。用两套 Map 拼键名 = 同一语义两处定义 |
 | 71 | ★ **鉴权只预留接口，不深究**（2026-10-21 拍板） | 账户登录 / 个性化属于**扩展内容**，会把这个项目的重心从"Agent 工程化"拖到"做一套账号体系"。本项目保留"身份传递链路"（`UserTokenResolver` → `UserContext` → 检索过滤 / 审计主体），真正的认证授权**不做** |
 
+### 阶段 16 新增（2026-10-22，MCP 客户端 + 时间 server 样板）
+
+| # | 决策 | 理由摘要 |
+|---|---|---|
+| 72 | ★ **MCP 只做客户端**（server starter 不进主应用） | 否则主应用自己也对外提供 MCP 服务（多一个协议端点、多一份未鉴权面），而我们要的是消费方 |
+| 73 | ★ **MCP server 是独立项目**（`MCP/time-server`） | 独立 pom / 独立构建 / 独立进程：不污染主应用 classpath、边界清晰、换语言只改一行命令 |
+| 74 | ★ **stdio**，不是 HTTP | 无端口、无未鉴权端点、不用先手动起两个服务；换 HTTP 只改 `application-mcp.yml` 两行 |
+| 75 | ★ **工具清单合并点 = `ToolRegistration`**，并关掉 starter 的 `SyncMcpToolCallbackProvider` | 保持"唯一注册入口"（阶段 9）。两个 `ToolCallbackProvider` 并存 → `AgentPipeline` 按类型注入单个 → **启动即失败** |
+| 76 | **MCP 工具名一律 `mcp_<server>_<tool>`** | 工具名由**外部进程**决定，无法假设它不叫 `retrieveKnowledge`；撞名会让本地工具被悄悄顶掉 |
+| 77 | **连不上 → 启动失败**，且加**前置检查**（jar 不存在就立刻失败） | 工具缺了不会报错，模型只会说"我没有这个能力"。实测不拦的话要等 **20 秒**，报的却是 `TimeoutException … in 'map'`（一个字没提 jar） |
+| 78 | **MCP 配置单独 `application-mcp.yml` + `mcp` profile** | 否则 369 条测试每次拉起 JVM：变慢变脆，还依赖"jar 已构建" |
+| 79 | **日志走 stderr**（server 的 `logback-spring.xml`） | stdio 用 stdout 传协议；日志混进去 = "进程活着但一个工具都看不到"，两侧都觉得自己正常 |
+| 80 | **只做时间 server；Excel server 与其余工具移出范围**（不是延期） | 形状已经证明过（"多一条 connection 即可"），第二个实例只增加维护面、不增加可讲的东西；`listKnowledgeSources` 与检索重叠，`queryChatHistory` 属鉴权范畴（决策 71） |
+
 ## 五、已撤回的设计（**红线：不要再做**）
 
 ### 前置意图提取层（intent）—— 整体删除
@@ -601,6 +617,19 @@ Get-NetTCPConnection -LocalPort 5173 -State Listen | ForEach-Object { Stop-Proce
 . "$h\tools\hagent-test.ps1"
 问 -Message "我叫张三"                 # 发一次对话
 探测 -Path '/nope'                    # 测 404/405/415（不需要 Key）
+
+# ===== 阶段 16：MCP（★ 顺序不能反：先构建 server，再起主应用）=====
+.\mvnw.cmd -B -ntp -f MCP/time-server/pom.xml package    # 构建时间 server（独立项目）
+node tools\mcp-probe.mjs                                  # ★ 直接说 JSON-RPC 验证：握手/工具列表/调用/stdout 纯净
+.\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=local,mcp"   # 主应用带 MCP 启动
+#   ↑ 启动日志里应看到：[工具] 已注册 5 个工具（本地 4 + MCP 1）… mcp_hagent_time_getCurrentTime
+#   ↑ 没构建 server 时：3 秒内失败，并直接告诉你缺哪个 jar、执行哪条构建命令
+#   ↑ 忘了带 mcp profile 时：应用照常启动，但会打一条 WARN 说"外部工具不可用"
+#   ⚠️ IDEA 打开 MCP/*.java 报 "outside of the module source root"：右键 pom.xml →
+#      Add as Maven Project（每个 clone 一次；.idea/ 不进仓库）。命令行构建不受影响。
+#   ⚠️ 不需要第二个 IDEA 窗口 / 第二个 run 配置：stdio 下 server 由主应用 fork 成子进程
+#      （日志以 "STDERR Message received" 出现在主应用控制台）。
+#      但**改了 server 代码必须先重新 package**，否则客户端跑的是旧 jar（症状：改了代码但行为没变）。
 
 # ★ 汇报第一段【本次改动文件】用它生成，不要靠回忆（协议第 2 条 + 第 6 条）
 . "$h\tools\change-list.ps1"
@@ -1199,14 +1228,20 @@ docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default
   - ★ **修正了一条旧结论**：`Final.usage` 是"最后一次调用"的量，**不能**直接当整轮成本
     （实测：一次 3 步 workflow 调了 7 次模型、只记了最后一次的 3419）。现在它是**整轮累加**
   - 欠的一条真机取证：**真 Key 下的一次成功 workflow**（`model_calls ≈ 7`、`total_tokens` 远大于 3419）
-- **阶段 15：新工具追加**（工具分组 / 最小权限）← ★ **下一步**
-  - 审计报告指出"只有 1 个工具时不做分组"的决定仍有效，第二个工具出现时才需要它
+- ❌ **阶段 15：新工具追加**（工具分组 / 最小权限）—— **2026-10-22 移出范围**（不是延期）
+  - **"按角色/模式裁剪工具清单"始终零实例** → 从头到尾没做（阶段 9 的判据一直成立）
+  - 三个候选工具：`getCurrentTime` 已由**阶段 16 的 MCP server** 交付；
+    `listKnowledgeSources` / `queryChatHistory` **移出**（理由见 `PROCEDURES` §16.7）
   - ★ **鉴权只预留接口、不深究**（决策 71）：账户体系 / 登录 / 个性化属于**扩展内容**；
-    本项目保留"身份传递链路"（`UserTokenResolver` → `UserContext` → 检索过滤 / 审计主体），
+    保留"身份传递链路"（`UserTokenResolver` → `UserContext` → 检索过滤 / 审计主体），
     真正的认证授权与"会话按用户隔离"**不做**
-- **阶段 16：MCP 引入**（外部工具生态）—— ⚠️ **仅占位，尚未论证**：
-  协议第 7 条三问（解决什么具体问题 / 产出谁消费 / 不做会怎样）都还没答。
-  它与阶段 15 强相关：MCP 会把"工具从哪来"变成**动态注册**，而那正是 `ToolRegistration` 该有的形状
+- ✅ **阶段 16：MCP（工具来源可插拔）** —— 已完成（2026-10-22）
+  - 只接**一个** server（时间）：`MCP/time-server` 是独立项目，stdio 由主应用拉起；
+    主应用侧只多了 `application-mcp.yml` + `ToolRegistration` 里的合并点（**业务代码一行没改**）
+  - 三问与九条取舍见 `PROCEDURES` §16.3；证据见 §16.6
+  - ★ **端到端已证**（本人真实运行，16:38）：`chat_tool_invocation` 里有一行
+    `tool_name = mcp_hagent_time_getCurrentTime` —— 模型真的走了 MCP 这条路
+  - **Excel server 与其余工具移出范围**：§16.7 记了"为什么砍"，不再有待办
 - **阶段 17：工程收尾（未拍板）** —— README / 演示脚本 / token 预算与限流 / 部署说明
 
 ---
@@ -1228,6 +1263,13 @@ Hagent/
 │   ├── 公司简介.md                  COMPANY_PROFILE  51 字 无标题      → 整篇一块
 │   └── 办公设备管理.txt              POLICY      678 字 无 frontmatter → 段落切
 ├── tools/hagent-test.ps1           ← UTF-8 安全测试工具（★ 必须带 BOM）
+├── tools/mcp-probe.mjs             ← ★ 阶段 16：MCP stdio 握手探针（initialize/tools/list/tools/call + stdout 纯净断言）
+├── MCP/                            ← ★ 阶段 16：MCP server 是【独立项目】（独立构建/独立进程）
+│   ├── README.md                   ← ★ 怎么构建/怎么在 IDEA 里 Add as Maven Project（否则报"源码在模块根源之外"）
+│   └── time-server/                ← ✅ 样板已完成（stdio，@McpTool getCurrentTime）
+│       ├── pom.xml                 ← 独立 pom（Spring Boot 4.1.1 + spring-ai-starter-mcp-server:2.0.1）
+│       ├── src/main/resources/logback-spring.xml   ← ★ 日志改到 stderr（stdout 是协议通道）
+│       └── target/time-server-…jar ← 客户端用 `java -jar` 拉起它（★ 必须先构建）
 ├── frontend/                       ← ★ 阶段 10 新增：Vue 3 + Vite（独立进程，:5173）
 │   ├── vite.config.js              ← port 5173 + strictPort（不让它悄悄换端口）
 │   ├── src/api.js                  ← 唯一的后端出口（fetch + SSE 解码器 + 身份头）
@@ -1247,6 +1289,8 @@ Hagent/
 │   │                 VectorStoreConfig / BusinessDataSourceConfig /
 │   │                 MemoryConfig（★ 阶段 11 从 memory 搬来）/ ToolRegistration（同上）/
 │   │                 LongTermMemoryConfig（阶段 11）/
+│   │                 ★ 阶段 16：McpServerPreflight（唯一第二个 EnvironmentPostProcessor，
+│   │                           在 Bean 创建前检查 MCP server jar 是否存在）
 │   │                 *Properties ×13（含 MemoryProperties / LongTermMemoryProperties）
 │   ├── controller/   ChatController（3 个对话端点）/
 │   │                 ConversationController（阶段 10：列表 / 历史 / 改名；★ 阶段 14 加 DELETE）/
@@ -1291,7 +1335,7 @@ Hagent/
 │   ├── chat_turn.sql               ← ★ 阶段 14：回合账（一轮一行）
 │   └── migrations/ 001-chat_tool_invocation-add-who.sql（★ 第一次表迁移）
 │                    002-chat_message-add-turn-id.sql（历史回放要按轮次找账）
-└── src/test/java/com/hagent/       ← 362 个用例，48 个测试类
+└── src/test/java/com/hagent/       ← 369 个用例，49 个测试类
                                        （另有 1 个抽象契约类 ConversationMemoryContractTest，
                                          由 3 个组合子类继承，本身不出现在报告里）
 ```
@@ -1405,6 +1449,17 @@ Hagent/
 | 48 | ★★ **失败轮在 MySQL 里零痕迹**（不是"少统计"，是"根本不存在"） | `writeBack` 只在 `finish()` 里执行；异常/断线到不了那里 | **"有一张记录对话的表"不等于"记录下了每次服务"** —— 要问的是"没成功的那次记在哪" |
 | 49 | ★★ **刷新页面后那一行统计消失了** | 数字只放在 SSE 事件里；事件是**一次性的**，页面重建时它已经过去了 | **凡是"用户要看到"的东西，都要问：刷新之后它从哪来？** 事件是通道，不是存储 —— 能重建的必须能重建 |
 
+### 阶段 16 新增（对应 `PROCEDURES.md` 的坑 50–55）
+
+| # | 现象 | 根因 | 认知 |
+|---|---|---|---|
+| 50 | ★★ 缺 server jar 时启动**等 20 秒**，报 `TimeoutException: Did not observe any item … in 'map'` | 真正的错误（`Error: Unable to access jarfile …`）在更早的一行 server stderr 里；`request-timeout` 把失败包装成了超时 | **超时是最没信息量的失败形式**：它只说"没等到"，不说"为什么"。前置检查要放在**能说清原因**的那一层 |
+| 51 | ★★ 前置检查第一版**静默什么都没查** | 绑定到 `Object` 时，`Binder` 把 `args[0]/args[1]` 绑成 **`Map{"0":…,"1":…}`** 而不是 `List`；第一版只判了 `instanceof List` | **"检查写了"≠"检查跑了"**。凡"不满足就 fail"的守卫，必须有一条**会红的用例**（本次是它自己先红，才暴露类型假设错） |
+| 52 | ★ `spring.factories` 多了一个反引号 → `ClassNotFoundException`，而**应用照常起来**（EPP 加载失败被当成警告） | 手工拼续行符写错；注册文件坏了不会让应用起不来 | **注册文件写错可能"看起来正常"**。改完必须**实跑一次"该失败时失败"**才算验证 |
+| 53 | 日志写进 stdout 会污染 JSON-RPC 帧 → "进程活着但一个工具都看不到"（本阶段**预判并规避**） | stdio 用 stdout 传协议，而 Spring Boot 默认日志走 stdout | server 的 `logback-spring.xml` 把 appender target 改成 `System.err`；探针**断言 stdout 全是 JSON** |
+| 54 | ★★ **不带 `mcp` profile 启动**：应用正常、4 个工具、回答流畅，但模型手里**没有**时间工具（实测：问"现在是什么时间"→ `工具=0 次`） | `application-mcp.yml` 只在 `mcp` profile 下加载；"少一个工具"不报错，只表现为"模型没这个能力" | **能力缺失与正常工作在观测上同形** → 装配点必须说出来（已加 WARN + 启动参数）。协议第 6 条：不要用"记得加 profile"解决第二次 |
+| 55 | ★ IDEA 报 `Java file is located outside of the module source root` | 根 pom 把整个目录当 content root，而 `MCP/time-server` 是另一个 Maven 项目 | 在 IDEA 里对它的 `pom.xml` 执行 **Add as Maven Project**（每个 clone 一次）；命令行构建不受影响 |
+
 ---
 
 ## 十、新对话的第一句话建议
@@ -1412,9 +1467,14 @@ Hagent/
 ```
 读 docs/HANDOFF.md、docs/WORKING-AGREEMENT.md、docs/架构问题.md（★ 含顶部「复核结论」）。
 
-当前状态：**阶段 14 已完成** —— 回合账（`chat_turn` 一轮一行）+ 工具审计补 `turn_id`/`user_id`
-+ `stats` SSE 帧 + **会话删除接口** + **历史回放也能看到那一行统计**；**362 用例全绿**。
-下一步是 **阶段 15（新工具 / 工具分组 / 鉴权）**。
+当前状态：**阶段 16（MCP）已完成** —— 只接一个时间 server（独立项目，stdio）；
+主应用日志里 5 个工具含 `mcp_hagent_time_getCurrentTime`，且**模型真实调用过**
+（审计表有一行 `tool_name = mcp_hagent_time_getCurrentTime`）。**369 用例全绿**。
+★ **下一步 = 阶段 17（工程收尾）**：README / 演示脚本 / 限流与预算 / 部署说明。
+
+阶段 15 与 Excel server **已移出范围**（2026-10-22 拍板，不是延期）：
+`getCurrentTime` 已由 MCP 交付；`listKnowledgeSources` / `queryChatHistory` 不做。
+鉴权只预留接口、不深究（决策 71）。
 
 阶段 14 的遗留（已登记、不阻塞）：
   · 真 Key 下的一次**成功 workflow** 取证（`model_calls ≈ 7`、`total_tokens` 应远大于 3419）
@@ -1424,13 +1484,13 @@ Hagent/
 阶段 12 的尾巴同样还挂着（`SessionDtos`→`ConversationDtos`、`IDENTIFIER` 两份、`SafePaths`、
 3 个死键、`hagent.memory.chat` 前缀是否改 `conversation`）。
 
-阶段 15 的第一件事：按协议第 1 条走五步，**等明确放行再写代码**。
+阶段 17 接手第一件事：按协议第 1 条走五步，**等明确放行再写代码**。
 
 动手前必须先拍板（问题都在那张表里，逐条给结论，不许替你决定）：
   ③ 死成员删到什么程度（clear/delete 已定：**不删**；★ 阶段 14 已让 `delete` 有了消费者）？
-  ④ **鉴权缺口**排到阶段 15 还是单列一阶段？（★ `chat_turn.user_id` 目前也是**自报**的）
   （① 步数上限**已定：迁进 `AgentLoopProperties`，chat 10 / workflow 20 立即生效**；
-    ② 守卫路线**已定：引 ArchUnit 1.5.1 + 保留源码扫描** —— 两者理由与实跑证据见 §七）
+    ② 守卫路线**已定：引 ArchUnit 1.5.1 + 保留源码扫描** —— 两者理由与实跑证据见 §七；
+    ④ 鉴权**已定：只预留接口、不深究**（决策 71））
 
 已定的前提（不要再重新论证）：
   · 这份审计是"**债务台账**"，不是"施工图"：改名类建议（MemoryMode → MemoryBudgetProfile、
