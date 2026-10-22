@@ -1,14 +1,14 @@
-# Hagent 项目交接文档
+# Hagent 项目交接文档（最终版）
 
-> **用途**：新开对话时先读本文件，即可在**不重读历史对话**的前提下继续推进。
-> 本文件是"当前状态 + 已定决策 + 全部待办 + 踩坑红线"的**唯一权威快照**。
+> **用途**：新开对话 / 新接手者先读本文件。**项目已完结（阶段 0–17）**；
+> 本文件是"最终状态 + 不可违反的约定 + 技术事实 + 踩坑索引"的快照。
+> 每个阶段的目标 / 文件 / 踩坑 / 结果的完整历史在 `docs/PROCEDURES.md`。
 >
-> **最后更新（2026-10-21）**：**阶段 14 已完成**（回合账：耗时 / 成功率 / 工具计数 / token 成本；
-> 工具审计补 `turn_id`+`user_id`；顺手补了**会话删除接口**），`362 用例全绿`。
-> **2026-10-22 更新**：阶段 15 **移出范围**、阶段 16（MCP）**已完成**（只接一个时间 server；模型已真实调用过，见 §七）；
-> `369 用例全绿`。★ **下一步 = 阶段 17（工程收尾）**。
-> 阶段 13 的成绩保留在下方：工作流 = 先拆解 → 逐步执行 → 两次重试后放弃。
-> 详细记录见 `docs/PROCEDURES.md` §13 与 §14。
+> **最后更新（2026-10-22）**：阶段 17（工程收尾）完成 —— 全仓注释精简、
+> 文档全量核对（目录 / 类名 / 计数 / 移除已移出范围的叙述）、根 README、失效静态页删除。
+> 最终验证：主应用 **369 通过 / 2 skipped** + `MCP/time-server` **3 条**；
+> 真实 Key 端到端由本人逐阶段验证通过。
+> 仓库：https://github.com/746329026/Hagent
 
 ---
 
@@ -16,58 +16,53 @@
 
 为大模型应用岗位实习准备的简历项目：**企业办公 Agent**，主张"高扩展性 + 高度工程化、模块化"。
 
-**要求的功能**：会话/工作流模式、统一异常处理、SpringAI 框架、RAG 企业知识库、
-基于 MySQL/Redis/`.md` 的存储与记忆系统、tool call 工具调用。
+**项目定位**：为大模型应用岗位实习准备的简历项目：**企业办公 Agent**，主张"高扩展性 + 高度工程化、模块化"。
 
-**当前阶段号与进度**（章节号与阶段号对齐，`docs/PROCEDURES.md` 为准）：
+**题目要求的能力**：会话/工作流模式、统一异常处理、Spring AI 框架、RAG 企业知识库、
+基于 MySQL/Redis/`.md` 的存储与记忆系统、tool call 工具调用 —— 全部已落地，另加了回合账与 MCP。
+
+**最终进度（阶段 0–17，全部收尾）**：
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 0 | 初始化项目（依赖/配置分层/启动探针/基础设施） | ✅ 已提交 |
-| 1 | 接入模型 + 最小对话（同步链路）+ 日志切面 | ✅ 已提交 |
-| 2 | 流式对话（SSE 三种实现）+ 放行判定 | ✅ 已提交 |
-| 3 | 结构化输出 —— **该层的"任务意图理解"已整体撤回** | ✅ 已提交（历史记录保留） |
-| 4 | （有意跳过：手册里的阶段 4 已在阶段 1 用 `PromptTraceAdvisor` 完成） | — |
-| 5 | 会话记忆（memory 抽象 + 切面）+ 上游失败分类 + 撤回意图层 | ✅ 已提交（`6e5600e`） |
-| **6** | **RAG 企业知识库**（入库链路 + 检索链路 + 权限过滤 + 切面拆分） | ✅ 已提交（`0338493`） |
-| **7** | **会话记忆双层重构**（MySQL 记录层 + Redis 上下文层）<br>★ 顺带修掉两个潜伏的数据源装配缺陷 | ✅ 已提交（`468413e`） |
-| **8** | **结构重构：advisor 链 → `AgentPipeline`**（直连 `ChatModel`，工具调用顺延阶段 9） | ✅ 已完成（当时 234 用例；见第 8 节） |
-| **9** | **工具调用与多步 Agent**（工具循环 + `ToolCall`/`ToolResult` 事件 + 审计表） | ✅ 已完成（当时 251 用例；见第 9 节） |
-| **10** | **前端页面 + 会话目录 + 思考落库**（Vue3 前端 / 3 个会话接口 / `@@step:` 落进 `reasoning` / 真机联调修掉 2 个 bug） | ✅ 已完成（当时 282 用例；见第 10 节） |
-| **11** | **长期记忆**（`{dir}/{userId}/MEMORY.md` + 索引常驻注入 + `saveMemory`/`readMemory`/`forgetMemory` + 包归属守卫） | ✅ 已完成（见第 11 节） |
-| **12** | **结构治理**：修守卫 → 修"现在就在错" → 收敛唯一出处 → **解包级环** | ✅ **已完成**（环 **8 → 0**；详见 `PROCEDURES` §12，下一步 = 阶段 13） |
-| **13** | 工作流模式（真实编排）：计划 → 逐步执行 → 汇总 | ✅ **已完成**（`chat` 早就跑完整工具循环；本阶段补的是显式计划 + 步对应 + 重规划，见 §七） |
-| **14** | 可观测性与**审计**（耗时 / 成功率 / 工具计数 / token 成本）+ **会话删除接口** | ✅ **已完成**（`chat_turn` 一轮一行；`Final.usage` 改为整轮累加；见 `PROCEDURES` §14） |
-| **15** | 新工具追加（工具分组 / 最小权限）+ **鉴权缺口** | ❌ **移出范围**（2026-10-22 拍板，不是延期；见 §七） |
-| **16** | **MCP（工具来源可插拔）**：时间 server + 客户端接入 | ✅ **已完成**（模型已真实调用 `mcp_hagent_time_getCurrentTime`；见 `PROCEDURES` §16） |
-| **17** | 工程收尾（README / 演示脚本 / 限流 / 部署说明） | ⏳ **下一步** |
+| 0–7 | 工程骨架 / 模型接入 / SSE / 结构化输出（意图层已撤回）/ 会话记忆 / RAG / 记忆双层重构 | ✅ 已完成 |
+| 8 | advisor 链 → `AgentPipeline`（直连 `ChatModel`） | ✅ 已完成 |
+| 9 | 工具调用与多步 Agent（工具循环 + 事件 + 审计表） | ✅ 已完成 |
+| 10 | 前端页面 + 会话目录 + 思考落库 | ✅ 已完成 |
+| 11 | 长期记忆（`.md` 索引 + 三个工具） | ✅ 已完成 |
+| 12 | 结构治理（包级环 8 → 0；唯一出处收口） | ✅ 已完成 |
+| 13 | 工作流模式（拆解 → 逐步执行 → 两次重试后放弃） | ✅ 已完成 |
+| 14 | 可观测性与审计（回合账 + 会话删除接口） | ✅ 已完成 |
+| 15 | 新工具追加（工具分组 / 最小权限） | ❌ 移出范围（`getCurrentTime` 后由 MCP 交付） |
+| 16 | MCP（工具来源可插拔，独立进程时间 server） | ✅ 已完成 |
+| 17 | 工程收尾（注释精简 / 文档全量更新 / README） | ✅ 已完成 |
 
-**当前测试状态**：`369 个用例全绿，2 skipped`（`mvnw.cmd -B -ntp clean test`；
-49 个测试类 + 1 个抽象契约类由 3 个子类继承 + `MCP/time-server` 自己的 3 条）
+**最终测试状态**：主应用 **369 通过 / 2 skipped**（50 个测试类；`mvnw.cmd -B -ntp clean test`）
++ `MCP/time-server` **3 条**。真实 Key 的端到端验证由本人逐阶段确认通过。
 
-**能力现状（这个项目现在能做什么）**：
+**最终能力清单**：
 
 | 能力 | 状态 |
 |---|---|
 | 静/流式对话（SSE，带思考过程） | ✅ |
 | RAG 检索 —— **由模型自主决定何时调工具**（不是每轮必跑） | ✅ |
 | 密级过滤（PUBLIC / INTERNAL / CONFIDENTIAL，SQL 层拦截） | ✅ |
-| 会话记忆（MySQL 权威 + Redis 缓存，双层） | ✅ |
+| 会话记忆（MySQL 记录层 + Redis 上下文层，两个角色） | ✅ |
 | 思考过程落库（`@@step:` 标记）+ 历史回放 | ✅ |
-| 会话列表 / 改名 / 全部历史（前端可用） | ✅ |
+| 会话列表 / 改名 / 删除 / 全部历史 | ✅ |
 | 长期记忆（跨会话的事实与偏好，模型自主读写） | ✅ |
 | 工作流编排（先拆解 → 逐步执行 → 汇总） | ✅ |
-| 可观测性 / 成本统计（**每轮一行**：耗时 / 首字 / 次数 / token / 结局） | ✅ 阶段 14 |
-| 会话删除（含上下文缓存清理） | ✅ 阶段 14 |
-| 鉴权（当前只有明文 token 的身份传递，**没有真正的鉴权**） | ❌ 缺口，见 §七 优先级 2 |
+| 回合账（**每轮一行**：耗时 / 首字 / 次数 / token / 结局） | ✅ |
+| MCP 工具来源可插拔（独立进程，stdio） | ✅ |
+| 鉴权（只有明文 token 的身份传递，**没有真正的认证**） | ❌ 移出范围（决策 71：只预留链路） |
 
-> ⚠️ **跑测试前必须设 `DEEPSEEK_API_KEY`**（任意非空值即可，测试不调真模型 ——
-> 启动期只做 `Assert.hasText` 校验）。本轮的跑法：
+**明确不做 / 已知限制**：完整清单与理由见 `docs/PROCEDURES.md` 的《最终范围与移出项》。
+
+> ⚠️ **跑测试前必须设 `DEEPSEEK_API_KEY`**（任意非空值即可；测试不调真模型，启动期只做 `Assert.hasText` 校验）：
 > ```powershell
 > $env:DEEPSEEK_API_KEY = "test-placeholder-never-used"
 > ```
-> **这是一个"已重复多次却没机制化"的操作性错误**（见协议第 6 条），
-> 机制待定，见第七节。
+> 真实 Key 只在端到端验证时需要，测试不需要。
 
 ---
 
@@ -454,7 +449,7 @@ boolean memInside = advisors.stream()
 
 | # | 决策 | 理由摘要 |
 |---|---|---|
-| 34 | **保留 `ChatMemoryAdapter` 与 `chatMemory` Bean（★ 不可删）**<br>⚠️ **已被阶段 8 推翻：`ChatMemoryAdapter` 已删除**（启动自检反向断言取代它，见第 8 节） | 它是框架边界的 **闸门 + 占位**：`ChatMemoryAutoConfiguration` 的两个 `@Bean` 都是 `@ConditionalOnMissingBean`，我们的 Bean 一删，框架会装 `MessageWindowChatMemory` + `InMemoryChatMemoryRepository` —— **纯内存、重启即丢、无 token 预算**。这正是 `MemoryProperties` 自己警告过的失败模式。详见 `PROCEDURES.md` 阶段 5"坑 4 的复核补充" |
+| 34 | **保留 `ChatMemoryAdapter` 与 `chatMemory` Bean（★ 不可删）**<br>⚠️ **已被阶段 8 推翻：`ChatMemoryAdapter` 已删除**（启动自检反向断言取代它，见 `PROCEDURES.md` 第 8 节） | 它是框架边界的 **闸门 + 占位**：`ChatMemoryAutoConfiguration` 的两个 `@Bean` 都是 `@ConditionalOnMissingBean`，我们的 Bean 一删，框架会装 `MessageWindowChatMemory` + `InMemoryChatMemoryRepository` —— **纯内存、重启即丢、无 token 预算**。这正是 `MemoryProperties` 自己警告过的失败模式。详见 `PROCEDURES.md` 阶段 5"坑 4 的复核补充" |
 | 35 | **"模式→预算"抽成 `MemoryBudgets` 共用值对象**（而非两处各建一份）<br>⚠️ **阶段 8 已删除这个类**（`switch` 搬进 `AgentPipeline#budgetOf`），本条只保留"为什么曾经抽它"的记录 | 原先是 `MemoryReadAdvisor` 与 `ChatMemoryAdapter` 各抄一份 `Map.of(...)`：① 手写列举**没有任何机制**保证覆盖全部模式 → 新增模式漏改会在 `budgets.get(mode).maxTokens()` 上 **NPE**；② 两处各自演化，会让同一会话在两条路径下拿到**不同预算**且不报错。现在用**穷尽 `switch` + 遍历 `MemoryMode.values()` 建表**，把 ① 变成**编译期错误** |
 | 36 | **回归防线要「植入缺陷验证过」** | `MemoryBudgetsTest#advisorAndAdapterAgreeOnTheSameBudget`（**已随阶段 8 删除**，但这条纪律留下了）不只是"跑了就过"—— 已**临时把主链路的预算改歪、确认它真的失败**，再恢复。`test passes` 不能证明防线有效，**只有"bug 在时会失败"才能** |
 
@@ -504,7 +499,7 @@ boolean memInside = advisors.stream()
 | 64 | ★ **给 `chat_tool_invocation` 补 `user_id` / `turn_id`**（本项目**第一次表迁移**） | 审计的核心是"**谁**做了什么"，而表只会变长、历史补不回来。历史行一律 `unknown`（**不伪造**）。迁移脚本：`db/migrations/001-*.sql` |
 | 65 | **`stats` 用独立 SSE 事件名，不改 `done` 的载荷** | 加事件是**纯增量**（未知事件名前端本来就忽略）；改 `done`（`[DONE]` → JSON）是**改已有契约**，两种风险量级不同 |
 | 66 | **帧里不发 `user_id` / `role`**（`ChatAppService#statsData` 只放 5 项） | 浏览器就是这个人，回显没有信息量，只是把身份写进前端状态与日志。**record 内部流转、帧里只留要显示的** |
-| 67 | **会话删除删三样（消息 / Redis 上下文 / 目录），审计与回合账保留** | 审计是"系统被调用过"的事实，不随业务删除消失。**内容先删、目录后删** —— 让失败可见（先删目录会让"数据还在库里"变成看不见的失败）。⚠️ 代价：审计的 `arguments` 含用户原话 ⇒ "删内容不删痕迹"，已登记待办 |
+| 67 | **会话删除删三样（消息 / Redis 上下文 / 目录），审计与回合账保留** | 审计是"系统被调用过"的事实，不随业务删除消失。**内容先删、目录后删** —— 让失败可见（先删目录会让"数据还在库里"变成看不见的失败）。⚠️ 代价：审计的 `arguments` 含用户原话 ⇒ "删内容不删痕迹"，**已拍板接受** |
 | 68 | **删除不走门面 `ConversationMemory#delete`**（它吞异常） | 对"写回"吞异常是对的（回复已产生，不能为写库失败丢掉它）；对"删除"就是**假删除**（接口 200 而数据还在）。所以删除直接调记录层，让异常走正常错误路径 |
 | 69 | ★ **历史上那一行统计靠 `chat_message.turn_id` 关联，不把数字抄进消息** | 抄一份就是两处定义，迟早出现"库里一行、历史另一行"且**不报错**（协议第 13 条）。关联键走 properties ⇒ **`MessageStore.append` 的接口一行没改** |
 | 70 | ★ **实时与历史共用 `SessionDtos.TurnStatsView`** | 同一行字只有一个形状 ⇒ 前端一份渲染逻辑。用两套 Map 拼键名 = 同一语义两处定义 |
@@ -523,6 +518,11 @@ boolean memInside = advisors.stream()
 | 78 | **MCP 配置单独 `application-mcp.yml` + `mcp` profile** | 否则 369 条测试每次拉起 JVM：变慢变脆，还依赖"jar 已构建" |
 | 79 | **日志走 stderr**（server 的 `logback-spring.xml`） | stdio 用 stdout 传协议；日志混进去 = "进程活着但一个工具都看不到"，两侧都觉得自己正常 |
 | 80 | **只做时间 server；Excel server 与其余工具移出范围**（不是延期） | 形状已经证明过（"多一条 connection 即可"），第二个实例只增加维护面、不增加可讲的东西；`listKnowledgeSources` 与检索重叠，`queryChatHistory` 属鉴权范畴（决策 71） |
+
+> ★ **收尾归档**：上表是决策流水账（保留"当时为什么这样选"）。
+> 其中所有"待拍板 / 后续阶段"类内容已在阶段 17 结清或移出；最终范围见 `PROCEDURES.md`《最终范围与移出项》。
+
+---
 
 ## 五、已撤回的设计（**红线：不要再做**）
 
@@ -581,7 +581,7 @@ $h = "C:\Users\Rong\Desktop\实习准备\Hagent"
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 Set-Location $h
 
-# 全量测试（322 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
+# 全量测试（369 个用例；★ 需要三个容器 + Ollama 都在跑，否则集成测试会整类报错）
 # ⚠️ 改了签名/删了类时，本地验证也必须带 clean —— 不带 clean 的 test-compile 会【假绿】（坑 43）
 .\mvnw.cmd -B -ntp clean test
 
@@ -666,707 +666,110 @@ Git 在 `D:\Git\cmd\git.exe`；Maven 本地仓库 `D:\devZgq\Java\.m2\repository
 
 ---
 
-## 七、待办（按优先级，新对话从这里开始）
+## 七、收尾归档：已完成 / 已移出 / 验证状态
 
-### ✅ 优先级 1（历史）：阶段 13 已完成（工作流真实编排）
+> 项目在阶段 17 结束。本节取代过去按优先级排列的"待办清单"——
+> 现在没有待办，只有"已经做完的"和"明确不做的"两类。详细理由见 `PROCEDURES.md`《最终范围与移出项》。
 
-**结果**：`346 用例全绿（2 skipped）`。**详细记录见 `PROCEDURES` §13**（尤其 §13.7 的机制总览与代码流程，
-接手工作流先读那一节）。这里只留三件最容易忘的事：
+### 7.1 最终验证状态（可复现）
 
-1. `workflow` 与 `chat` 共用同一个 `loop()`，**唯一分叉点**在 `run()`（`if safeMode == WORKFLOW`）；
-2. 失败处理是"**同步重试 1 次 → 重规划 1 次 → 放弃并写明第 k 步**"，**不跳过**（跳过会让"少做一件事"看起来像"做完了"）；
-3. **前端计划面板未做**：`workflow` 事件已到浏览器，前端目前忽略它 —— 纯前端工作，单列。
-
-### ✅ 优先级 1（历史）：阶段 14 已完成（可观测性 + 审计 + 会话删除）
-
-**结果**：`362 用例全绿（2 skipped）`；详细记录见 `docs/PROCEDURES.md` §14（两张 Mermaid + 坑 44–49）。
-
-**一句话**：它**不改变任何一句回答**，补的是"事后能回答四个问题"：
-花了多少 token / 为什么慢 / 成功率多少 / 上周三那次为什么失败。
-
-#### ★★ 本阶段最重要的一个发现：一条写进本文件的旧结论是错的
-
-> 旧结论（`PROCEDURES` 阶段 14 原条目）："`Final.usage` 已实测拿得到，可直接用于成本统计。"
-
-实测反例（`logs/hagent.log`，2026-10-21 16:37 那次 workflow）：3 步，日志逐行打出
-`第 1/2/3 步完成（累计模型调用 2/4/6 次）` —— 加上 1 次规划调用，这一轮**真实调用了 7 次**模型；
-而收尾那行只有 `usage=DefaultUsage{promptTokens=2729, completionTokens=690, totalTokens=3419}`
-—— 那是**最后一次调用**的量。根因：`buildFinal` 的 usage 取 `state.lastChunk`。
-
-⇒ **`Final.usage` 的语义是"最后一次模型调用"，不是"这一轮"。** 现在它已改为整轮累加
-（`TurnStats.totalUsage()`），日志里同一个字段会变大，**这是修正不是回退**。
-
-#### 实际做出来的形状
-
-| | 计划 | 实际 |
-|---|---|---|
-| 观测落点 | MySQL 一轮一行 + 前端一行 | ✅ `chat_turn`（19 列 / 3 索引）+ `stats` 事件 |
-| 成功率 | 三出口都落一行 | ✅ `SUCCESS` / `FAILED` / `CANCELLED`，判定矩阵只在 `TurnStats#decide` |
-| token | 整轮累加 + 区分"没数据" | ✅ `*_tokens` 累加 + `usage_missing_calls`（派生值，不是第三个计数器） |
-| 工具审计 | 补 `turn_id` / `user_id` | ✅ 本项目**第一次表迁移**（`db/migrations/001-*.sql`，历史行 `unknown`） |
-| 会话删除 | 阶段 10 欠着的接口 | ✅ `DELETE /chat/sessions/{id}` + 侧栏删除键（删消息/缓存/目录，审计保留） |
-| Micrometer | 考虑过 | ❌ **明确不做**（消费者不存在，且要暴露未鉴权端点） |
-
-#### 后补：刷新之后那一行统计也要在（§14.5.1）
-
-第一版把它**只**放进 SSE 的 `stats` 事件 —— 于是刷新就没了。补法的四个要点：
-
-1. **数字只有一个来源**（`chat_turn`）：写回时**不把数字抄进消息**，只抄 `turn_id`；
-2. 关联键走 properties（`hagent_turnId`）→ `chat_message.turn_id` —— **`MessageStore.append` 的接口一行没改**；
-3. 回放时 `TurnStore.find(turnIds)` **一次 IN 查询**（不是 N+1）；
-4. 实时与历史共用 `SessionDtos.TurnStatsView` —— 前端只有一份渲染逻辑。
-
-证据：另起实例（8124，**不动你正在跑的 8123**）用一条合成历史对上真实账，
-`stats` 里 `elapsedMs=2559 / firstTokenMs=1599 / totalTokens=1350` 与 `chat_turn` 那一行**逐字一致**；
-验证后合成数据已删除。
-
-#### 三条可迁移认知
-
-1. **"最后一个"不等于"总共"**（坑 44）：凡"从流里取一个值当整轮结果"的地方，
-   都要问"这次之前的那几次去哪了"。
-2. **零值对象与真值同形**（坑 45）：`EmptyUsage.getPromptTokens()` 返回 **0**（javap 实证），
-   直接累加会把"没数据"记成"0 token"。正确做法是**另记一个计数**（这里是派生值）。
-3. **"有一张记录对话的表"不等于"记录下了每次服务"**（坑 48）：失败与取消的轮次在 `chat_message` 里
-   **根本不存在**（`writeBack` 只在收尾执行）。所以"成功率"必须落在能看见三条终止通道的位置（`doFinally`）。
-
-#### 留下的诚实清单
-
-* **进程被 kill 的轮次不留痕**（一次性 INSERT 的代价；换来零 UPDATE / 零僵尸行）
-* **删会话不删痕迹**：审计的 `arguments`/`result` 含用户原话 ⇒ "删内容不删痕迹"
-  （★ 已拍板：**就这样**。真实系统里由合规保留策略决定，本项目不深究）
-* `chat_message.turn_id` 之前的**老历史没有数字**（NULL = 那时还没有回合账，不伪造）
-* 单工具耗时（框架无钩子）、Micrometer/Actuator、前端计划面板
-
-### ✅ 优先级 1（历史）：阶段 12 已完成（结构治理，包级环 8 → 0）
-
-**为什么单独立一个阶段**：`docs/架构问题.md` 是一份第三方审计（101 类 / 14,297 行）。
-它不是新功能，但它发现的问题（4 个包级环、9 个无效配置键、~20 个死成员、
-3 类"同一规则多重出处"、1 个路径穿越）**会被后续阶段放大** ——
-工作流 / 新工具 / MCP 落下来时，新代码只会照着旧形状写。所以先还债、再添功能。
-
-**这份报告的可信度（已逐条复核，别当成传话）**：主体成立、行号级引用精确；
-但有 **7 处需要修正，其中 2 处改变优先级** —— 见 `docs/架构问题.md` 顶部的「复核结论」块。
-**结论先行**：它是**债务台账**，不是**施工图**。
-
-#### 本阶段的四步（顺序不可换）
-
-| 步 | 内容 | 为什么必须这个顺序 |
-|---|---|---|
-| **0** | **装 ArchUnit**（1.5.1，`com.tngtech.archunit:archunit`）做"包级无环"与分层方向断言；**同时保留** `PackagePlacementTest` 的源码扫描做 import 级规则 | 搬包动作全被"`*Service` → `app`"这条后缀规则**物理挡住**。★ 两条守卫**必须并存**：ArchUnit 看**字节码**，而 `WebConfig → ChatController`（header 常量）因**常量内联**在字节码里**不存在**（javap 实证），ArchUnit 永远看不见它；源码扫描补这个盲区 |
-| **1** | 修 **4 条"现在就在错"**：① `file` 模式会话 ID **路径穿越** + `_catalog` 撞名 ② 扩展名白名单双出处 ③ `written()` 语义说谎 ④ 步数上限：孤儿键 `hagent.agent.max-steps` → `AgentLoopProperties`（**已拍板，形状见下**） | 零结构变化；每项都能"先写红、再修绿" |
-| **2** | 收敛**唯一出处**：密级解析 ×3 / 原子文件写 ×3 / "实现名"字典 ×3 / 模型可见文本 ×3 | 必须在搬包前做，否则同一份重复逻辑会被搬两次 |
-| **3** | 解 **1 个 4 节点强连通分量** `{app, config, memory, tool}`（ArchUnit 实测**8 条**基本环），逐一拆它上面的反馈边 | ★ **不是"删 4 条边"**：审计说的"4 个双向环"只是 4 条**两节点**环，真实结构是一个 SCC。只砍 `app⇄tool` 那一对，`app→memory→config→tool→app` **仍然成环**（ArchUnit 已列出来）。环不消灭，阶段 15/16 只能"照着旧形状抄" |
-
-**本阶段结果**：四步全部完成 —— 第 0 步 4/4（ArchUnit + `PackagePlacementTest` 双守卫；
-★ 环基线冻结机制已随环归零**删除**）、第 1 步 4/4、第 2 步 6/6、
-**第 3 步 5/5：包级环 8 → 0**。详细记录见 `docs/PROCEDURES.md` §12（12.3 / 12.6）。
-
-**已登记、刻意不混入本阶段的尾巴**：`IDENTIFIER` 正则两份、`SafePaths` 抽取、
-`FileSessionStore.write` 改原子写、`SessionDtos`→`ConversationDtos` + HTTP `/chat/conversations`、
-3 个死键（`min-tail-ratio` / `ingest.dept` / `heartbeat-interval-ms`）、
-`MemoryProperties.ignoreUnknownFields`；以及一个**待拍板**的命名问题 ——
-`hagent.memory.chat` 前缀里的 `chat` 指的是"会话记忆"，导致预算键成了
-`hagent.memory.chat.chat-max-tokens`（`chat` 出现两次），建议改成 `hagent.memory.conversation`。
-
-#### 本阶段**明确不做**（防止无限膨胀）
-
-审计的第 4 批（拆 `AgentPipeline` 5 个协作者、`memory.impl.*` 重组、`dto` 逐 record 拆文件）
-与全部**改名类**建议都不在本阶段：
-
-- `MemoryMode → MemoryBudgetProfile`：**拒绝**。`mode` 是落库值（`chat_conversation.mode`）+ HTTP 契约 +
-  前端标签，改名会造出一对**新的同义异名**（违反协议第 12/13 条）
-- `AccessLevel → security`：**拒绝**。它是文档域词汇；搬过去会让 `document` 从"零依赖叶包"
-  变成依赖 `security`（与审计自己 §2.1-⑧ 的表扬相反）
-- `clear` / `delete` / `evict`：**不删**。审计把它们算"死成员"（确无生产调用者），但
-  `HANDOFF` 的诚实清单里"会话删除接口"是明确欠着的功能 —— 删掉端口方法等于删掉下一个落点
-
-#### 待拍板（未定就动手 = 违反协议第 1 条）
-
-| # | 问题 | AI 倾向 |
-|---|---|---|
-| ① | ~~`hagent.agent.max-steps: 20` 删键还是迁~~ | ✅ **已拍板：迁 + 按模式两档**（`AgentLoopProperties`，chat 10 / workflow 20 **现在就生效**）—— 形状见下 |
-| ② | ~~守卫升级走哪条路~~ | ✅ **已拍板：B（引 ArchUnit）** —— 细节见下 |
-| ③ | 死成员删到什么程度（8 个死错误码 / 4 个死方法 / `chunkTotal` / `RetrievedChunk.level`）？ | 先删**纯删除、零行为变化**那批；`RetrievedChunk.level` 是复核时**新发现**的零读者字段，随第 2 步定 |
-| ④ | **鉴权缺失**（"我的会话"其实就是"所有会话"）排到哪个阶段？ | 并入**阶段 15（新工具 / 权限分组）**，或单独立一阶段 —— 需要你定 |
-
-#### ① 已拍板：`AgentLoopProperties`（**按模式两档**，不是全局一个值）
-
-**这条前提由本人给出，纠正了一个原本的设计误解**：10 / 20 不是"一个上限的两个候选值"，
-而是 **chat 与 workflow 各自的单轮执行上限**，目的是**防烧 token**。原来那个
-`hagent.agent.max-steps: 20` 是**写对了数值、写错了位置（没有模式维度）、也没人读**。
-
-```yaml
-hagent:
-  agent:
-    chat-max-steps: 10        # 取代现在生效的 hagent.memory.chat.max-steps: 10
-    workflow-max-steps: 20    # 认领原来那个孤儿 20
+```text
+.\mvnw.cmd -B -ntp clean test                       → Tests run: 369, Failures: 0, Errors: 0, Skipped: 2
+.\mvnw.cmd -B -ntp -f MCP/time-server/pom.xml test  → Tests run: 3,   Failures: 0, Errors: 0
+cd frontend; npm run build                          → 构建通过
 ```
 
-形状与 `MemoryProperties` 的预算**同构**（两个字段 + `AgentPipeline` 里一个**穷尽 switch**）：
+- 2 条 skipped 是需要环境开关（`LIVE_PROBE_FLAG`）的真实探针，不是失败。
+- 真实 Key 的端到端验证由本人逐阶段确认：对话 / RAG+密级 / 工具 / 长期记忆 / 工作流 / 回合账 / MCP 工具调用均有效。
+- `MCP/time-server` 的端到端证据：审计表出现 `tool_name = mcp_hagent_time_getCurrentTime`（见 `PROCEDURES` §16.6）。
 
-```java
-private int maxStepsOf(MemoryMode mode) {   // 刻意不写 default：新增模式会编译失败
-    return switch (mode) {
-        case CONVERSATION -> agentLoopProperties.getChatMaxSteps();
-        case WORKFLOW     -> agentLoopProperties.getWorkflowMaxSteps();
-    };
-}
-```
+### 7.2 各事项的最终结论
 
-- **为什么不并进已有的 `TokenBudget`**（协议第 13 条要求先找复用）：`TokenBudget` 的消费者是
-  `MemoryTrimmer`（裁历史），塞一个 `maxSteps` 进去会让 trimmer 拿到一个**它永不读的字段**（坑 #12）。
-  两者是不同轴：**历史有多长** vs **循环跑几轮**
-- ★ **已知副作用（本人已确认接受）**：前端 `Composer.vue:85` 现在就允许选"工作流"，
-  所以选它的会话，最坏情况模型调用 **10 → 20**。因此阶段 12 的口径是
-  "**除 workflow 步数外**零行为变化"，不是"零行为变化"
-
-#### ② 已拍板的技术底座（已实跑验证，不是"应该能行"）
-
-| 项 | 事实 | 怎么验的 |
-|---|---|---|
-| 制品 | **`com.tngtech.archunit:archunit:1.5.1`**（只依赖 `slf4j-api`） | 从阿里云镜像 `dependency:get` 拉到本地仓库；读它的 POM，`<dependencies>` 只有一条 |
-| ★ **不要** `archunit-junit5` | 本项目 JUnit 是 **6.0.3**，那个制品会拽 `junit-platform` 5.x 进来 | 本地仓库里 `junit-jupiter` 有 5.12.2 / 6.0.3 两个版本，混用是自找的 |
-| 能读我们的字节码 | `ClassFileImporter().importPackages("com.hagent")` 正常导入，Java 21 类文件无告警 | 写了个一次性的 `tmp/archprobe/Probe.java` 跑通（`java exit=0`） |
-| 能报出环 | `slices().matching("com.hagent.(*)..").should().beFreeOfCycles()` → **8 条环**（全落在 `{app, config, memory, tool}` 这个 SCC 内） | 同上；环清单见 `docs/架构问题.md` 复核结论第 7 条 |
-
-★ **结论性的一条**：ArchUnit **不能单独用** —— `config → controller` 那条边在字节码里被**常量内联**抹掉了（`javap` 实证），
-它永远看不见。所以守卫是 **ArchUnit（字节码）+ 现有源码扫描（import）** 并存，
-后者继续管"谁 import 了 controller"这类源码级规则。
-
-### ✅ 优先级 1（历史）：阶段 11 已完成（长期记忆 `.md` + 索引）
-
-**结果**：`310 用例全绿（2 skipped）`；详细记录见 `docs/PROCEDURES.md` 第 11 节（两张 Mermaid + 坑 43）。
-
-#### 拍板结果（本次讨论定下的五条，别再重新论证）
-
-| # | 问题 | 结论 |
-|---|---|---|
-| 1 | 谁能写记忆 | **只有模型通过工具**（与"检索由模型决定"同源） |
-| 2 | 怎么读 | **索引常驻注入 system** + 明细按需 `readMemory` |
-| 3 | 归属 | **`{dir}/{userId}/`**（记忆是"关于这个人的事实"，共享会串号） |
-| 4 | 索引上限 | **1000 字**；超限**拒绝写**（不静默淘汰旧条目） |
-| 5 | 工具数量 | **3 个**：`saveMemory`（**upsert**）/ `readMemory` / `forgetMemory`。**不加 `updateMemory`** |
-
-#### 实际做出来的形状
-
-```
-{dir}/{userId}/
-  MEMORY.md                       索引（物化产物，每次写后重生成，供人看）
-  mem-{sha256(title)前8位}.md      一条记忆（frontmatter + 正文，正文 ≤2000 字）
-```
-
-| 决策 | 理由 |
+| 事项 | 最终结论 |
 |---|---|
-| 文件名 = 标题哈希 | 标题来自模型 ⇒ 直接当文件名就是目录穿越入口。用前 8 位十六进制后，**不是被校验挡住，而是根本构造不出来**；顺带让 upsert 天然成立 |
-| 密级存 **`AccessLevel`** | **复用**（协议第 13 条）：写入取 `user.clearance()`，注入前 `entry.level().visibleTo(当前密级)` —— 与检索同一个枚举、同一条规则 |
-| 不加 `updateMemory` | upsert 就是更新；`forget+save` 是两步非原子操作（中间失败 = 丢记忆），而 `save` 是单步幂等 |
-| 记忆工具与检索开关**解耦** | 关掉检索不该顺带让人失忆 |
-| `MEMORY.md` 是物化产物 | 真相是那些 `mem-*.md`；索引每次重生成 ⇒ **不可能与条目漂移** |
+| 阶段 0–14 | ✅ 全部完成；关键认知见 `PROCEDURES` 各节的"踩坑"与"阶段结果" |
+| 阶段 15（新工具 / 工具分组） | ❌ 移出范围：唯一需要权限的工具已在 SQL 层过滤；`getCurrentTime` 由 MCP 交付 |
+| 阶段 16（MCP） | ✅ 完成：客户端 + 独立时间 server + 模型真实调用 |
+| 阶段 17（工程收尾） | ✅ 完成：注释精简 / 文档全量核对 / README / 失效页删除 |
+| 阶段 14 欠的"真 Key workflow 取证" | ✅ 已由本人验证有效 |
+| 阶段 13 欠的"前端计划面板" | ❌ 最终不做（纯前端呈现，不改后端能力） |
+| 阶段 12 的命名尾巴 | ❌ 最终不做（纯重构 / 契约变更，收尾期风险 > 收益） |
+| 鉴权缺口 | ❌ 移出范围（决策 71：只预留身份传递链路） |
 
-#### 本阶段换来的可迁移认知
+### 7.3 明确不做（一句话版；完整表见 PROCEDURES）
 
-1. **"配了没人读"要主动查**：`hagent.memory.long-term.dir` 从阶段 5 就写在 yml 里，
-   而没有任何 Java 字段绑定它 —— 改了它以为换目录了，其实什么都没发生（坑 #12 的又一个实例）。
-   本阶段绑定并加了启动校验。
-2. **降级要发生在能说出原因的那一层**（沿用阶段 10 的判据）：记忆读失败 → WARN + 本轮不注入，
-   而不是让请求失败，也不是静默空。
-3. **`test-compile` 不带 `clean` 会假绿**（坑 43）：改了构造器签名，增量编译**不重编依赖方**，
-   于是"BUILD SUCCESS"而测试根本编译不过。
+- 鉴权 / 账号体系；限流与 token 配额；部署说明 / docker-compose；演示脚本
+- 阶段 15 工具分组、Excel MCP server、`listKnowledgeSources`、`queryChatHistory`
+- 知识入库的运行时入口（保持"测试调用 + 显式 DDL"）
+- 前端工作流计划面板；死配置键处置；两条机制化（API key / 异常兜底）
+- 死依赖清理 —— **刻意保留**：POI / MyBatis-Plus / Markdown & PDF reader 是扩展铺垫，
+  已在 `pom.xml` 注释写明各自落点
+- 阶段 12 尾巴（`IDENTIFIER` 两份 / `SafePaths` / `SessionDtos` 改名 / HTTP 路径 / 配置前缀 / `ignoreUnknownFields`）
+- Micrometer / Actuator / 单工具耗时
 
-#### 留下的诚实清单
+### 7.4 已知限制（诚实清单）
 
-`updateMemory` / 记忆向量检索 / 自动过期 / 跨用户共享 / 冲突消解 / 记忆管理页 —— 理由见 `PROCEDURES.md` 11.7。
+- **身份自报**：`X-Hagent-Token: <userId>:<ROLE>` 明文可伪造，检索越权防护只证明链路正确。
+- **删会话不删痕迹**：审计 `arguments`/`result` 含用户原话（已拍板接受）。
+- **进程被 kill 的轮次不留账**（一次性 INSERT 的代价，换零 UPDATE / 零僵尸行）。
+- **`chat_message.turn_id` 之前的历史没有回合数字**（NULL，不伪造）。
+- **单工具耗时**拿不到（框架 `executeToolCalls` 整批执行）。
+- **embedding 中文区分度弱**：阈值只能粗筛，兜底靠提示词；换模型必须重新校准。
+- **知识入库无运行时入口**；PDF / DOCX 不支持（`SourceLoader` 只认 `.md` / `.txt`）。
+- **单实例**：无 Micrometer / Actuator；多实例与限流不在范围。
 
-★ 另一笔**本轮付清又添新账**：配置类放错包（踩坑 #40）已挪正并由 `PackagePlacementTest` 守住；
-随后把 3 个**历史例外**也一并归位（`MemoryProperties` / `MemoryConfig` → `config`，
-`ToolRegistration` → `config`），现在是**零例外**。
+### 7.5 没有"下一步"
 
-#### ✅ 那条验证已经跑通（2026-10-19，真实 Key）
-
-**新会话（历史=0）问"我是谁" → 答"你是李四（管理员）"**。
-链条：`长期记忆索引 140 字` 注入 system → 模型调 `readMemory` → 答对。
-它同时就是 `STAGE5-VERIFICATION.md` 第 2.4 步欠的那条 —— **两条一起结清**。
-证据见 `docs/STAGE5-VERIFICATION.md` 末尾「验证记录」（含库里的回答原文）。
-
----
-
-### ✅ 优先级 1（历史）：阶段 10 已完成（前端页面 + 会话目录 + 思考落库）
-
-**结果**：`279 用例全绿（2 skipped）` + 真实 HTTP 联调取证；
-详细记录见 `docs/PROCEDURES.md` 第 10 节（含两张 Mermaid 图 + 坑 38/39/40）。
-
-#### 实际做出来的形状
-
-| | 计划 | 实际 |
-|---|---|---|
-| 会话列表 | 新表 `chat_conversation` | ✅ 一会话一行（标题 / 模式 / 时间），**懒创建**（第一句话时） |
-| 标题 | 取第一句消息 | ✅ 用户可 `PATCH` 改名；**改名后再说话不会被覆盖回去** |
-| 历史回放 | "返回该会话全部历史" | ✅ `GET /chat/sessions/{id}/messages`（含思考分段） |
-| 思考落库 | 加一列 | ✅ `chat_message.reasoning MEDIUMTEXT` + `@@step:N` 标记（**文本，不是 JSON/子表**） |
-| 步边界 | 前端要"第 N 步" | ✅ 后端发 `step` 事件（`StepStarted`）—— 只发步号，其余由已有事件推导 |
-| 工具调用可视化 | 悬浮窄框 | ✅ 前端 `TaskPanel`（DSH 风格），一个 step 下挂 N 个工具 |
-| 模式 | `ChatRequest.mode` | ✅ 真实生效**并落库**；首次创建后不再由请求改变 |
-| CORS | 加 5173 | ✅ 加了 `localhost` 与 `127.0.0.1` 两个（浏览器视为不同源） |
-| 工具参数进历史 | 待拍板 | ★ 用户选 **A：不进**（历史里只有"第 N 步 · 工具名"） |
-
-#### ★★ 本阶段最重要的一个发现：SSE 的 `data:` 行放不下裸换行（坑 38）
-
-这条**一直存在**（阶段 8 起），只是没人认真看排版。字节码证据：
-`SseEmitter$SseEventBuilderImpl.data(...)` 只做 `append("data:") + append(数据)`，**不转义换行**。
-于是 token 里的 `\n` 会把帧切断、把段落空行吃掉 —— 表现为"markdown 排版偶发错乱"。
-
-**修法**：所有**文本**载荷包成 JSON（`{"text":"…"}` / `{"message":"…"}`），
-换行被转义，序列化结果永远只有一行。⇒ **这是本阶段唯一一处 SSE 契约变更**（前端同步改）。
-
-#### 两条被"验证为假警报"的排查记录（省下后来者的时间）
-
-1. **中文落库变问号**：用 `Invoke-WebRequest -Body '…中文…'` 发出去，库里查到 `3F3F…`。
-   改用**按码点构造 + UTF-8 字节**后 `HEX(title)` 是 `E5B9B4E58187E694BFE7AD96`（正确的"年假政策"）。
-   ⇒ **服务端没问题，是测试命令里的中文在到达 HTTP 之前就被替换了**。
-   判据：中文落库异常时先 `HEX()` 看字节 + 检查"发出去的那一侧"。
-2. **`Get-Content` 显示 `鏉窞…`**（老坑）：文件是好的，是控制台编码问题 —— 用 `-Encoding utf8` 或 `read` 工具。
-
-#### ★★ 真机联调修掉的两个 bug（联调才有，mock 永远测不到）
-
-| bug | 根因 | 认知 |
-|---|---|---|
-| **问年假/差旅，检索全返回"未找到"，而库里就是有** | 检索**跑在 Reactor 的 Netty 事件循环线程上**（`reactor-http-nio-*`）。工具里的阻塞调用（Ollama embedding 的 RestClient 底要 `Mono.block()`）被 Reactor 直接拒绝：`block() ... not supported in thread reactor-http-nio-4` → 异常被吞 → 空列表 → "没命中" | **整条管道允许阻塞，所以整条管道都不该在事件循环上跑。** 修法：`loop()` 里 `concatWith(handleToolCalls)` **之前**加 `publishOn(boundedElastic)`（加在外层无效 —— publishOn 只管它下游）。★ 同一根因还压着 `writeBack`/`recordAudit` 两个 JDBC 调用：它们不报错，只**静默堵事件循环** |
-| **每次都被答"知识库中未找到相关内容"** | `retrieve` 失败时 `return List.of()` → 与"没命中"**同形** → 工具回"没找到" → 模型照说 | **降级要发生在"能说出原因"的那一层。** 在只看得到 `List` 的层里降级，原因永久丢失。修法：失败**抛** `RetrievalUnavailableException`，工具接住后返回"检索不可用（系统故障，**不是**没有资料）"。★ 顺带修掉阶段 9.7 留的账：工具自己知道失败 → 不必从文本猜 |
-
-**为什么 282 个用例都没抓到**：所有假模型都是 `Flux.just(...)`，元素在**调用线程**上发出；
-真机上元素来自 Netty 线程。**bug 正好长在 mock 边界之外**（§十 第 5 条）。
-⇒ 已机制化：新用例用 `publishOn(Schedulers.parallel())` 假装"元素来自非阻塞线程"，
-假工具在**工具外**断言 `Schedulers.isInNonBlockingThread() == false`（工具内抛异常会被框架翻成文本 → 假绿）。
-**先红（跑在 `parallel-1`）后绿**都验证过。
-
-**顺带澄清**：执行轨迹里"一步两个 retrieveKnowledge"**不是重复渲染** ——
-日志里两条 query 不同，是模型在同一步发了两个并行工具调用（自己做查询改写）。
-已改为显示 `「query」` 以便区分；代价是双倍 embedding/向量查询，**决定接受**（召回更好）。
-
-
-
-#### 三条可迁移认知
-
-1. **自由文本不能直接塞进协议字段**（坑 38）：先问"这文本能含换行吗"，能就必须编码。
-   让对端"聪明地拼回续行"是有损的 —— `\n\n` 的第二个换行已经被协议吃掉，拼不回来。
-2. **"数据在响应式容器里"≠"我手里的引用是响应式的"**（坑 39）：
-   裸对象塞进 `reactive` 数组后，改裸对象不触发更新 —— 表现为"流式时界面完全不动"。
-3. **`affected rows = 0` 有两种含义**（坑 40）：`UPDATE` 在"值没变"时也返回 0。
-   拿它判断"记录不存在"，用户原样提交改名就会收到 404。
-
-#### 本阶段建立的机制
-
-- **`ReasoningTrace` 是标记格式的唯一出处**（`render` 写 / `parse` 读），并有一个**往返恒等**测试守着 ——
-  两侧不对称的症状是"历史里的思考错位或消失"，**不报错**。
-- **`MemoryMode.wireName()` / `fromWire()`** 把"枚举名 vs 线上名"的翻译收在一处：
-  将来把 `CONVERSATION` 改名成 `CHAT` 时，请求体、响应体、数据库**一个字都不用动**。
-
-#### 留下的诚实清单（本阶段没做）
-
-会话删除接口 / 历史回放的工具参数与结果 / 工具成功失败标识 / 单次工具耗时 /
-会话按用户隔离（无鉴权）/ 工作流的真实编排（阶段 13）/ 会话列表分页 —— 理由逐条见 `PROCEDURES.md` 10.10。
+项目按计划在此结束：**不存在待办列表**。若将来继续，边界与扩展落点已在
+`PROCEDURES`《最终范围与移出项》与各阶段的"诚实清单"里，那是新项目的事，不是本项目的遗留任务。
 
 ---
 
-### ✅ 优先级 1（历史）：阶段 9 已完成（工具调用与多步 Agent）
+## 八、目录结构（最终）
 
-**结果**：`251 用例全绿`；详细记录见 `docs/PROCEDURES.md` 第 9 节（含两张 Mermaid 图 + 坑 35/36/37）。
+> 与 `PROCEDURES.md` 的目录树一致；以实际文件为准。
+> 只到"包 → 关键类"这一层；每个包的设计理由见对应类的类注释与 PROCEDURES 各阶段记录。
 
-#### ★★ 本阶段最重要的一个认知转变
-
-**RAG 从"每轮无条件检索"变成"模型决定要不要查"。**
-
-| | 阶段 8 及之前 | 阶段 9 之后 |
-|---|---|---|
-| 检索何时发生 | 每次请求**必跑**（管线第③步） | 模型调 `retrieveKnowledge` 工具时才跑 |
-| 谁决定 | 代码 | **模型** |
-| 问"今天几号" | 白烧一次 embedding + 向量查询 | 不检索 |
-| 无关片段 | 被塞进 system，**干扰模型** | 不进 system |
-
-⇒ 这才是 agent 与"固定 RAG 流程"的实质差别。`retrieval.enabled=false` 现在表示
-"**检索这个能力整体拔掉**"（模型看不到该工具）—— 检索成了一个**可插拔的插件**。
-
-#### 实际做出来的形状
-
-| | 计划 | 实际 |
-|---|---|---|
-| 循环驱动 | `AgentPipeline` 自己驱动 | ✅ 一致（框架 `ToolCallingAdvisor` 早已不参与） |
-| 工具注册 | `com.hagent.tool` + 反射注册 | ✅ `MethodToolCallbackProvider`（**不引第三方包**）+ `ToolRegistration` 唯一入口 |
-| 工具数量 | 4 个 | ★ **只做 1 个**（`retrieveKnowledge`）—— 工具数量不是目标，先打通链路 |
-| 事件 | 加 `ToolCall` / `ToolResult` | ✅ 另加：`Retrieved` 改由工具发出（结构化出处，不经过文本解析） |
-| 审计 | 独立表 | ✅ `chat_tool_invocation`（显式 DDL + 启动自检） |
-| 工具分组 | 9.4 要做 | ★ **刻意不做** —— 只有 1 个工具且权限已在 SQL 层；等第二个实例出现再做 |
-| 工具消息进记忆 | 讨论中曾倾向"进" | ★ **不进**（只存问+答）。理由：循环内必然可见（已实测），跨轮信息已在最终答里 |
-
-#### 三条本阶段换来的可迁移认知
-
-1. **`then()` 会丢弃上游所有事件**（坑 35）—— 前端只收到 `Final`，日志全绿。
-   抓它的是"事件数量必须等于 3"的断言。判据：**需要上游元素就用 `concatWith`，只要完成才用 `then`**。
-2. **"我能构造出一个集合"≠"容器里有那个类型的 Bean"**（坑 36）——
-   改依赖类型时要同时问"谁来提供它"。
-3. **改"数据怎么到达模型"时，必须同步检查提示词里对数据的引用是否仍成立**（坑 37）——
-   两者分开维护，编译器不会帮你。
-
-#### 留下的诚实清单（本阶段没做）
-
-工具分组 / 中断续跑 / 其余 3 个工具 / `ToolResult.error` 字段 —— 理由逐条见 `PROCEDURES.md` 9.8。
-
----
-
-### ✅ 优先级 1（历史）：阶段 8 已完成（advisor 链 → `AgentPipeline`）
-
-**结果**：`234 用例全绿`；详细记录见 `docs/PROCEDURES.md` 第 8 节（含两张 Mermaid 图 + 坑 32/33/34）。
-
-#### 实际做出来的形状（与原计划的差异）
-
-| | 原计划 | 实际 |
-|---|---|---|
-| 契约名 | `AgentEvent` / `AgentOutput` | ★ **`PipelineEvent`** —— 因为你指出 "agent = harness + model"，**不该有"agent 模式"**，模型产出叫 `ModelOutput` 而非 `AgentOutput` |
-| 事件种类 | `Retrieved` / `Token` / `Final` | ★ **4 种**：`Retrieved` ⊥ `ModelOutput`{`Reasoning`/`Token`/`Final`} —— 因为要展示**思考过程**，而 `reasoningContent` 是**独立字段**（不在 `getText()` 里） |
-| `/chat` 响应体 | 只有 `reply` | ★ **加 `reasoning`** —— 否则刷新页面后思考永久丢失（记忆只存"问+最终答"） |
-| `ChatMemoryAdapter` | 删 + 启动自检 | ★ **第一版方案是错的**：框架 `ChatMemoryAutoConfiguration` **没有 enabled 开关**，删了必然补位 → 自检永远通不过（65 个集成测试全红）。正解是 `@SpringBootApplication(exclude=...)` + 自检**反向确认** |
-| `MemoryBudgets` | 保留（选项 A） | ★ **删除** —— 你指出"它只是声明，唯一消费者是 trimmer"；框架边界消失后它只剩一个调用点，映射挪进 `AgentPipeline#budgetOf`（穷尽 switch，编译期保证保留） |
-| `PromptLogFormat` | 列在"删除" | **保留**并换包（原清单自相矛盾：它有两个消费者） |
-| `AdvisorProperties` | 列在"删除" | ★ **改名 `TraceProperties`**（原清单写错：它装的是日志开关） |
-| 测试用例 | 删 4 个 | ★ **删 12 个**（原清单少算；其中 3 个是"问题被结构性消灭"而失去意义） |
-| 新增测试 | `AgentPipelineTest` | 另加 **`PromptBuilderTest`**（14 条由 `PromptAssemblyAdvisorTest` 迁移）+ **`ChatBudgetTest`**（由 `MemoryBudgetsTest` 重建，改为与**期望值**比较） |
-
-#### 三条本阶段换来的可迁移认知
-
-1. **"删掉一个占位 Bean"不是删除，是把占位权交给框架** —— 删之前必须确认"没有它会怎样"，
-   **并确认那个后果能被拦住**。我漏掉的正是后半句（自检上线前没先问"框架到底会不会装它"）。
-2. **框架的"可关闭性"要读字节码/元数据确认**：`@ConditionalOnMissingBean` 是"让位"语义，**不是开关**。
-3. **配置层的字符串生效与否不会报错** —— 我把 `spring.autoconfigure.exclude` 缩进插错层级
-   （落进 `spring.ai:` 之内），且 `spring.ai:` 出现两次导致**后者覆盖前者**（`model.chat=deepseek` 被盖掉），
-   而报错只说"自检失败"，**一个字都没提 yml 写错了** ⇒ **能用编译期的就用编译期**。
-
-#### 阶段 9 的第一件事（已写进 §七）
-
-★ **读参考实现 `.toolcall()` 的真实签名**（协议第 3 条：不凭记忆写）。
-
-#### ★★★ 阶段 8 动手前的全量复核（已做完，**上面那份清单已被本节的修正取代**）
-
-复发指令：本人要求"重新读 `src` 下所有代码，没问题就动手，有问题再讨论"。
-复核方式：**我逐行读** + **4 个只读子代理独立复核全部 5 个包**（未修改任何文件）。
-结论：**有问题，原清单低估约 3 倍**。以下为修正后的账目。
-
-##### 一、阻塞性问题（改设计 / 改工作量量级）
-
-| # | 问题 | 修正后的做法 |
-|---|---|---|
-| 1 | ★ `MemoryBudgetsTest#advisorAndAdapterAgreeOnTheSameBudget` 的**回归防线失效** —— 它比较的正是 `ChatMemoryAdapter` 与 `MemoryReadAdvisor`，**两个都要删**。类注释 28–43 行把"两条路径"写成该类存在的理由 | 断言搬进 `AgentPipelineTest`，比较对象从"另一条路径"换成**期望值**（`MemoryBudgets.forMode(mode)`） |
-| 2 | ★ `PromptAssemblyAdvisorTest` 的 17 个用例**不能"复用"** —— 全部建立在 `ChatClientRequest` + `DefaultAroundAdvisorChain` 上（第 87–97 行是统一装配辅助）。**外壳全部重写**，其中 **2 条应直接删除**（"context 类型不符告警"= 被方法参数编译期保证取代；"getOrder()"= 无 order），1 条保留语义，**14 条迁移** | 量级修正：不是"断言基本可复用"，而是**重写外壳 + 删 2 条** |
-
-★ 深层影响：`MemoryBudgets` 的"两处共用"理由**随框架边界一起消失**。但仍应保留 ——
-理由换成**它真正保住的那条性质**：`budgetOf` 是穷尽 `switch` → **新增 `MemoryMode` 会编译失败**。
-理由一换，类注释 / `MemoryProperties` 引用 / 测试注释都要改。
-
-##### 二、我原清单里的 4 处错误（已更正）
-
-1. ★ **`PromptLogFormat` 被自相矛盾地列进"删除"**，而 pipeline 日志要复用它 —— 它**保留**，
-   但从 `advisor/` 换包（它是**包私有** `final class`，换包必须改可见性）；
-2. ★ **`AdvisorProperties` 不能删**（原文写错）—— 它装的是日志开关与截断长度，**改名** `TraceProperties` + `hagent.trace` 继续用；
-3. ★ **`AiConfig` 是整篇重写**，不是"删几个 Bean"：第 22–194 行几乎全在讲 ChatClient / 切面链 / 顺序约束。
-   真正值得保留的只有 **86–93 行**那段"两个 starter 会各建一个 `ChatModel` Bean"（讲的是 `ChatModel`，**要搬家**）；
-4. ★ **测试数少算 5 个**：待删 12（不是 4），待改写 1。
-
-##### 三、悬空引用清单（协议第 12 条规则 1）：**19 个文件**
-
-```
-main(13)  ConversationMemory(26,45,46)  MemoryBudgets(12,13,46-51)  MemoryMode(11,12,67,94,98)
-          MemoryConfig(28,140)  MemoryConfigValidator(18-27 整段论证)  KnowledgeSearch(21,22,35,49)
-          UserContext(11,22,27-40)  UserContextInterceptor(28,42-43)  LayeredConversationMemory(16,24)
-          WebConfig(97,116)  RagConfig(14,33,64)  StreamProperties(11)  AiConfig(整篇)
-          ChatAppService(90,141,142,152)
-config(2) RetrievalProperties(53)  application.yml(156)      ← ★ 配置文件的注释最隐蔽
-既有陈旧(3) MemoryTrimmer(13,17)  MessageCodec(16,20)  ChunkingStrategy(12)   ← "三个实现"是阶段 5 旧措辞
-已修(1)   PromptProperties（javadoc 写着"放在 prompt 包"，而那个包不存在）✅
-```
-
-##### 四、会**编译失败**的文件（只有这些）
-
-`config/AiConfig`（29 处）；`test/memory/MemoryBudgetsTest`；`test/advisor/` 三个测试类。
-★ **其余悬空引用全部只在注释/javadoc 里** —— 因为 `pom.xml` **没有 `maven-javadoc-plugin`、没有 `-Xdoclint`**，
-所以 `mvn compile/test/package` **全部通过**，只有 IDEA 会标红、`mvn javadoc:javadoc` 会失败。
-⇒ **"编译通过"不能用来检查"注释有没有撒谎"，必须靠清单逐条改。**
-
-##### 五、复核新发现的 3 条技术事实（都改变了设计）
-
-| # | 事实 | 对设计的影响 |
-|---|---|---|
-| 1 | ★★ `new Prompt(messages)` **会自动带上配置的 options**（`DeepSeekChatModel.buildRequestPrompt` 字节码：`if (prompt.getOptions() == null) → prompt.mutate().chatOptions(this.getOptions())`；而 `Prompt(List)` 把 options 置 null）。**显式传 options 反而覆盖配置** | 原"⓪ 先写探针验证 options 保持"这一步**取消**（已用字节码解决，省一次真实调用）。pipeline 必须写 `new Prompt(messages)`，**不传 options** |
-| 2 | ★★ `SseSupport` 的三条 true 分支**在生产路径上从未被执行**：Spring 7.0.9 里 `ResponseBodyEmitterReturnValueHandler` 与 `ReactiveTypeHandler` **完全不引用 `ResponseBodyAdvice`**（javap 核实），SSE 端点根本不进 `beforeBodyWrite` | `SseSupport` **保留不动**，但**保留理由要换**：不是"修 bug"，而是"**防框架路由变化 + 防未来误用**"。★ 分支 3（`text/event-stream`）恰恰是唯一能兜住前两种失效的一条。另记一条**待澄清项**：若 `beforeBodyWrite` 从不经过 SSE 路径，则踩坑 #9 的症状**不可能由统一响应包装造成**（真实原因就是它自己写的"`SseEmitter` 不认识 `ServerSentEvent`"）—— 记为待澄清，**不擅自改写历史** |
-| 3 | ★ `LayeredConversationMemory.append` **返回 void 且 `catch (Exception)` 吞掉一切**（记录层写失败**只打 ERROR、不抛异常**）；`load` **永不返回 null、永不抛异常**（失败降级 `List.of()`） | pipeline **不可能**从返回值判断写回成败 ⇒ `Final` 事件**不得**带"写回成功与否"之类字段（那是编造）。写回成败的唯一可观测渠道是**日志**（与决策 40 一致） |
-
-##### 六、本次复核**新增的 3 个待拍板项**
-
-| # | 问题 | 建议 |
-|---|---|---|
-| 1 | `MemoryBudgets` 处置 | **A 保留类 + 重写注释与测试**（理由换成"穷尽 switch 保证新增模式编译失败"） |
-| 2 | `RagConfig.ragAnswerPromptResource` Bean 存废（它**唯一消费者**是 `AiConfig`，将消失） | **保留**，消费者换成 `PromptBuilder`（保住"启动期校验资源存在"） |
-| 3 | `MemoryConfigValidator` 的定位 | **保留**，但注释里"`chatClient` 依赖它"必须改成"`AgentPipeline` 依赖它"（否则第 18–27 行整段论证指向不存在的装配链） |
-
-##### 七、`StartupProbe` **零必改**（复核确认）
-
-它早已是 `chatModel.call(new Prompt("ping"))` —— **不传 options、不依赖 `ChatClient`、不碰 context**。
-⇒ **阶段 8 要迁往的那条裸 `ChatModel` 路径，启动探针已经跑了很久**，这是对上面事实 1 的独立佐证。
-
-##### 八、前端契约的一条已知限制（留给前端阶段）
-
-`RetrievedChunk` 是 record、**无 null 校验**，且 `AccessLevel` / `RelevanceBand` 会被 Jackson 按
-**枚举 name**（`HIGH`/`MEDIUM`/`LOW`）序列化，而 `RelevanceBand.displayName()` 的中文"高/中/低"
-**不是属性** ⇒ 前端要显示中文档位得自己映射。**本阶段不加 `displayName` 字段**
-（协议第 7 条：还没有消费者时不加）。
-
-#### ★ 顺带：阶段 7 的 4 项人工验收**还没跑**（不阻塞阶段 8，但别丢）
-
-应用已能启动（启动日志 5 行全中）。4 项**核心**（用 `tools/hagent-test.ps1` 发请求）：
-
-| # | 怎么跑 | 判定 |
-|---|---|---|
-| 1 | 同会话先"我叫张三，在一家做企业服务的公司上班"，再问"我叫什么？" | 第二轮答出**「张三」**，日志里 `注入历史` 从 0 变 2 |
-| 2 | **停掉应用 → 清 Redis（`FLUSHDB`）→ 重启 → 用同一个 `cid` 再问** | 仍答得出 → 证明 **MySQL 是权威** |
-| 3 | **不重启**，只 `DEL hagent:chat:memory:<cid>`，再问 | 仍答得出，且该 key 被**回填** → 证明上下文层**可重建** |
-| 4 | `查MySQL "SELECT id, role, LEFT(content,30) FROM chat_message ORDER BY id DESC LIMIT 10"` | 每轮都在、中文完好；再发一条含 `😀𠮷` 的，`HEX` 里应出现 `F09F9880`/`F0A0AEB7` |
-
-> ★ 查库用 `tools/sql.ps1` 的 `查MySQL`（**不要手写 `docker exec ... -e "SQL"`** —— 引号会被 PowerShell 吃掉，
-> 见 §六 6.3 第 3 条）。
-
----
-
-#### 附：阶段 7 的提交内容（**留档**，已于 `468413e` 提交）
-
-内容如下：
-
-- **新增（10）**：`LayeredConversationMemory` / `FailureCircuit` / `LayerStatus` /
-  `record/ConversationRecordStore` / `record/MysqlConversationRecordStore` /
-  `context/ConversationContextCache` / `context/NoOpContextCache` /
-  `config/BusinessDataSourceConfig` / `config/BusinessDataSourceProperties` /
-  `resources/db/chat_message.sql`
-- **改造（2，含改名）**：`file/FileConversationMemory` → `record/FileConversationRecordStore`；
-  `redis/RedisConversationMemory` → `context/RedisConversationContextCache`
-- **修改（10）**：`MemoryProperties`（两个开关 + 熔断秒数）/ `MemoryConfig`（装配两层 + 修陈旧注释）/
-  `MemoryConfigValidator`（两个开关 + 旧键报错）/ `ConversationMemory`（javadoc 改成两层语义）/
-  `application.yml` / `HealthAppService` / `HealthController` / `VectorStoreConfig`（★ 加 `@Qualifier`）/
-  `DocumentIngestService`（★ 加 `@Qualifier`）/ 3 个集成测试（★ 加 `@Qualifier`）
-- **删除（3）**：`InMemoryConversationMemory`（死代码）、`FileConversationMemory`、`RedisConversationMemory`
-  —— 以及随之空掉的 `memory/file/`、`memory/redis/` 两个包
-- **测试**：**+50 用例（189 → 239）**；契约测试抽象类 + 3 个组合子类 + 装配断言 + 校验器测试
-- **文档**：`PROCEDURES.md`（阶段 7 开头两张图 + 坑 12–15 + 阶段结果 + 验证证据）/
-  `HANDOFF.md`（决策 1、2、3 修订 + 决策 37–50 + 坑 28–31）
-  / 新增 `docs/STAGE7-VERIFICATION.md` —— ★ 该文档随后按**协议第 5 条**删除（不再为每阶段写验收清单文档），
-  内容已压缩进本节上面的「阶段 7 的 4 项人工验收」
-
-★ **注意**：`chat_message` 的表结构在本轮**中途改过一次**（删掉了 `seq` 列）。
-如果之前已经建过表（**表结构在本轮中途改过一次，删掉了 `seq` 列**），需要重建 —— 表为空、无数据损失：
-
-```powershell
-docker cp src\main\resources\db\chat_message.sql hagent-mysql:/tmp/chat_message.sql
-docker exec hagent-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --default-character-set=utf8mb4 -uroot hagent < /tmp/chat_message.sql'
-```
-
-若报 `table already exists` 说明表已存在（**刻意的**：没写 `IF NOT EXISTS`，因为它查不出"表在但结构不对"）——
-先 `DROP TABLE chat_message;` 再执行上面第二条。
-
-- 合计工作树 **41 项变更**（`git status --porcelain`：16 新增 / 21 修改 / 4 删除；
-  注：未跟踪的目录各算 1 项）
-
-### ★ 优先级 2：剩下的待拍板事项（**新对话必须问**）
-
-| # | 问题 | 背景 | AI 倾向 |
-|---|---|---|---|
-| 1 | ~~**`UserContext` 的传递方式**~~ ✅ **阶段 8 已解决**（pipeline 无 context，身份是方法参数） | 曾经：拦截器 → request attribute → Controller 的 `@RequestAttribute` → **方法参数** → app 层放进 context（切面从 context 读）。四段里前两段是编译期检查，**最后一段仍是字符串 key** | ✅ 阶段 8 删掉切面链后，"最后一段字符串 key"随之消失 |
-| 2 | **`PromptFragment` 这个类没有建** | 计划里有它，但它是 `RetrievedChunk` 的纯透传（没有第二个使用者）→ 按协议第 7 条不建，片段格式化当时放在 `PromptAssemblyAdvisor#renderFragments`（现为 `PromptBuilder`） | 不建。若将来出现第二种片段来源（例如长期记忆注记），那时再抽 |
-| 3 | **默认 system prompt 现在是"约束文件"** | `AiConfig` 旧注释说 system 留到"工具就位后用 `ToolCapabilityAdvisor` 校验"—— 那个切面已撤回。现在 system 由 `PromptBuilder` 从 `prompts/rag-answer-prompt.md` 拼出（角色 + 5 条约束 + 可选的长期记忆索引） | 保持。若要加"通用办公助手"人格描述，改那个 `.md` 即可 |
-| 4 | ~~**方式一/二的记忆语义**~~ ★ **已解决**（两个对照端点已在阶段 8 删除，现在只有 `/stream-sse`） | `/stream` 与 `/stream-flux` 是"流式机制对照实验"，**不传 `conversationId`** → 落到兜底会话 `"default"`，与"所有没传会话 ID 的调用"共享历史。**这是原实现就有的行为，本轮只是把它写进了注释**（此前"读代码看不出来"） | 建议**给这两条路径传一个请求内唯一 ID**，让它们不落进共享会话。但那会改变对照实验的行为，**等本人定** |
-| 5 | **非法凭证要不要 401 语义的错误码？** | 当前用 `INVALID_PARAM(40001)` → HTTP 400。语义上"凭证无效"更接近 **401 Unauthorized**，但 `ErrorCode` 的 4xxxx 段只有参数/协议类错误，**新增 401 = 契约变更** | 保持 400。理由：400 已足以让调用方知道"该改凭证、别重试"；要不要加 401 是契约问题，不是技术问题 |
-| 6 | **★ 把"异常必须有着落"机制化（协议第 6 条）** | 踩坑 #10（协议级异常被报成 500）的教训是"按类补分支"，但**没机制化** → 本轮换个异常类型又踩一次（177 用例全绿但非法 token 报 500） | 二选一：<br>(a) 写一个测试，**扫描所有自定义异常类**，断言每个都在 `GlobalExceptionHandler` 里有分支或明确归入兜底；<br>(b) 在 `GlobalExceptionHandler` 的 `Exception.class` 兜底分支里**打一条 WARN 带上异常类名**（让它"报出缺口"—— 该类的注释里其实已经写了这个原则） |
-
-> ★ 第 6 条是**唯一一条"已经重复两次"的**（协议第 6 条明确要求机制化）。
-> 建议优先做它 —— 它防的是"下一类异常又被报成 500"。
-
-### 优先级 3：新增一份 PUBLIC 示例文档（本轮未做）
-
-计划加 `knowledge/企业文化与价值观.md`（约 300 字，`level: PUBLIC`，整篇 1 块）——
-用于验证"匿名只能看到 PUBLIC"与"相关度分档的区分度"。
-**⚠️ 文件名可能被当成"让用户编辑真实内容的模板"** → 用 `example-` 前缀规避。
-
-### ✅ 优先级 4：两条欠着的验证 —— **2026-10-19 已补完**
-
-| # | 缺什么 | 结果 |
-|---|---|---|
-| 1 | `STAGE5-VERIFICATION.md` 第 2.4 步："下一轮能否答出名字" | ✅ **成立**，而且是更强的形式：**全新会话（历史=0）**问"我是谁" → 索引注入 → 模型 readMemory → 答"你是李四（管理员）" |
-| 2 | "模型是否真的依据检索片段作答" | ✅ **成立**：答"出差怎么报销"时引用了《员工手册 第四章 差旅与报销》，并给出片段里的"一线城市 600 元/晚" |
-
-> 完整证据（日志片段 + 库里的回答原文）见 `docs/STAGE5-VERIFICATION.md` 末尾的「验证记录」。
-> ★ 顺带纠正一条旧结论：**流式路径的 token 用量是拿得到的**
-> （实测 `usage=DefaultUsage{promptTokens=2591, completionTokens=446, totalTokens=3037}`），
-> 阶段 14 可直接用 `Final.usage`。
-
-### 优先级 5：机制化 `DEEPSEEK_API_KEY`（协议第 6 条）
-
-**同一个操作性错误已重复 ≥2 次**：跑测试/启动时忘设 `DEEPSEEK_API_KEY`，
-报错是 `DeepSeek API key must be set`（Bean 装配失败，堆栈很长，容易被误读成别的问题）。
-**机制化候选**（需本人选）：
-- (a) 在 `pom.xml` 的 surefire 配置里给测试 JVM 注入一个**假 key**（非空即可）——
-  好处：测试永远能跑；风险：极低（任何真调模型的测试会 401 失败，不会静默通过）
-- (b) 加一个 `tools/run-tests.ps1`（带 BOM），内部设好环境变量再调 `mvnw`
-- (c) 在 `docs` 里写清楚（**这不算机制化**，协议第 6 条明确反对）
-
-### 后续阶段（`docs/PROCEDURES.md` 的「待推进」，编号以此处为准）
-
-- ✅ **阶段 9：工具调用与多步 Agent** —— 已完成（工具循环 + 事件 + 审计表）
-- ✅ **阶段 10：前端页面 + 会话目录 + 思考落库** —— 已完成
-- ✅ **阶段 11：长期记忆（`.md` + 索引）** —— 已完成
-- ✅ **阶段 12：结构治理** —— 已完成（包级环 **8 → 0**；双守卫 + 唯一出处 6 项 +
-  4 条"现在就在错"；细节见 `PROCEDURES` §12 与本节「优先级 1（历史）：阶段 12」）
-- ✅ **阶段 13：工作流模式（真实编排）** —— 已完成（计划可见、逐步执行、两次重试后放弃；
-  细节见 `PROCEDURES` §13，**接手先读 §13.7「机制总览与代码流程」**）。★ **前端计划面板未做**：`workflow` 事件已发到浏览器，
-  前端目前忽略它 —— 这是纯前端工作，单列
-- ✅ **阶段 14：可观测性与审计** —— 已完成（`chat_turn` 一轮一行 + 工具审计补 `turn_id`/`user_id`
-  + `stats` SSE 帧 + **会话删除接口**；细节见 `PROCEDURES` §14）
-  - ★ **修正了一条旧结论**：`Final.usage` 是"最后一次调用"的量，**不能**直接当整轮成本
-    （实测：一次 3 步 workflow 调了 7 次模型、只记了最后一次的 3419）。现在它是**整轮累加**
-  - 欠的一条真机取证：**真 Key 下的一次成功 workflow**（`model_calls ≈ 7`、`total_tokens` 远大于 3419）
-- ❌ **阶段 15：新工具追加**（工具分组 / 最小权限）—— **2026-10-22 移出范围**（不是延期）
-  - **"按角色/模式裁剪工具清单"始终零实例** → 从头到尾没做（阶段 9 的判据一直成立）
-  - 三个候选工具：`getCurrentTime` 已由**阶段 16 的 MCP server** 交付；
-    `listKnowledgeSources` / `queryChatHistory` **移出**（理由见 `PROCEDURES` §16.7）
-  - ★ **鉴权只预留接口、不深究**（决策 71）：账户体系 / 登录 / 个性化属于**扩展内容**；
-    保留"身份传递链路"（`UserTokenResolver` → `UserContext` → 检索过滤 / 审计主体），
-    真正的认证授权与"会话按用户隔离"**不做**
-- ✅ **阶段 16：MCP（工具来源可插拔）** —— 已完成（2026-10-22）
-  - 只接**一个** server（时间）：`MCP/time-server` 是独立项目，stdio 由主应用拉起；
-    主应用侧只多了 `application-mcp.yml` + `ToolRegistration` 里的合并点（**业务代码一行没改**）
-  - 三问与九条取舍见 `PROCEDURES` §16.3；证据见 §16.6
-  - ★ **端到端已证**（本人真实运行，16:38）：`chat_tool_invocation` 里有一行
-    `tool_name = mcp_hagent_time_getCurrentTime` —— 模型真的走了 MCP 这条路
-  - **Excel server 与其余工具移出范围**：§16.7 记了"为什么砍"，不再有待办
-- **阶段 17：工程收尾（未拍板）** —— README / 演示脚本 / token 预算与限流 / 部署说明
-
----
-
-## 八、目录结构（当前关键部分）
-
-```
+```text
 Hagent/
-├── docs/
-│   ├── WORKING-AGREEMENT.md        ← 13 条协作协议（最重要）
-│   ├── PROCEDURES.md               ← 按阶段的完整记录（~150 KB，含数据流向图与踩坑）
-│   ├── STAGE5-VERIFICATION.md      ← 阶段 5 验收清单（第 2.4 步未跑）
-│   ├── KNOWLEDGE-SAMPLE-DATA.md    ← 示例数据的说明与 frontmatter 规则
-│   ├── 架构问题.md                 ← ★ 第三方架构审计（阶段 12 的输入台账；顶部有复核结论）
-│   └── HANDOFF.md                  ← 本文件
-├── knowledge/                      ← 4 份示例知识文档（进版本库）
-│   ├── 员工手册.md                  POLICY      964 字  4 个 ## 标题  → 按标题切
-│   ├── 公司介绍.md                  COMPANY_PROFILE 717 字 无标题      → 超长降级
-│   ├── 公司简介.md                  COMPANY_PROFILE  51 字 无标题      → 整篇一块
-│   └── 办公设备管理.txt              POLICY      678 字 无 frontmatter → 段落切
-├── tools/hagent-test.ps1           ← UTF-8 安全测试工具（★ 必须带 BOM）
-├── tools/mcp-probe.mjs             ← ★ 阶段 16：MCP stdio 握手探针（initialize/tools/list/tools/call + stdout 纯净断言）
-├── MCP/                            ← ★ 阶段 16：MCP server 是【独立项目】（独立构建/独立进程）
-│   ├── README.md                   ← ★ 怎么构建/怎么在 IDEA 里 Add as Maven Project（否则报"源码在模块根源之外"）
-│   └── time-server/                ← ✅ 样板已完成（stdio，@McpTool getCurrentTime）
-│       ├── pom.xml                 ← 独立 pom（Spring Boot 4.1.1 + spring-ai-starter-mcp-server:2.0.1）
-│       ├── src/main/resources/logback-spring.xml   ← ★ 日志改到 stderr（stdout 是协议通道）
-│       └── target/time-server-…jar ← 客户端用 `java -jar` 拉起它（★ 必须先构建）
-├── frontend/                       ← ★ 阶段 10 新增：Vue 3 + Vite（独立进程，:5173）
-│   ├── vite.config.js              ← port 5173 + strictPort（不让它悄悄换端口）
-│   ├── src/api.js                  ← 唯一的后端出口（fetch + SSE 解码器 + 身份头）
-│   ├── src/App.vue                 ← 状态都在这里（一条事件流喂三个视图）
-│   ├── src/style.css               ← 全部样式（白底 + 两种强调色：chat 蓝 / workflow 紫）
-│   └── src/components/             ← AppSidebar / TaskPanel（执行轨迹）/
-│                                     ThinkingBlock（思考区）/ MessageBubble /
-│                                     Composer / MarkdownText（marked + DOMPurify）
-├── src/main/java/com/hagent/
-│   ├── HagentApplication.java     ← ★ 含 exclude = ChatMemoryAutoConfiguration（阶段 8）
-│   ├── common/       BaseResponse / ErrorCode / GlobalResponseBodyAdvice /
-│   │                 Texts（按码点截断的唯一实现，阶段 11 抽出复用）
-│   ├── exception/    AgentException / GlobalExceptionHandler / FailureMapper / FailureMapping /
-│   │                 RetrievalUnavailableException（★ 阶段 10 联调："查不了" ≠ "没查到"）
-│   ├── config/       ★ 所有配置/装配类都在这儿（由 PackagePlacementTest 守着）：
-│   │                 AiConfig（阶段 8 起几乎空）/ WebConfig / RagConfig /
-│   │                 VectorStoreConfig / BusinessDataSourceConfig /
-│   │                 MemoryConfig（★ 阶段 11 从 memory 搬来）/ ToolRegistration（同上）/
-│   │                 LongTermMemoryConfig（阶段 11）/
-│   │                 ★ 阶段 16：McpServerPreflight（唯一第二个 EnvironmentPostProcessor，
-│   │                           在 Bean 创建前检查 MCP server jar 是否存在）
-│   │                 *Properties ×13（含 MemoryProperties / LongTermMemoryProperties）
-│   ├── controller/   ChatController（3 个对话端点）/
-│   │                 ConversationController（阶段 10：列表 / 历史 / 改名；★ 阶段 14 加 DELETE）/
-│   │                 HealthController
-│   ├── dto/          ChatRequest（+mode）/ ChatResponse（含 reasoning）/
-│   │                 SessionDtos（★ 阶段 10：四个嵌套 record 组成一套契约）
-│   ├── security/     Role / UserContext / UserTokenResolver / UserContextInterceptor
-│   ├── retrieval/    检索侧领域：RetrievedChunk / RelevanceBand / RetrievalFilterBuilder
-│   ├── memory/       ConversationMemory 门面 + LayeredConversationMemory（组合两层）│   │                 ├── record/   记录层（权威·完整）：ConversationRecordStore + Mysql/File 实现
-│   │                 └── context/  上下文层（有损·可重建）：ConversationContextCache + Redis/NoOp 实现
-│   │                 共用：MemoryTrimmer / MessageCodec / TokenBudget /
-│   │                       FailureCircuit / LayerStatus / MemoryConfigValidator（唯一例外）
-│   │                 ★ 阶段 8 删除：ChatMemoryAdapter、MemoryBudgets
-│   │                 ★ 阶段 10 新增：session/（会话目录 ConversationRepository +
-│   │                                Mysql/File 实现，与记录层共用同一开关）
-│   │                               ReasoningTrace（思考标记格式的唯一出处，写读两侧）
-│   │                 ★ 阶段 11 新增：longterm/（长期记忆）
-│   │                               LongTermMemoryStore + FileLongTermMemoryStore
-│   │                               MemoryEntry（配置类在 config/）
-│   ├── document/     入库领域模型（AccessLevel / DocumentKind / DocumentMetadata /
-│   │                 SourceLoader / HashingSupport / IngestOutcome 等 9 个）
-│   ├── document/chunking/  TextChunker + 三策略 + ChunkingSupport + ChunkingDispatch
-│   ├── app/          ★ AgentPipeline（唯一编排者）/ PromptBuilder（唯一拼装者）/
-│   │                 PipelineEvent（sealed 契约，阶段 10 新增 StepStarted）/
-│   │                 PromptLogFormat / ChatAppService（两条入口）/
-│   │                 ConversationService（★ 阶段 10 列表/历史/改名；★ 阶段 14 删除）/
-│   │                 KnowledgeSearch /
-│   │                 DocumentIngestService / BatchIngestReport
-│   │                 ★ 阶段 8 删除：整个 advisor/ 包（8 个类）
-│   ├── stream/       StreamEventType（STEP / REASONING / TOOL_CALL / TOOL_RESULT /
-│   │                 RETRIEVED / MESSAGE / DONE / ERROR / ★ STATS）/ SseSupport
-│   ├── tool/         ToolRegistration（唯一装配点）/ KnowledgeRetrievalTool /
-│   │                 ★ 阶段 11：LongTermMemoryTools（save/read/forget）/
-│   │                 ToolContextSupport（身份键与"缺身份→匿名"的唯一出处）/
-│   │                 audit/（ToolInvocationStore + Mysql 实现；★ 阶段 14 起带 turn_id/user_id）
-│   └── observability/ StartupProbe（含框架 ChatMemory 启动自检）
-│                     ★ 阶段 14：TurnStatus / TurnRecord / TurnStore / TurnStats /
-│                                MysqlTurnStore（回合账：一轮一行 + 启动自检）
-├── src/main/resources/prompts/rag-answer-prompt.md   ← 5 条回答约束（缺失即启动失败）
-├── src/main/resources/db/          ← ★ 四张表的显式 DDL（唯一出处，应用不自动建表）
-│   ├── chat_message.sql / chat_conversation.sql / chat_tool_invocation.sql
-│   ├── chat_turn.sql               ← ★ 阶段 14：回合账（一轮一行）
-│   └── migrations/ 001-chat_tool_invocation-add-who.sql（★ 第一次表迁移）
-│                    002-chat_message-add-turn-id.sql（历史回放要按轮次找账）
-└── src/test/java/com/hagent/       ← 369 个用例，49 个测试类
-                                       （另有 1 个抽象契约类 ConversationMemoryContractTest，
-                                         由 3 个组合子类继承，本身不出现在报告里）
+├── README.md                       ← 项目入口：能力 / 架构 / 快速开始 / 边界
+├── docs/                           ← WORKING-AGREEMENT / PROCEDURES / HANDOFF /
+│                                     KNOWLEDGE-SAMPLE-DATA / 架构问题
+├── knowledge/                      ← 4 份示例知识文档（虚构数据，进版本库）
+├── frontend/                       ← Vue3 + Vite（:5173）
+├── tools/                          ← sql.ps1 / hagent-test.ps1 / change-list.ps1 /
+│                                     rename-check.ps1 / mcp-probe.mjs
+├── MCP/time-server/                ← 独立 MCP server（stdio；独立 pom / 独立进程）
+└── src/
+    ├── main/java/com/hagent/
+    │   ├── HagentApplication.java
+    │   ├── agent/        PipelineEvent（sealed 契约）/ ToolEventSink
+    │   ├── app/          AgentPipeline（唯一编排者）/ PromptBuilder / ChatAppService /
+    │   │                 ConversationService / HealthAppService / DocumentIngestService
+    │   ├── config/       全部配置与装配（*Properties + *Config + ToolRegistration + 启动期校验器）
+    │   ├── controller/   ChatController / ConversationController / HealthController
+    │   ├── common/       BaseResponse / ErrorCode / 全局响应包装 / AtomicWrites / Fingerprints / Texts
+    │   ├── dto/          ChatRequest / ChatResponse / SessionDtos
+    │   ├── document/     入库领域模型 + chunking/（三策略 + 调度）
+    │   ├── exception/    AgentException / GlobalExceptionHandler / FailureMapper
+    │   ├── memory/       门面 + record / context / catalog / longterm + 共用工具
+    │   ├── observability/ StartupProbe + 回合账（Turn*）
+    │   ├── prompt/       PromptFragments / WorkflowPlanPrompt
+    │   ├── retrieval/    KnowledgeSearch / RetrievedChunk / RelevanceBand / RetrievalFilterBuilder
+    │   ├── security/     Role / UserContext / UserTokenResolver / UserContextInterceptor
+    │   ├── stream/       StreamEventType / SseSupport
+    │   ├── tool/         KnowledgeRetrievalTool / LongTermMemoryTools / ToolContextSupport / audit/
+    │   └── workflow/     WorkflowPlan / PlanStep / WorkflowPlanParser / InvalidPlanException
+    ├── main/resources/   application.yml / application-local.yml.example / application-mcp.yml /
+    │                     db/*.sql（显式 DDL + migrations/）/ prompts/*.md / META-INF/spring.factories
+    └── test/java/com/hagent/   50 个测试类（369 用例）+ 抽象契约类 + 测试辅助
 ```
-
-> ★ **包归属的判据（本轮踩坑 #25 换来，下笔前先问）**：
-> 本项目同时有两套组织规则 ——
-> **按技术角色**（`*Service`→`app`、`*Properties`→`config`、`*Advisor`→`advisor`、
-> `*Controller`→`controller`）与**按能力域**（值对象/枚举/能力内部 `@Component` →`document`/`memory`/`retrieval`/`security`）。
-> **类的种类有既定归属时，跟种类走；没有时才跟能力域走。**
-> 核实手段：`Get-ChildItem -Recurse -Filter '*Service.java'` 看它们都在哪个包。
->
-> ★★ **阶段 11 补：这条规则现在有测试守着了**（踩坑 #25 之后<b>又犯了一次</b>，协议第 6 条 → 机制化）：
-> **配置类（`*Properties` 与任何 `@Configuration`）一律住 `com.hagent.config`**，
-> 由 `PackagePlacementTest` 强制（`src/test/java/com/hagent/config/`）。
-> 放错包会直接测试失败，报错里写明该放哪 —— 不用再靠谁记得。
->
-> | 规则 | 现状 |
-> |---|---|
-> | `*Properties` → `config` | **13/13，零例外** |
-> | `@Configuration` → `config` | **8/8，零例外**（`MemoryConfig`、`ToolRegistration` 已于阶段 11 末尾归位） |
-> | `*Controller` → `controller` | 3/3 |
-> | `*Service` → `app` | 6/6 |
-> | `*Tool` / `*Tools` → `tool` | 2/2 |
->
-> **零例外**是刻意保持的：有过白名单就会有"再加一个也没什么"的下一次。
-> 唯一还在原处的是 `MemoryConfigValidator`（全项目唯一的 `EnvironmentPostProcessor`，
-> 由 `spring.factories` 按**全限定名**注册，没有既定归属包）—— 它不在上面五条规则里。
 
 ---
 
 ## 九、踩坑速查（每条都可迁移）
+
+> 本表是**历史索引**（按阶段分组）：每条结论都可迁移；具体代码形态以 `PROCEDURES.md` 为准。
 
 | # | 现象 | 根因 | 认知 |
 |---|---|---|---|
@@ -1462,88 +865,56 @@ Hagent/
 
 ---
 
-## 十、新对话的第一句话建议
+## 十、项目完结后的接手与讲解建议
 
-```
-读 docs/HANDOFF.md、docs/WORKING-AGREEMENT.md、docs/架构问题.md（★ 含顶部「复核结论」）。
+### 10.1 新对话的第一句话（让 AI 快速接手）
 
-当前状态：**阶段 16（MCP）已完成** —— 只接一个时间 server（独立项目，stdio）；
-主应用日志里 5 个工具含 `mcp_hagent_time_getCurrentTime`，且**模型真实调用过**
-（审计表有一行 `tool_name = mcp_hagent_time_getCurrentTime`）。**369 用例全绿**。
-★ **下一步 = 阶段 17（工程收尾）**：README / 演示脚本 / 限流与预算 / 部署说明。
+```text
+读 docs/HANDOFF.md、docs/PROCEDURES.md、docs/WORKING-AGREEMENT.md、docs/架构问题.md（含顶部复核结论）。
 
-阶段 15 与 Excel server **已移出范围**（2026-10-22 拍板，不是延期）：
-`getCurrentTime` 已由 MCP 交付；`listKnowledgeSources` / `queryChatHistory` 不做。
-鉴权只预留接口、不深究（决策 71）。
-
-阶段 14 的遗留（已登记、不阻塞）：
-  · 真 Key 下的一次**成功 workflow** 取证（`model_calls ≈ 7`、`total_tokens` 应远大于 3419）
-  · 删会话**不删痕迹**（审计的 arguments 含用户原话）
-
-阶段 13 的遗留（已登记、不阻塞）：**前端计划面板未做**（`workflow` 事件已到浏览器，前端忽略它）；
-阶段 12 的尾巴同样还挂着（`SessionDtos`→`ConversationDtos`、`IDENTIFIER` 两份、`SafePaths`、
-3 个死键、`hagent.memory.chat` 前缀是否改 `conversation`）。
-
-阶段 17 接手第一件事：按协议第 1 条走五步，**等明确放行再写代码**。
-
-动手前必须先拍板（问题都在那张表里，逐条给结论，不许替你决定）：
-  ③ 死成员删到什么程度（clear/delete 已定：**不删**；★ 阶段 14 已让 `delete` 有了消费者）？
-  （① 步数上限**已定：迁进 `AgentLoopProperties`，chat 10 / workflow 20 立即生效**；
-    ② 守卫路线**已定：引 ArchUnit 1.5.1 + 保留源码扫描** —— 两者理由与实跑证据见 §七；
-    ④ 鉴权**已定：只预留接口、不深究**（决策 71））
-
-已定的前提（不要再重新论证）：
-  · 这份审计是"**债务台账**"，不是"施工图"：改名类建议（MemoryMode → MemoryBudgetProfile、
-    AccessLevel → security）与第 4 批拆分**已明确拒绝**，理由写在 §七
-  · 模式只有 chat / workflow；已落库（chat_conversation.mode），**首次确定后不再由请求改变**
-  · 思考**永不上送模型**（存 AssistantMessage.properties，不是 reasoningContent —— 后者会被框架回填进请求）
-  · 前端只有**一条** SSE 连接；文本载荷是 JSON（`{"text":"…"}`），因为 `data:` 行放不下裸换行（坑 38）
-  · 工具状态只到"已返回" —— 没有成功/失败信号，**不画绿勾**
-  · **阻塞调用一律在 boundedElastic 上**（`AgentPipeline.loop()` 里的 `publishOn`，坑 35）；
-    新增工具时不用管线程，但**别在别处再加一条绕过它的链**
-  · 长期记忆：索引常驻注入（≤1000 字）+ 明细按需；三个工具 `saveMemory`(upsert)/`readMemory`/`forgetMemory`；
-    密级**复用 `AccessLevel`**
-  · ★ **`Final.usage` 是整轮合计**（阶段 14 改的；此前是"最后一片"）。成本统计只认 `chat_turn`
-  · ★ 回合账**只有一个落账点**（`AgentPipeline.run` 的 `doFinally`）；`status` 判定矩阵只在 `TurnStats#decide`
-  · ★ 表结构变更走 `db/migrations/`（本项目第一次表迁移是 `001-chat_tool_invocation-add-who.sql`）
+状态：项目已完结（阶段 0–17）。369 用例 + MCP 3 条全绿；真实 Key 端到端由本人验证通过。
+最终范围与明确不做项见 PROCEDURES 的《最终范围与移出项》。
+不要再把"限流 / 部署 / 演示脚本 / 入库入口 / 前端计划面板 / 鉴权"当成待办 —— 它们已明确不做。
 ```
 
-### ★ 阶段 13（工作流）的拍板点：**原文留档**（顺延 ≠ 作废）
+### 10.2 简历 / 面试讲解顺序（一页纸）
 
-这四个问题 **全部已有结论**（2026-10-21，阶段 13 已完成；落地口径见 `PROCEDURES` §13.1）：
+1. **一句话**：企业办公 Agent，Spring AI 直连 `ChatModel`，自己实现编排（`AgentPipeline`），
+   把 RAG、记忆、工具、工作流、可观测性都做成可解释的模块。
+2. **架构图**：`controller → AgentPipeline → 工具 / 检索 / 记忆 → 四个存储`（见 PROCEDURES）。
+3. **三个最值得讲的决策**（每个都能说出"不做会怎样"）：
+   - RAG **工具化**：由模型决定何时检索，而不是每轮必跑；
+   - 记忆**两个角色**：MySQL 记录层（权威）+ Redis 上下文层（可重建），不是一个东西两种存法；
+   - 回合账**一轮一行 + 三出口**：成功率的分母必须包含失败与取消。
+4. **两个可迁移的踩坑**：`then()` 丢弃上游事件（坑 35）；
+   阻塞调用跑在 Reactor 事件循环上（坑 41，真机才暴露）。
+5. **边界**：身份自报、删除不删痕迹、单实例 —— 主动说清，比被追问好。
 
-1. ~~"工作流"到底做什么？~~ ✅ **先拆解、再逐步执行**（"边做边决定"本来就存在于两种模式，不构成区别）
-2. ~~拆解结果要不要让用户看见并确认？~~ ✅ **可见但不停下**（`workflow` 事件推计划；不做挂起/恢复）
-3. ~~失败/偏离计划时怎么办？~~ ✅ **两次重试就放弃**：同步重试 1 次 → 重规划 1 次 → 停下并写明第 k 步失败
-4. ~~步数预算用哪个（chat 10 / workflow 10，要不要分开）~~ ✅ **已拍板：分开** ——
-   chat **10** / workflow **20**，随阶段 12 一起落成 `hagent.agent.chat-max-steps` / `workflow-max-steps`。
+### 10.3 最容易被问到的 5 个问题
 
-> ★ 当初第 4 问与阶段 12 的待拍板 ① 是**同一个变量**（`MemoryProperties.maxSteps`）——
-> 阶段 12 把 `maxSteps` 迁进 `AgentLoopProperties` 时，顺手就把两档分开写死了。
-> 这就是"顺延"该有的样子：**顺延的是任务，不是问题**。
+| 问题 | 回答要点 |
+|---|---|
+| 为什么不用 `ChatClient` / advisor 链？ | 需要自己掌控工具循环与事件流；`AgentPipeline` 顺序即代码行序，比 order 常量可读 |
+| 为什么 RAG 由模型决定？ | 无关问题不该白烧 embedding；检索是可插拔工具，`retrieval.enabled=false` 即整体拔掉 |
+| 双层记忆怎么保证一致？ | 写路径固定"先记录层、后上下文层"（上下文永不比记录新）；读失败降级为空历史 |
+| 工作流和 chat 的区别？ | 唯一分叉点在 `run()`：多一次规划调用 + 逐步执行 + 重试/重规划；共用同一个 `loop()` |
+| 回合账为什么不用 Micrometer？ | 消费者不同：要回答"这一轮为什么慢 / 花了多少"，SQL 直查比聚合指标更直接 |
 
-**记住三件最容易被违反的事**：
-1. **未获明确放行不写代码**（协议第 1 条）
-2. **每个阶段开头要有数据流向图 + 思维导图，并同步进 `PROCEDURES.md`**（协议第 2 条）
-3. **结论必须有证据** —— 日志/字节码/原始字节/真实 HTTP，**不许说"应该是这样"**（协议第 3 条）
+### 10.4 记住六件最容易被违反的事
 
-**再加一条本轮用血换来的（第 4 条）**：
-4. **"失败"与"正常"同形的地方，必须有正向断言。**
-   本轮 `in` 重载那个坑：过滤条件坏掉 → 返回空列表 → 与"库里没数据"完全一样，
-   而所有"匿名只能看到 PUBLIC"的反向断言在空结果上**全部通过**。
-   只有那条"员工**必须**检索到 INTERNAL"的正向断言抓住了它。
+1. **未获明确放行不写代码**（协议第 1 条）。
+2. **每个阶段开头要有数据流向图 + 思维导图**，并同步进 `PROCEDURES.md`（协议第 2 条）。
+3. **结论必须有证据** —— 日志 / 字节码 / 原始字节 / 真实 HTTP，不许说"应该是这样"（协议第 3 条）。
+4. **"失败"与"正常"同形的地方，必须有正向断言**（空列表、affected rows=0、零值对象）。
+5. **A 类负责抛、B 类负责接时，测 A 与测 B 都过而 A→B 那条边没人测** —— 要专门问"有没有只被两端各自覆盖的边"；
+   mock 边界之外（真机线程 / 真容器 / 真 HTTP）的行为必须另外覆盖。
+6. **汇报第一段必须是【本次改动文件】的完整清单**（用 `tools/change-list.ps1` 从 git 生成，不靠回忆）。
 
-**第 5 条（同一个坑换了个类型又踩一次）**：
-5. **A 类负责抛、B 类负责接时，测 A 的用例和测 B 的用例都通过，而 A→B 那条边没人测。**
-   本轮非法 token 报 500 就是这么漏掉的（177 用例全绿）。
-   **写测试时要专门问一句：这条链路上有没有"只被两端各自覆盖"的边？**
-   另外：踩坑 #10（协议级异常被报成 500）的教训是"按类补分支"，
-   本轮因**没把它变成机制**而重演 —— 协议第 6 条要求机制化，这一条目前仍欠着。
+### 10.5 交接检查表（约 30 分钟跑起来）
 
-**第 6 条（阶段 10 汇报时漏掉的：协议第 2 条的第一段）**：
-6. **汇报的第一段必须是【本次改动文件】的完整清单**（新增 / 修改 / 删除）。
-   协议第 2 条把它放在第一段，而阶段 10 的汇报**只给了"建议阅读顺序"、跳过了它** ——
-   那份汇报读起来很完整，所以漏掉时**看不出来**。
-   ⇒ 已机制化：`tools/change-list.ps1`（点号加载后调 `改动清单`）从 git 生成路径，
-   **工作区有未提交改动时先警告**（那种情况下清单必然漏文件）。
-   判据：**"我列的文件"永远只是"我想到的文件"**；完整清单只能从版本库生成。
+1. 三个容器 + Ollama 在跑：`. "$h\tools\sql.ps1"; 查依赖`
+2. 设 `DEEPSEEK_API_KEY`（测试用占位值即可）
+3. `.\mvnw.cmd -B -ntp clean test` → 369 / 2 skipped
+4. `.\mvnw.cmd -f MCP/time-server/pom.xml package` + `node tools\mcp-probe.mjs`
+5. 起应用（profile `local` 或 `local,mcp`）+ 起前端（`npm run dev`）
+6. 按 `README.md` 的快速开始走一遍
