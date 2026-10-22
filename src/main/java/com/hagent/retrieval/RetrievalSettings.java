@@ -1,27 +1,15 @@
 package com.hagent.retrieval;
 
 /**
- * <b>检索能力的设置值对象</b>（阶段 12 第 3 步 / 方案 A）。
+ * <b>检索能力的设置值对象</b>。
  *
- * <h2>★ 为什么领域类不再直接吃 {@code RetrievalProperties}</h2>
+ * <p>领域只认<b>自己的</b>值对象，由装配层（{@code RagConfig}）从 {@code RetrievalProperties}
+ * 映射过来：否则 {@code config ⇄ retrieval} 会成结构环，且领域类手里握着一个"能读全项目配置"
+ * 的句柄而实际只用几个值；值对象不可变，测试里也好造。
  *
- * <p>之前 {@code KnowledgeSearch} 的构造器接收 {@code config.RetrievalProperties}，
- * 于是形成 {@code config ⇄ retrieval} 的结构环，且领域类手里握着一个
- * <b>能读全项目配置</b>的句柄 —— 它实际只用到 5 个值。
- *
- * <p>现在领域只认<b>自己的</b>值对象：装配层（{@code RagConfig}）负责把
- * {@code RetrievalProperties} 映射成它。好处有三：
- * <ol>
- *   <li>领域包不再依赖 {@code config}，环消失；</li>
- *   <li>"档位判定"这条<b>领域规则</b>从配置类搬回领域（审计 P1-10）；</li>
- *   <li>值对象不可变，测试里可以随便造（不用构造整个配置类）。</li>
- * </ol>
- *
- * <h2>★ 为什么 {@code enabled} 也在这里</h2>
- *
- * <p>它是"这次检索能力用不用"的开关，与其余 5 个检索参数同属"检索的设置"。
- * 装配层另外还用它决定<b>要不要注册工具</b>（{@code ToolRegistration}），
- * 所以同一个值有两个消费者，放在同一个值对象里才不会出现两份来源。
+ * <p>{@code enabled} 也在这里：它与其余检索参数同属"检索的设置"，而装配层还用它决定
+ * <b>要不要注册工具</b>（{@code ToolRegistration}）—— 同一个值有两个消费者，
+ * 放在同一个值对象里才不会出现两份来源。
  *
  * @param enabled             是否启用检索能力（关闭时模型看不到检索工具）
  * @param topK                取回几条片段
@@ -47,7 +35,7 @@ public record RetrievalSettings(
     private static final double BAND_EPSILON = 1e-9;
 
     /**
-     * 按<b>距离</b>把相似度分档（阶段 12 从 {@code RetrievalProperties} 搬来）。
+     * 按<b>距离</b>把相似度分档。
      *
      * <p>边界取"不超过"（{@code <=}）：阈值本身恰好命中时算作更相关的一档。
      */

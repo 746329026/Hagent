@@ -17,81 +17,31 @@ import java.util.List;
 /**
  * 提示词拼装 —— <b>全链路唯一重建消息列表的人</b>，并记录"模型真正收到的 prompt"。
  *
- * <p><b>阶段 8 的来源</b>：本类由 {@code PromptAssemblyAdvisor} 搬来，逻辑等价，
- * 但<b>参数从"切面请求 + context 取值"变成了普通方法参数</b> ——
- * 于是"片段从哪来"由编译期保证，不再需要那道"context 类型不符就告警"的运行期检查。
+ * <p><b>"唯一重建者"是硬要求，不是风格</b>：两个组件各自重建消息列表时，先跑的那个注入的内容会被
+ * 后跑的<b>静默丢弃</b>。所以前面几步只产"片段"（历史 / 长期记忆索引），一个字节都不动 prompt，只有
+ * 本类把它们拼进去 —— "谁重建消息列表"于是从"靠约定"变成<b>结构上当且仅当一处</b>。
  *
- * <h2>★ 它解决什么问题（协议第 7 条三问）</h2>
- *
- * <p>到这一步为止，链上已经攒了"要进 prompt 的东西"，但它们<b>都还没进 prompt</b>：
- * <ul>
- *   <li>{@code AgentPipeline} 读出的<b>历史消息</b>；</li>
- *   <li>{@code AgentPipeline} 检索出的<b>片段</b>；</li>
- *   <li><b>回答约束</b>提示词（本类构造时读入）。</li>
- * </ul>
- * 本类把它们与本次用户消息<b>拼成一份</b> prompt。不做它：
- * 前面的产出<b>没有任何消费者</b>，检索与记忆全部白做。
- *
- * <h2>★ "唯一重建者"是硬要求，不是风格</h2>
- *
- * <p>已经用断言证明过：<b>两个组件各自重建消息列表时，先跑的那个注入的内容会被后跑的静默丢弃。</b>
- * 所以本项目的分工是刻意的：
- * <pre>
- *   前面几步：只产"片段"（历史 / 检索结果），一个字节都不动 prompt
- *   本类    ：唯一的"重建者"，把它们拼进去
- * </pre>
- * 这样"谁重建消息列表"从"靠约定不互相干涉"变成<b>结构上当且仅当一处</b>。
- *
- * <h2>★ 拼装结果的形状（顺序不能变）</h2>
+ * <h2>拼装结果的形状（顺序不能变）</h2>
  *
  * <pre>
- *   [1] SystemMessage  = 原有 system + 回答约束 + 【知识库片段 …】
+ *   [1] SystemMessage  = 原有 system（全部）+ 回答约束 + 长期记忆索引
  *   [2] 历史消息        按时间正序（来自 AgentPipeline 的记忆读取）
  *   [3] 未知消息        原 prompt 里既不是 system 也不是本次用户消息的那些，原样保留
  *   [4] UserMessage     本次用户提问，永远最后
  * </pre>
  *
- * <p><b>为什么把约束与片段合并进同一条 SystemMessage</b>：
- * 多家模型提供方对"多条 system 消息"的处理不一致（有的合并、有的只认第一条、有的直接报错）。
- * 合成一条就没有这个不确定性。
+ * <ul>
+ *   <li><b>约束与记忆索引合并进同一条 SystemMessage</b>：多家提供方对"多条 system"的处理不一致
+ *       （有的合并、有的只认第一条、有的直接报错），合成一条就没有这个不确定性；</li>
+ *   <li><b>合并【全部】system，不是只取第一条</b>：框架 {@code getSystemMessage()} 只返回第一条，
+ *       后来加的 system 会被挤到 prompt 中段、失去 system 的地位 —— 而后来加的正是工具说明与人格；</li>
+ *   <li><b>[3] 保留"未知消息"</b>：曾经的重建者只挑 system / history / user，其余全部丢弃 ——
+ *       注释还写着"顺序不能变"，读起来一切正常，问题是<b>它丢的是别人的东西</b>；</li>
+ *   <li><b>用户消息必须最后</b>：模型据此判断"现在要回答什么"。</li>
+ * </ul>
  *
- * <p><b>为什么片段在 system 而不是 user</b>：它是"背景资料 + 如何使用资料的规则"，
- * 不是用户说的话。放进 user 会让模型以为用户在念一段文档。
- *
- * <p><b>为什么用户消息必须最后</b>：模型据此判断"现在要回答什么"。
- *
- * <h2>★★ 阶段 8 的一处语义修正：合并【全部】system，而不是只取第一条</h2>
- *
- * <p>实测框架的 {@code Prompt.getSystemMessage()} 返回的是<b>第一条</b> system 消息
- * （字节码：遍历到第一个 {@code SystemMessage} 就 {@code areturn}）。
- * 而旧实现只调它一次，于是：
- *
- * <pre>
- *   输入 [system A, system B, user]
- *     旧行为：SystemMessage = A + 约束 + 片段；B 掉进"未知消息"，被原样放到历史之后
- *             ⇒ 后来加的那条 system 被<b>静默挤到 prompt 中段</b>，失去 system 的地位
- *     新行为：SystemMessage = A + B + 约束 + 片段
- * </pre>
- *
- * <p>阶段 9 的工具说明、人格设定都属于"后来要加的 system"，所以这个修正必须在<b>加之前</b>做掉。
- * 多条 system 已经确定是风险（提供方处理不一致），合并正是为了消除它。
- *
- * <h2>★ 为什么 [3] 要保留"未知消息"</h2>
- *
- * <p>这是从旧实现的教训里保留下来的一条：曾经的重建者只挑 system / history / user 三类，
- * 其余<b>全部丢弃</b> —— 当时的注释还写着"顺序不能变"，读起来一切正常，
- * 问题在于<b>它丢的是别人的东西</b>。
- *
- * <p>本类既然已经是唯一重建者，保留"未知消息"是"重建者"应尽的义务，成本只有几行。
- *
- * <h2>★ 日志：这里才是"模型真正收到的 prompt"</h2>
- *
- * <p>{@code AgentPipeline} 在<b>最外层</b>记的是"请求进来时的样子"（≈ 用户原始输入）；
- * 本类在<b>拼装之后</b>记的才是"模型收到的"。两条日志的分工：
- * <pre>
- *   [AgentPipeline]  请求进入       → 用来确认"入口是干净的"
- *   [PromptBuilder]  模型收到的 prompt → 用来确认"注入生效了"
- * </pre>
+ * <p><b>日志分工</b>：{@code AgentPipeline} 记"请求进来时的样子"（确认入口干净），本类记"拼装之后"
+ * 的 prompt（确认注入生效）—— 排查时对比这两条。
  */
 @Slf4j
 public class PromptBuilder {
@@ -105,8 +55,7 @@ public class PromptBuilder {
     private final String constraintText;
 
     /**
-     * @param constraintResource 回答约束资源；由 {@code RagConfig} 保证<b>存在且可读</b>
-     *                           （不存在时启动失败，不会走到这里）
+     * @param constraintResource 回答约束资源；由 {@code RagConfig} 保证<b>存在且可读</b>（不存在时启动失败）
      */
     public PromptBuilder(TraceProperties traceProperties,
                          PromptProperties promptProperties,
@@ -121,23 +70,16 @@ public class PromptBuilder {
     /**
      * 拼装模型最终收到的 prompt。
      *
-     * <p><b>不传 {@code ChatOptions}</b>：{@code new Prompt(messages)} 会让框架在调用模型时
-     * <b>自动填入已配置的默认 options</b>（{@code reasoning-effort}、模型名等）。
-     * 实测字节码：{@code DeepSeekChatModel.buildRequestPrompt} 里
-     * {@code if (prompt.getOptions() == null) → prompt.mutate().chatOptions(this.getOptions())}。
+     * <p><b>不传 {@code ChatOptions}</b>：{@code new Prompt(messages)} 会让框架在调用模型时<b>自动填入
+     * 已配置的默认 options</b>（{@code reasoning-effort}、模型名等）。★ <b>带工具的调用是例外</b> ——
+     * 那一步必须显式传 options（工具挂在它上面），见 {@code AgentPipeline} 的 {@code optionsFor}。
      *
-     * <p>★ 注意：<b>带工具的调用是例外</b> —— 那一步必须显式传 options（工具挂在它上面），
-     * 所以 {@code AgentPipeline} 用的是"从配置克隆再挂工具"（见该类的 {@code optionsFor}）。
-     * 本方法只负责把<b>消息列表</b>拼对，options 由调用方决定。
-     *
-     * <p><b>★ 阶段 9：这里不再注入检索片段</b>。检索已改成 {@code retrieveKnowledge} 工具，
-     * 片段作为<b>工具结果</b>回到模型手里（见 {@code KnowledgeRetrievalTool}）。
-     * 于本类回归它最纯粹的职责：<b>把 system / 历史 / 未知 / 本次提问拼成一条消息列表</b>。
+     * <p><b>检索片段不在这里注入</b>：检索是 {@code retrieveKnowledge} 工具，片段作为<b>工具结果</b>
+     * 回到模型手里。本类只负责把 system / 历史 / 未知 / 本次提问拼成一条消息列表。
      *
      * @param original 进入 pipeline 时的原始 prompt（含 system 与本次用户消息）
      * @param history  历史消息，时间正序
-     * @param memoryDigest 长期记忆的索引块（可能为空串/ null）——
-     *                     <b>由调用方读好再传进来</b>，本类<b>不做任何 IO</b>（见下）
+     * @param memoryDigest 长期记忆的索引块（可能为空串/null）—— <b>由调用方读好再传进来</b>，本类不做 IO
      * @return 拼装后的 prompt
      */
     public Prompt assemble(Prompt original, List<Message> history, String memoryDigest) {
@@ -161,18 +103,16 @@ public class PromptBuilder {
 
         logAssembled(assembled, systems.size(), safeHistory, memoryDigest);
 
-        // ★ 用构造器显式重建 Prompt，但【不带 options】—— 理由见方法注释。
+        // ★ 用构造器显式重建 Prompt，但不带 options —— 理由见方法注释。
         return new Prompt(assembled);
     }
 
-    // ========================================================================
-    // 收集
-    // ========================================================================
+    // ---- 收集 ----
 
     /**
-     * 取出<b>全部</b> system 消息（不是只取第一条，见类注释的语义修正一节）。
+     * 取出<b>全部</b> system 消息（不是只取第一条，见类注释）。
      *
-     * <p>用 {@code instanceof} 判断而与位置无关：system 消息在调用方那里可能出现在任意位置。
+     * <p>用 {@code instanceof} 判断而与位置无关：system 消息可能出现在任意位置。
      */
     private List<SystemMessage> collectSystemMessages(List<Message> messages) {
         List<SystemMessage> systems = new ArrayList<>();
@@ -187,13 +127,9 @@ public class PromptBuilder {
     /**
      * 收集"既不是 system、也不是本次用户消息"的那些消息，原样保留下游。
      *
-     * <p>用 {@code ==} 引用比较而不是 {@code equals}：
-     * 我们要排除的是"就是这个对象"，而不是"内容相同的另一个对象"。
-     * 若用 {@code equals}，一条内容恰好相同的消息会被误删 ——
-     * 那正是"静默丢内容"的另一种形态。
-     *
-     * <p>★ 注意传进来的是<b>全部</b> system 对象（可能是多条）：
-     * 逐条按引用排除，才能既合并全部 system、又不把它们重复留在"未知消息"里。
+     * <p>用 {@code ==} 引用比较而不是 {@code equals}：要排除的是"就是这个对象"，而不是"内容相同的
+     * 另一个对象" —— 用 {@code equals} 会误删内容恰好相同的消息，那是"静默丢内容"的另一种形态。
+     * 传入<b>全部</b> system 对象逐条按引用排除，才能既合并全部 system、又不把它们留在"未知消息"里。
      */
     private List<Message> collectUnknown(List<Message> messages,
                                          List<SystemMessage> systems,
@@ -222,27 +158,16 @@ public class PromptBuilder {
         return false;
     }
 
-    // ========================================================================
-    // system 正文
-    // ========================================================================
+    // ---- system 正文 ----
 
     /**
      * 组装 system 正文：原有 system（全部）→ 回答约束 → 长期记忆索引。
      *
-     * <p>顺序的理由：先立"角色与规则"，再给"资料"。反过来会让模型在读规则之前
-     * 先看到一堆文档，更容易把文档里的语气当成指令。
+     * <p>顺序的理由：先立"角色与规则"，再给"资料" —— 反过来会让模型在读规则之前先看到一堆文档，
+     * 更容易把文档里的语气当成指令。索引放最后，因为它是"关于这个人的背景"。
      *
-     * <p><b>★ 阶段 9：这里不再拼检索片段</b>。片段现在由 {@code retrieveKnowledge}
-     * 工具作为**工具结果**送回模型 —— 它不再是 system 的一部分。
-     *
-     * <p><b>★ 阶段 11：长期记忆的索引在这里注入</b>。它放在最后，因为它是
-     * "关于这个人的背景"—— 角色、规则都该在它之前立好。
-     *
-     * <p><b>引号为什么由调用方读好再传进来</b>：本类自阶段 8 起是<b>纯函数</b>
-     * （不读存储、不做 IO，只拼装）。把"读记忆"塞进来会让它同时承担
-     * "唯一重建者"与"存储访问者"两个身份，而后者会让<br/>
-     * "拼错了"与"读不到"变成同一种症状。<b>存储失败由 {@code AgentPipeline} 兜住</b>，
-     * 传进来的是空串 —— 于是本类不需要 try/catch。
+     * <p><b>索引为什么由调用方读好再传进来</b>：本类是<b>纯函数</b>（不读存储、不做 IO）。让"读记忆"
+     * 进来会使"拼错了"与"读不到"变成同一种症状；存储失败由 {@code AgentPipeline} 兜住并传空串。
      */
     private String buildSystemText(List<SystemMessage> systems, String memoryDigest) {
         StringBuilder sb = new StringBuilder();
@@ -269,19 +194,14 @@ public class PromptBuilder {
         sb.append(block);
     }
 
-    // ========================================================================
-    // 日志
-    // ========================================================================
+    // ---- 日志 ----
 
     /**
      * 记"模型真正收到的 prompt"。
      *
-     * <p>同时打出各部分的条数：排查"注入没生效"时，
-     * "历史 0 条"比读一长串文本更快定位。
-     *
-     * <p>★ 刻意把"没有 system"与"有 system 但内容为空"分开报：
-     * 两者都会让模型看不到约束，但原因完全不同（前者是调用方没给，
-     * 后者是约束资源为空）—— 合成一条日志就没法区分了。
+     * <p>同时打出各部分的条数："历史 0 条"比读一长串文本更快定位"注入没生效"。
+     * ★ 刻意把"没有 system"与"有 system 但内容为空"分开报：两者都让模型看不到约束，但原因完全不同
+     * （调用方没给 / 约束资源为空），合成一条就没法区分了。
      */
     private void logAssembled(List<Message> assembled,
                               int systemCount,
@@ -308,20 +228,14 @@ public class PromptBuilder {
                 PromptLogFormat.truncate(contents, traceProperties));
     }
 
-    // ========================================================================
-    // 资源读取
-    // ========================================================================
+    // ---- 资源读取 ----
 
     /**
      * 启动时把回答约束读进来；读不到就<b>直接失败</b>。
      *
-     * <p>为什么不"读不到就用空字符串"：约束里有"知识库中没有相关内容时明确说明，
-     * 不要凭常识编造"与"不要自己创造文件名"。缺失时模型会<b>照常给出通顺的回答</b>，
-     * 只是偶尔编一个来源 —— 这种表现没人会往"提示词没加载"上想。
-     * 所以宁可起不来（决策 8：不静默降级）。
-     *
-     * <p>也是为什么只在构造器里读一次：约束内容随启动固定，
-     * 每次调用都读盘是纯开销；改提示词需要重启。
+     * <p>不"读不到就用空字符串"：约束里有"知识库没有就明说、不要自己编文件名"，缺失时模型会
+     * <b>照常给出通顺的回答</b>，只是偶尔编一个来源 —— 这种表现没人会往"提示词没加载"上想。
+     * 所以宁可起不来。也正因为约束随启动固定，只在构造器里读一次（改提示词需要重启）。
      */
     private String readConstraint(Resource resource) {
         try {

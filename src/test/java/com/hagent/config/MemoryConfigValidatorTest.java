@@ -11,14 +11,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 记忆配置的早期校验测试。
  *
- * <p><b>为什么这个类值得单独写</b>：{@link MemoryConfigValidator} 是
- * {@code EnvironmentPostProcessor}，它在<b>任何 Bean 创建之前</b>运行 ——
- * 也就是说，它的失败是"应用根本起不来"，而不是"某个功能不可用"。
- * 一个会阻断启动的组件，必须有直接的测试，而不是靠"端到端跑一遍看起来没事"。
+ * <p>为什么值得单独写：{@link MemoryConfigValidator} 是 {@code EnvironmentPostProcessor}，
+ * 在<b>任何 Bean 创建之前</b>运行 —— 它的失败是"应用根本起不来"，而不是"某个功能不可用"。
+ * 一个会阻断启动的组件必须有直接的测试，而不是靠"端到端跑一遍看起来没事"。
  *
- * <p>阶段 7 把配置从<b>一个键</b>（{@code type}）改成<b>两个键</b>
- * （{@code record-store} / {@code context-cache}）。这里同时钉住"旧键必须明确报错"——
- * 否则旧配置被静默忽略，"改了配置却没生效"这个老问题会立刻回来。
+ * <p>这里也钉住"旧键必须明确报错"：旧配置被静默忽略的话，
+ * "改了配置却没生效"这个老问题会立刻回来。
  */
 class MemoryConfigValidatorTest {
 

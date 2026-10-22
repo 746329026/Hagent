@@ -17,25 +17,15 @@ import java.util.TreeMap;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 记忆两层的<b>装配</b>测试 —— 真实启动 Spring 上下文，只断言"接线对不对"。
+ * 记忆两层的装配测试 —— 真实启动 Spring 上下文，只断言"接线对不对"。
  *
- * <h2>★ 为什么需要这个类（它防的是一个真实存在的陷阱）</h2>
+ * <p>防的是一个真实陷阱：两个数据源（业务主库 MySQL、向量库 PostgreSQL）下，
+ * {@code DataSourceAutoConfiguration} 的 {@code @ConditionalOnMissingBean(DataSource.class)}
+ * 会因用户 Bean {@code pgVectorDataSource} 而退避，业务主库数据源可能根本不存在；
+ * 同理按类型注入 {@code JdbcTemplate} 会拿到指向 PostgreSQL 的那个。
  *
- * <p>本项目有两个数据源（业务主库 MySQL、向量库 PostgreSQL）。而 Spring Boot 的
- * {@code DataSourceAutoConfiguration} 带 <b>{@code @ConditionalOnMissingBean(DataSource.class)}</b>，
- * 用户配置里已经声明了 {@code pgVectorDataSource} —— 于是自动配置会<b>退避</b>，
- * <b>业务主库的数据源可能根本不存在</b>。
- *
- * <p>同理 {@code JdbcTemplateAutoConfiguration} 带
- * {@code @ConditionalOnMissingBean(JdbcOperations.class)}，而
- * {@code pgVectorJdbcTemplate} 是用户 Bean —— 于是容器里按类型注入 {@code JdbcTemplate}
- * 会拿到<b>指向 PostgreSQL</b> 的那个。
- *
- * <p>两种情况的共同症状都极具误导性：<b>"表 chat_message 不存在"</b> ——
- * 很容易被误判成"忘了建表"，而真实原因是"你在问另一个数据库"。
- *
- * <p>所以这里把接线<b>断言下来</b>：两个数据源都在、各自指向正确的库、
- * 记录层用的是 MySQL 那个。
+ * <p>两种情况的症状都极具误导性："表 chat_message 不存在" —— 很容易被误判成"忘了建表"，
+ * 真实原因是"你在问另一个数据库"。所以把接线断言下来。
  */
 @SpringBootTest
 class MemoryWiringTest {

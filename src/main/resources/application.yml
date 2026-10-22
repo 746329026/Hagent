@@ -3,8 +3,7 @@ spring:
     name: hagent
 
   profiles:
-    # local 是私有配置（含密钥/密码），在 application-local.yml 中覆盖；
-    # 该文件已被 .gitignore 排除，不进仓库。
+    # local = 私有配置（密钥/数据库密码），由 application-local.yml 覆盖，该文件不进仓库
     active: local
 
   jackson:
@@ -14,84 +13,49 @@ spring:
 server:
   port: 8123
   servlet:
-    # 统一 URL 前缀，便于将来做网关转发与前端联调区分
+    # 统一 URL 前缀，便于网关转发与前后端联调区分
     context-path: /api
   tomcat:
     connection-timeout: 60s
 
-# 异步请求超时。多步 Agent / RAG 检索 / PPT 生成动辄超过 Tomcat 默认的 30s，
-# 此值过小会导致流式接口被静默掐断（前端表现为"连接中断"或收到 500）。
-# 注意：SseEmitter 自身也带超时，两者取较小值生效，必须协调，不能只调一个。
+# 异步请求超时。多步 Agent / RAG 远超 Tomcat 默认 30s，过小会把流式接口静默掐断。
+# 注意：与 SseEmitter 自身超时取较小值生效，两处必须协调。
 spring.mvc.async.request-timeout: 600s
 
 # ============================== AI 配置 ==============================
 spring.ai:
-  # ★★★ 能力归属声明（本项目最关键的一处配置）★★★
-  # 同时引入 deepseek 与 ollama 两个 starter 时，两边的自动装配**都会**创建
-  # ChatModel Bean，导致启动失败。实测证据：
-  #   expected single matching bean but found 2: deepSeekChatModel, ollamaChatModel
-  # 注意：ollama.init.chat.pull-model-strategy=never 只阻止"自动拉取模型"，
-  #       不阻止创建 ChatModel Bean —— 两者不是一回事。
-  # 正解是显式声明能力分工，而不是用 @Primary 打补丁。
+  # ★ 能力归属声明：两个模型 starter 同时存在时各建一个 ChatModel Bean，会导致启动失败。
+  #   用配置表达分工，而不是用 @Primary 消除冲突。
   model:
     chat: deepseek
     embedding: ollama
 
-  # ---------- MCP 客户端（阶段 16）----------
-  # 本项目只做【客户端】：工具来自独立进程里的 MCP server（见 MCP/time-server）。
-  # 连接配置单独放在 application-mcp.yml（默认不生效，演示时加 mcp profile）。
+  # ---------- MCP 客户端（默认不连，演示时加 mcp profile，见 application-mcp.yml）----------
   mcp:
     client:
-      # ★★★ 这一行不是可选项，是"唯一注册入口"的守门人 ★★★
-      #  starter 默认会注册一个 SyncMcpToolCallbackProvider（它也是 ToolCallbackProvider）。
-      #  若与 ToolRegistration 里的那个并存，容器里就有两个同类型 Bean，
-      #  而 AgentPipeline 按类型注入单个 → 启动直接失败（expected single matching bean but found 2）。
-      #  关掉它之后，工具清单只从 ToolRegistration 出：本地工具 + MCP 工具在那里合并。
+      # ★ 必须关闭：starter 默认注册 SyncMcpToolCallbackProvider（也是 ToolCallbackProvider），
+      #   与 ToolRegistration 的同类型 Bean 并存会让 AgentPipeline 注入失败。
+      #   关掉后工具清单只从 ToolRegistration 出（本地工具 + MCP 工具在那里合并）。
       toolcallback:
         enabled: false
 
   # ---------- chat：DeepSeek 云端 ----------
-  # ★ 模型名必须与账号实际可用的一致。实测该账号 /models 只返回：
-  #     deepseek-flash · deepseek-v4-pro
-  # 而 "deepseek-chat" / "deepseek-reasoner" 这类名字【不存在】——
-  # 更危险的是：请求不存在的模型名时，API 会**静默降级**到 deepseek-flash
-  # 并且不报错（实测请求 deepseek-reasoner，返回的 model 字段是 deepseek-flash）。
-  # 这是"约定写错却静默失效"的典型，必须靠探针核对"实际返回的模型名"兜住。
-  #
-  # 本账号选定 deepseek-flash：它本身就是推理模型（返回 reasoning_content 字段），
-  # 性价比高于 v4-pro。多步 Agent 的每一步都要重新决策，token 消耗会被放大，
-  # 所以"单步便宜"比"单步最强"更重要。
   deepseek:
     api-key: ${DEEPSEEK_API_KEY:}
     chat:
       options:
+        # 账号可用模型只有 deepseek-flash / deepseek-v4-pro；请求不存在的模型名会静默降级且不报错，
+        # 所以启动探针要核对"实际返回的模型名"。
         model: deepseek-flash
-        # ★ 这里刻意【不设 temperature】，原因是一条实测出来的静默行为：
-        #   deepseek-flash 是推理模型，开启推理（thinking）时服务端会忽略采样参数。
-        #   启动日志给出的原文：
-        #     Thinking mode does not support the temperature parameter(s).
-        #     ... setting these parameters will not trigger an error but will also have no effect.
-        #   —— 即"配了不报错，但完全不生效"。这类"配了没用"的参数最有欺骗性：
-        #      你会以为自己在控制随机性，其实什么都没控制。
-        #   所以选择：要么不配（承认它不生效），要么显式关掉 thinking 才配。
-        #   本项目选前者 —— Agent 的稳定性靠"推理 + 结构化输出约束"来保证，
-        #   而不是靠一个其实被忽略的 temperature。
-        # 推理投入档位。枚举只有 HIGH 与 MAX（不用 MAX：更慢更贵，收益不匹配）。
-        #
-        # ★ 一个真实的"约定不一致"陷阱，已实测：
-        #   直接调 HTTP API 时，reasoning_effort 只接受**小写** "high"；
-        #   传大写 "HIGH" 会返回 HTTP 422 Unprocessable Entity。
-        #   而 Spring AI 的枚举字面量是大写的 HIGH —— 那它序列化出去是哪个？
-        #   用 javap -v 读常量池可确认它带了 @JsonProperty：
-        #     ReasoningEffort.HIGH -> @JsonProperty("high")
-        #     ReasoningEffort.MAX  -> @JsonProperty("max")
-        #   所以最终发出去的是小写，与 API 期望一致。
-        #   （这条不是猜的：注解值 "high"/"max" 就在字节码常量池里。）
+        # ★ 不设 temperature：deepseek-flash 是推理模型，thinking 模式下服务端会忽略采样参数
+        #   （配了不报错，也不生效）。稳定性靠推理与结构化约束，不靠一个被忽略的参数。
+        # 推理档位只有 HIGH / MAX（不用 MAX：更慢更贵）。API 只接受小写，
+        # Spring AI 枚举上带 @JsonProperty("high") 保证序列化正确。
         reasoning-effort: HIGH
 
-  # ---------- embedding：Ollama 本地（1024 维）----------  # 为什么 embedding 放本地：RAG 入库要对成百上千个切片做向量化，调用量远大于对话；
-  # 本地 mxbai-embed-large 已够用且零边际成本。
-  # 补充事实：DeepSeek 官方不提供 embedding API，所以这一层必须换实现。
+  # ---------- embedding：Ollama 本地（1024 维）----------
+  # 入库要对成百上千个切片做向量化，调用量远大于对话；DeepSeek 不提供 embedding API，
+  # 这一层必须换实现，本地 mxbai-embed-large 零边际成本。
   ollama:
     base-url: http://localhost:11434
     embedding:
@@ -99,10 +63,8 @@ spring.ai:
         model: mxbai-embed-large:latest
 
   # ---------- 向量库：pgvector ----------
-  # 实测事实：spring-ai-autoconfigure-vector-store-pgvector 的配置元数据里
-  # 没有任何数据源参数，它复用 Spring 全局 DataSource（本项目中是 MySQL）。
-  # 因此本项目显式装配自己的 pgVectorDataSource + PgVectorStore，
-  # 表名也用项目专属名，避免与其它项目同名表混淆。
+  # 框架的 pgvector 自动装配没有独立数据源参数，会复用全局 DataSource（= MySQL），
+  # 因此本项目显式装配自己的 pgVectorDataSource + PgVectorStore，表名也用项目专属名。
   vectorstore:
     pgvector:
       table-name: hagent_knowledge
@@ -110,19 +72,10 @@ spring.ai:
       index-type: HNSW
       distance-type: COSINE_DISTANCE
       dimensions: 1024
-      # ★ 阶段6 从 false 改为 true —— 原因是一段实测得出的结论（不要改回去）：
-      #   PgVectorStore.afterPropertiesSet() 的字节码逻辑是「若 initializeSchema 为假，
-      #   就跳过建表、只做表结构校验」。而校验开关 schemaValidation 默认 false，
-      #   于是两者都为假时【表永远不会被创建】，直到第一次写入才报错。
-      #   本项目此前没有写入路径（阶段0只做了连通性探测），所以这个问题一直没暴露。
-      # 现在交给框架建表，而不是自己写 DDL：DDL 由框架保证与它的读写逻辑一致，
-      # 我们手写的 DDL 一旦漂移（如列名、类型）就是"写入报错"或更糟的"静默写错表"。
+      # ★ 必须为 true：initializeSchema 为假时框架跳过建表，而 schema-validation 默认也为假，
+      #   于是表永远不会被创建，直到第一次写入才报错。
       initialize-schema: true
-      # 保持 false 是刻意的。★ 注意一个容易搞混的地方：
-      #   官方属性名是 schema-validation，但 PgVectorStoreBuilder 上暴露的是
-      #   另一个名字相近、语义不同的开关 vector-table-validations-enabled。
-      #   两者都保持 false —— 本项目要的是"建表"，不是让框架做黑盒结构校验。
-      #   表是否真的建出来、结构对不对，由启动自检（vectorTableSelfCheck）用事实核对。
+      # 保持 false：本项目要的是"建表"，表结构正确性由启动自检用事实核对。
       schema-validation: false
       vector-table-validations-enabled: false
 
@@ -130,255 +83,144 @@ spring.ai:
 hagent:
   # ---------- RAG 知识库 ----------
   rag:
-    # 入库链路（阶段6）
     ingest:
-      # 知识库根目录。所有文档都必须在这个目录内（SourceLoader 会拒绝越界路径，
-      # 防止 ../../ 穿越读到知识库之外的文件）。
+      # 知识库根目录；所有文档必须在它之内（SourceLoader 会拒绝越界路径）
       root-dir: "${user.dir}/knowledge"
-      # ★ 文档未声明 kind 时使用的默认种类。刻意不给默认值：
-      #   kind 决定切分策略与默认密级，猜错的后果是"用错策略入库"（检索质量下降且无报错）
-      #   或"被赋予更宽松的密级"（越权风险）。所以必须显式配置 ——
-      #   不配置时应用启动即失败并提示，而不是让一个猜出来的值悄悄影响数据。
-      # 可选值：COMPANY_PROFILE / POLICY / FAQ / PRODUCT_DOC
+      # ★ 刻意不给默认值：kind 决定切分策略与默认密级，猜错会导致"用错策略入库"或
+      #   "密级被放宽"（越权风险），所以必须显式配置，缺失即启动失败。
       default-kind: POLICY
-      # 归属部门。写进 metadata 的 dept 字段；空字符串 = 全公司可见。
-      # 本阶段【只存不用】—— 部门过滤留到检索阶段，因为"用户属于多个部门时取并集还是交集"
-      # 是组织架构问题，不是 RAG 问题，需要业务定义后才能做。
+      # 只存不用：多部门用户取并集还是交集属于组织架构问题，需业务定义后再做过滤。
       dept: ""
       extensions:
         - ".md"
         - ".txt"
 
     chunking:
-      # 单块最大字符数（汉字）。★ 上限约束：embedding 模型 mxbai-embed-large
-      # 实测输入上限约 1000 汉字，超出部分会被【静默截断】（不报错、返回正常维度的向量，
-      # 但块的后半部分对检索完全不可见）。400 只用约 40%，留足余量。
-      # 另两条依据：块越大向量越趋近"多主题的平均值"（检索变差）；
-      # 检索到的块要拼进 prompt，而会话预算是 5000 token。
+      # embedding 模型 mxbai-embed-large 实测输入上限约 1000 汉字，超出部分被静默截断
+      # （不报错、维度正常，但后半段检索不可见）。400 只用约 40%，留足余量。
       max-size: 400
-      # 相邻块重叠字符数（约 15%）。作用是防止语义被块边界切断 ——
-      # 一句话横跨两块时，没有重叠会让第二块以半句话开头。
+      # 相邻块重叠，防止语义被块边界切断
       overlap: 60
-      # 小于 max-size * 此比例的"碎片尾块"会被并入前一块。
-      # 碎片块信息太少、向量区分度低，容易在无关问题下被误命中，还挤占有限的 topK 名额。
+      # ⚠️ 当前代码未读取此键（已知债务：碎片尾块合并未接线）；值仅为保持配置完整。
       min-tail-ratio: 0.25
 
-    # ---------- 检索链路（阶段6 后半）----------
     retrieval:
-      # 关掉后 AgentPipeline 的第 ③ 步不产片段，链路其余部分照常工作。
-      # 用途：排查"回答质量问题是检索的锅还是模型的锅"时，把检索整段摘掉做对照。
+      # 关掉后检索能力整体拔掉（模型看不到该工具），用于排查"问题在检索还是模型"
       enabled: true
 
-      # 最多注入几条片段。★ 3 条的账：每条块最大 400 字（chunking.max-size），
-      # 3 条约 1200 字 ≈ 1200 token，占会话历史预算 5000 token 的 24%。
-      # 再大就会把历史挤掉 —— 而多轮对话里历史同样是回答质量的来源。
+      # 3 条 × 最多 400 字 ≈ 1200 token，约占会话历史预算 5000 的 24%
       top-k: 3
 
-      # ★★★ 以下三项的单位都是【余弦距离】（0=完全相同，1=正交，2=相反）。
-      # 为什么用距离而不是相似度：框架返回的 score 是相似度（1 - 距离，已实测），
-      # 而下面这套阈值的校准依据是那张【距离】实测表（HANDOFF 3.5 与
-      # RetrievalScoreProbeTest 生成的 target/retrieval-score-report.txt）。
-      # 与校准证据同单位，换 embedding 模型后照表改数即可，不必心算"1 减多少"。
-      # 代码里的换算只发生在 RetrievalProperties.similarityThreshold() / bandOf()，
-      # 且启动日志会同时打出两个单位的值。
-      #
-      # 粗筛：距离上限。超过它的候选直接不返回。
-      # 0.5 的定位是【粗筛】。实测它的作用很弱 —— 十次提问里最近的候选距离最大
-      # 也只有 0.4853，全部通过。这是刻意的：宁可放进来由提示词约束处理，
-      # 也不要因为阈值过严把"请假流程"这类真正相关的内容挡在外面。
-      # ⚠️ 实测结论：相关与无关提问的距离分布【完全重叠】，没有哪个数能兼顾。
-      #    让"请假流程是什么"（0.4585）通过需 > 0.46；挡住"今天杭州天气怎么样"
-      #    （0.2598）需 < 0.26 —— 不存在这样的数。真正的兜底是提示词约束。
+      # ★ 以下单位均为余弦距离（0=相同，1=正交，2=相反），与 calibration 证据同单位。
+      #   实测相关与无关提问的距离分布重叠，没有阈值能兼顾 —— 0.5 的定位是粗筛，
+      #   真正的兜底是提示词约束。换 embedding 模型后必须重新校准。
       max-distance: 0.5
-
-      # 相关度分档（决策 5）。距离 <= 0.30 → 高；<= 0.45 → 中；其余 → 低。
-      # 分档而不是给原始分数：方向会误导模型（"0.42"像"不到一半"也像"42 分"），
-      # 且换模型后分数分布整体平移，而档位阈值改在配置里、提示词一个字都不用动。
       high-max-distance: 0.30
       medium-max-distance: 0.45
 
-    # ---------- 回答约束提示词（阶段6 后半）----------
     prompt:
-      # 提示词外置的理由与阶段 1 起一直沿用的做法一致：提示词是业务语义的载体，
-      # 调整频繁，而调整不该要求改 Java、重新编译；放 .md 还能用 git diff 看出改了什么。
-      # ⚠️ 资源不存在或为空时【启动即失败】—— 若静默用空约束，模型会失去
-      #    "禁编造来源"的约束，而表现是回答依然通顺、只是偶尔编个文件名。
+      # 提示词外置：改提示词不需要改 Java/重新编译，git 能 diff。资源缺失或为空时启动即失败。
       constraint-resource: "classpath:prompts/rag-answer-prompt.md"
-
-      # 关掉它的唯一用途是【对照实验】：同一批问题、同一份片段，开关各跑一次，
-      # 才能说明"约束到底起了多少作用"。不要用它来"让模型自由发挥"。
+      # 仅用于对照实验：关掉它才能说明"约束到底起了多少作用"
       include-constraint: true
-  # ---------- 工具调用审计（阶段 9）----------
+
+  # ---------- 工具调用审计 ----------
   tool:
     audit:
-      # 是否把每次工具调用落库（表 chat_tool_invocation）。
-      # ★ 默认开启：审计的价值在于"出事时能查"，而它【只能从现在开始攒】——
-      #   事后无法补录。默认关掉等于默认放弃可追溯性。
-      # 关掉的唯一合理场景：这张表增长过快、需要临时止血。
-      # 关掉后的行为：工具照常执行、对话照常进行，只是【不再落库】——
-      #   启动与每次请求都会打 WARN 说明"没有留下审计记录"，不会静默。
+      # 默认开启：审计只能从现在开始攒，事后无法补录；关掉只会打 WARN，不会静默。
       enabled: true
-      # 表名。它会被拼进 SQL，只允许普通标识符（实现类构造器会校验）。
-      # 表由【显式 DDL】创建（src/main/resources/db/chat_tool_invocation.sql，手动执行一次），
-      # 应用启动时校验表与索引是否存在，不符即【启动失败】并提示重跑该文件。
+      # 表由显式 DDL 创建（db/chat_tool_invocation.sql），启动时校验表与索引是否存在
       table-name: chat_tool_invocation
 
-  # 启动探针。live-call=true 时会真调一次 chat 与 embedding，
-  # 拿到"模型真能用"的实测证据（成本极小）。
+  # 启动探针：live-call=true 时真调一次 chat 与 embedding，拿到"模型真能用"的证据
   probe:
     live-call: true
 
-  # ===== Agent 循环上限（阶段 12：从 memory.chat 搬来，并拆成按模式两档）=====
-  # 为什么搬家：步数上限是【agent 循环的终止条件】，不是"记忆预算"。
-  #   原来它挂在 hagent.memory.chat.max-steps 下（键说"记忆"、值管"循环"）。
-  # 为什么分两档：chat 与 workflow 的"合理步数"不是一个量级 ——
-  #   前者是"查两次资料 + 追问 + 汇总"，后者每一步的工具返回都可能是整篇文档。
-  #   用一个值必然二选一地错：取 10 会砍掉工作流的长任务，取 20 会让普通问答多绕 10 步的账单。
-  # ⚠️ 本次搬家的唯一行为变化：workflow 从 10 变成 20（此前那个 "20" 是没人读的孤儿键）。
+  # ---------- Agent 循环上限（按模式两档）----------
+  # 正常出口是"模型不再请求工具"，但模型绕圈时不会自己结束，而每次循环都是一次计费调用；
+  # 这里是唯一由我们控制的强制出口。
   agent:
-    # chat 模式：一次对话里最多允许的模型调用步数。
-    # 正常出口是"模型不再请求工具"——但那是【由模型控制】的出口，模型绕圈时不会自己结束，
-    # 而每一次循环都是一次计费的模型调用。这里是唯一由我们控制的强制出口。
+    # chat：一次对话里最多允许的模型调用步数
     chat-max-steps: 10
-    # workflow 模式：多步循环，每步的工具返回都可能是一整篇文档，所以给大一倍。
+    # workflow：多步循环，每步工具返回都可能是一整篇文档，给大一倍
     workflow-max-steps: 20
 
-  # 调用链日志（阶段 8 起前缀由 hagent.advisor.trace 改为 hagent.trace）。
-  # 改名的理由：advisor 链已换成 AgentPipeline，"advisor"这个词在项目里不再存在 ——
-  # 配置键指向一个已删除的概念，会让后来者去搜 Advisor 类、然后搜不到（协议第 12 条规则 1）。
+  # 调用链日志（前缀不复用已删除的 advisor 概念）
   trace:
-    # 调用链日志开关。关掉可让日志安静（排查特定问题时有用）
     enabled: true
-    # 单条日志的文本上限。为什么必须截断：一次 RAG 调用可能带几千字检索结果，
-    # 全量打进 INFO 会让日志暴涨，并把用户输入与内部文档内容写进日志（隐私风险）。
-    # 500 够看清 prompt 拼得对不对，又不至于让单条日志过长。
+    # 必须截断：一次 RAG 调用可能带几千字检索结果，全量写日志会撑爆文件并泄露文档内容
     max-log-length: 500
-    # 需要看全文时临时改 true（属排查手段，不是常态）
+    # 排查时临时改 true，不是常态
     log-full-content: false
 
   stream:
-    # SSE 连接的服务端超时。SseEmitter 默认 30 秒，而多步 Agent / RAG 检索会远超它，
-    # 超时会被"静默掐断"（前端表现为连接中断）。注意与 spring.mvc.async.request-timeout
-    # 的关系：两者取较小值生效，必须协调，不能只调一个。
+    # SSE 服务端超时；与 spring.mvc.async.request-timeout 取较小值，两处必须协调
     sse-timeout-ms: 600000
-    # 心跳间隔：长时间无业务事件时保活，防网关按 60s 空闲判定断连。
-    # 取值要小于链路上最短的空闲超时（常见 60s），15s 留足余量。
+    # ⚠️ 当前代码未读取此键：SSE 尚未实现心跳保活（已知债务）；部署在网关后需保证读超时足够长。
     heartbeat-interval-ms: 15000
-    # 告诉浏览器的重连间隔（SSE 的 retry 字段）。断开后浏览器默认约 3 秒重连；
-    # 若服务端刚崩或正忙，立刻重连会加剧压力，调大相当于让客户端退避。
+    # 告诉浏览器的重连间隔（SSE retry），断开后避免立刻重连加剧压力
     reconnect-delay-ms: 5000
 
   web:
-    # CORS 白名单。刻意不用 allowedOriginPatterns("*") + allowCredentials(true) 的组合，
-    # 那既是对全网放开的安全反模式，也违反 CORS 规范（凭证模式下不允许源通配）。
+    # CORS 白名单。不用 allowedOriginPatterns("*") + allowCredentials(true)：
+    # 那既是对全网放开，也违反 CORS 规范。
+    # localhost 与 127.0.0.1 是不同源，两个都要配。
     allowed-origins:
       - "http://localhost:5500"
       - "http://127.0.0.1:5500"
       - "http://localhost:8080"
-      # ★ 阶段 10：Vue + Vite 前端的开发服务器（frontend/ 目录，npm run dev）。
-      #   Vite 默认 5173；两个写法都列上，因为浏览器把 localhost 与 127.0.0.1
-      #   当成【不同的源】—— 只配一个的话，用另一个地址打开页面就会被 CORS 拦住，
-      #   而报错信息只会说"被 CORS 策略阻止"，不会告诉你是"源写得不够"。
       - "http://localhost:5173"
       - "http://127.0.0.1:5173"
-
-    # 预检请求结果的浏览器缓存时长（秒）。
-    # 取值取舍：值大 → 省预检往返但"改了 CORS 配置要等缓存过期才生效"；
-    #          值小 → 每次预检但改配置立即生效。
-    # 开发期建议 0~300（便于改配置立刻验证）；生产可调到 3600~86400。
+    # 预检缓存：开发期小一点便于改配置立即生效，生产可调大
     max-age-seconds: 300
 
   memory:
     chat:
-      # ★ 阶段 7：从"一个 type 三选一"改成【两个角色、各一个开关】。
-      #   原因：这两层不是"一份数据的两种存法"，而是两个需求相反的角色 ——
-      #     记录层 = 用户可见的对话记录（权威·完整·永久，刷新页面要看到）
-      #     上下文层 = 模型这一次要用的上下文（有损·TTL·可从记录层重建）
-      #   它们【同时存在、各司其职】，条件装配表达不了"二选一"以外的关系。
-      #
-      #   旧键 type（file|redis|mysql）已废弃：配了它会【启动直接失败】并提示改成这两个键。
-      #   刻意不留兼容层 —— 两套语义并存会让后来者不知道该看哪个。
+      # 两个角色，不是"一份数据两种存法"：
+      #   记录层 MySQL = 用户可见的完整对话记录（权威、永久，刷新页面要看到）
+      #   上下文层 Redis = 模型这次要用的上下文（有损、TTL、可从记录层重建）
+      # 旧键 type 已废弃：配了会启动失败并提示改成这两个键（刻意不留兼容层）。
       record-store: mysql
       context-cache: redis
 
-      # 某一层失败后静默多少秒不再尝试它（每层各一个熔断窗口）。
-      # ★ 为什么需要：Redis/MySQL 挂掉时若不熔断，每个请求都会白等一次连接超时
-      #   （3s / 5s）—— 一次对话从 1 秒变成 4~8 秒，故障期体验反而比正常时差得多。
-      #   0 = 关闭熔断（永远尝试），便于排查时对照。
+      # 某层失败后静默多少秒不再尝试它。不熔断时每个请求都要白等一次连接超时（3s/5s），
+      # 故障期体验反而比正常更差。0 = 关闭熔断。
       circuit-break-seconds: 30
 
-      # chat 模式预算：只约束【历史消息】，不含 system 提示词与本次问题。
-      # 本次问题不参与预算，就从结构上杜绝了"截断把当前问题丢掉"的可能。
-      # ★ 键名里的 chat 指【工作模式】（与 workflow 并列），不是"会话数据"。
+      # 预算只约束【历史消息】，不含 system 与本次问题（结构上杜绝"截断丢掉当前问题"）
+      # 键名里的 chat 指工作模式，与 workflow 并列，不是"会话数据"。
       chat-max-tokens: 5000
       chat-max-messages: 30
-
-      # workflow 模式预算：比 chat 大一个数量级。
-      # 原因：多步循环里每一轮的工具返回结果（可能是一整篇文档）都会成为下一轮输入。
+      # workflow 每轮工具返回都可能是一整篇文档，预算大一个数量级
       workflow-max-tokens: 50000
       workflow-max-messages: 200
 
-      # ★ 工具循环的步数上限已搬到 hagent.agent.chat-max-steps / workflow-max-steps（阶段 12）。
-      # 搬家的理由：它管的是"循环跑几轮"，而这一段管的是"历史能有多长"（token / 条数）——
-      # 两者是不同轴的量。见 hagent.agent 那一节。
+      # 步数上限已搬到 hagent.agent.*，这里只管"历史能有多长"（token / 条数）
 
-      # 记录层 file 实现：每会话一个 JSON 文件，原子写入（临时文件 + ATOMIC_MOVE）。
-      # 它保留的意义是"零基础设施的兜底"与"人可读的成长记录"，不是生产主路径。
+      # file 记录层：零基础设施兜底 + 人可读，不是生产主路径
       file-dir: "${user.dir}/tmp/chat-memory"
 
-      # 上下文层 Redis 实现：★ 阶段 7 起这个值表示【缓存寿命】，不是数据寿命。
-      # 过期只是下次读取回源记录层（MySQL），历史不会丢 —— 这正是两层的意义。
-      # 取值依据：办公场景里"当天没聊完、第二天接着聊"很常见；
-      # 过长会让无用会话长期占内存。
+      # Redis 值的含义是【缓存寿命】而非数据寿命：过期后回源 MySQL，历史不会丢
       redis-ttl-seconds: 86400
       redis-key-prefix: "hagent:chat:memory:"
 
-      # 记录层 MySQL 的表名。
-      # ★ 表由【显式 DDL】创建（src/main/resources/db/chat_message.sql，手动执行一次），
-      #   应用不自动建表；启动时会校验表存在且 content 列是 utf8mb4，不符即启动失败。
+      # 两张表由显式 DDL 创建（db/*.sql），应用不自动建表，启动时校验结构
       mysql-table-name: chat_message
-
-      # 会话目录的表名（阶段 10 新增，record-store=mysql 时使用）。
-      # 两张表的分工：chat_message 存"会话里有什么"（消息），本表存"有哪些会话"
-      # （标题 / 模式 / 时间）—— 一对多，不能合并（合并会让标题在每条消息里存一份副本）。
-      # 表同样由【显式 DDL】创建（src/main/resources/db/chat_conversation.sql，手动执行一次）。
       conversation-table-name: chat_conversation
 
-
     long-term:
-      # 长期记忆目录（阶段 11）：{dir}/{userId}/MEMORY.md 是索引，mem-*.md 是每条记忆。
-      # ★ 阶段 11 之前这个键是"死的"—— yml 里写着，但没有任何 Java 字段绑定它
-      #   （全项目搜不到 longTerm）。改了它以为记忆换地方了，实际什么都没发生。
-      #   现在它绑定到 LongTermMemoryProperties，并在启动时校验非空。
+      # {dir}/{userId}/MEMORY.md 是索引，mem-*.md 是每条记忆；缺失/为空时启动失败
       dir: "${user.dir}/tmp/agent-memory"
-
-      # ★ 注入 prompt 的【索引块】最大字符数。索引是每轮都注入 system 的，
-      #   它直接吃会话历史预算（chat-max-tokens=5000）。
-      #   1000 字 ≈ 15%~20%，再大就会把"最近几轮对话"挤掉 —— 那不是省钱问题，是模型忘上下文。
-      #   超限时【拒绝写新记忆】（让模型自己整理），而不是静默淘汰最旧的条目。
+      # 索引每轮注入 system，直接吃会话预算；超限时拒绝写新记忆（不静默淘汰旧条目）
       index-max-chars: 1000
-
-      # 单条记忆正文的上限。【不占】prompt 预算（正文只在 readMemory 时才进上下文），
-      # 它的意义是"防止一条记忆大到荒谬"。
+      # 单条记忆正文上限：只在 readMemory 时进上下文，不占常驻预算
       content-max-chars: 2000
-
-      # 记忆标题上限。标题会进索引，所以必须短。
       title-max-chars: 60
 
-  # pgvector 专用数据源。独立前缀，不与 spring.datasource（业务主库 MySQL）混用，
-  # 这是"spring.datasource 永远留给业务主库，其它库各用自有前缀"的落地。
-  #
-  # ★ 池参数的取值理由（写在这里，因为"为什么是这个数"和"这个数是多少"同样重要）：
-  #   minimum-idle=1  成本导向：向量库用量远低于 MySQL，保 1 条常驻连接即可避免
-  #                   每次检索都重新建连（建连 = TCP 握手 + PostgreSQL 认证，是慢操作）。
-  #   maximum-pool-size=5  数量级导向：消费者只有 PgVectorStore，且批量入库本身串行；
-  #                   给 5 是"够用且不会把 PostgreSQL 的连接数吃光"（PG 默认 max_connections=100，
-  #                   要留给其它客户端）。
-  #   connection-timeout=5000  可用性导向，★ 刻意与 MySQL 反着设：
-  #                   MySQL 主库失败要快速暴露（业务数据不可缺）；
-  #                   向量库失败要快速走【降级路径】—— 配合下面 pgVectorDataSource 的
-  #                   initializationFailTimeout(-1)，运行期 PG 断连时用户等 5 秒就收到
-  #                   "知识检索暂不可用"，而不是挂在那里等 30 秒。
+  # pgvector 专用数据源：独立前缀，不与业务主库 spring.datasource 混用。
+  # 池参数取舍：向量库用量小（min-idle=1 避免每次检索重建连接）；
+  #   connection-timeout 刻意比 MySQL 短 —— 向量库失败要快速走降级（"检索暂不可用"），
+  #   而不是让用户挂等 30 秒。
   vectorstore:
     datasource:
       url: jdbc:postgresql://localhost:5432/hagent

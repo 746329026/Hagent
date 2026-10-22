@@ -21,17 +21,14 @@ import java.util.concurrent.TimeoutException;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 失败分类器的测试。
+ * 失败分类器的测试 —— 它决定了"一次模型调用失败对外表现成什么"。
  *
- * <p><b>为什么这个类值得测</b>：它决定了"一次模型调用失败对外表现成什么"。
- * 这里每个用例都对应一个<b>真实会发生的场景</b>，不是为凑覆盖率：
- * 401（实测遇到的）、429（限流）、5xx（上游挂掉）、
- * 连接被拒 / DNS 失败 / 读超时（网络问题的三种典型形态）。
+ * <p>每个用例都对应一个真实会发生的场景，不是凑覆盖率：401（实测遇到的）、429（限流）、
+ * 5xx（上游挂掉）、连接被拒 / DNS 失败 / 读超时（网络问题的三种典型形态）。
  *
- * <p><b>为什么用 {@link MockClientHttpResponse} 而不是 mock 框架</b>：
- * 它是 Spring 自带的测试桩，能构造出<b>真实的</b>
- * {@code WebClientResponseException} 对象（带真实状态码与响应体），
- * 比用 mock 返回值更接近实际——mock 出来的异常可能连状态码都是假的。
+ * <p>用 Spring 自带的 {@link MockClientHttpResponse} 测试桩而不是 mock 框架：
+ * 它能构造出带真实状态码与响应体的 {@code WebClientResponseException}，
+ * mock 出来的异常可能连状态码都是假的。
  */
 class FailureMapperTest {
 
@@ -55,7 +52,7 @@ class FailureMapperTest {
                 HttpHeaders.EMPTY);
     }
 
-    // ==================== 识别：哪些异常算"模型调用失败" ====================
+    // 识别：哪些异常算"模型调用失败"
 
     @Test
     @DisplayName("收到错误响应 → 算模型调用失败")
@@ -85,11 +82,11 @@ class FailureMapperTest {
                 new TransientAiException("HTTP 503 - {...}"))).isTrue();
     }
 
-    // ==================== 第三种形态：框架重试层包装（实测真正抛出的）====================
+    // 真实报文解析（DeepSeek 401 的完整消息格式）
 
     /**
-     * 真实报文：DeepSeek 在 API Key 无效时返回的完整消息文本。
-     * 这是从运行日志里原样抄下来的 —— 用它做测试，保证解析规则对得上真实格式。
+     * 真实报文：DeepSeek 在 API Key 无效时返回的完整消息文本，从运行日志原样抄下来 ——
+     * 用它做测试，保证解析规则对得上真实格式。
      */
     private static final String REAL_DEEPSEEK_401_MESSAGE =
             "HTTP 401 - {\"error\":{\"message\":\"Authentication Fails, Your api key: ****alid is invalid"
@@ -164,7 +161,7 @@ class FailureMapperTest {
         assertThat(mapping.logDetail()).contains("无法从消息解析");
     }
 
-    // ==================== 按 HTTP 状态码分段 ====================
+    // 按 HTTP 状态码分段
 
     @Test
     @DisplayName("★ 401 → 认证失败（就是实测遇到的那个场景），HTTP 502 而非 500")
@@ -210,7 +207,7 @@ class FailureMapperTest {
         assertThat(mapping.operatorHint()).contains("重试无用");
     }
 
-    // ==================== 按根因类型分段（请求没发出去）====================
+    // 按根因类型分段（请求没发出去）
 
     @Test
     @DisplayName("★ 读超时 → 504；必须靠【根因类型】判断，不能匹配 message 文本")
@@ -262,7 +259,7 @@ class FailureMapperTest {
         assertThat(mapping.operatorHint()).contains("补一条");
     }
 
-    // ==================== 深度与环保护 ====================
+    // 深度与环保护
 
     @Test
     @DisplayName("根因在异常链深处（多层包装）也能取到")
@@ -289,7 +286,7 @@ class FailureMapperTest {
         assertThat(mapping.errorCode()).isEqualTo(ErrorCode.MODEL_UNAVAILABLE);
     }
 
-    // ==================== 未纳入分类的诚实处理 ====================
+    // 未纳入分类的诚实处理
 
     @Test
     @DisplayName("★ 非模型调用异常 → 明确标为『未纳入分类』，而不是假装分类成功")
@@ -301,7 +298,7 @@ class FailureMapperTest {
         assertThat(mapping.logDetail()).contains("IllegalStateException");
     }
 
-    // ==================== 脱敏纪律 ====================
+    // 脱敏纪律
 
     @Test
     @DisplayName("★ 日志详情里不含上游响应体全文（防回显泄露）")

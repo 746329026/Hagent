@@ -29,23 +29,18 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 阶段 14 后补：<b>历史回放也要能看到那一行统计</b>（{@code GET /chat/sessions/{id}/messages}）。
- *
- * <h2>★ 它解决的那个具体问题</h2>
+ * <b>历史回放也要能看到那一行统计</b>（{@code GET /chat/sessions/{id}/messages}）。
  *
  * <p>实时那一行来自 SSE 的 {@code stats} 事件，<b>刷新页面就没了</b> ——
- * 因为消息表当时只知道自己属于哪个会话，不知道"是哪一轮产生的"。
- * 补法：写回时把 {@code turn_id} 挂进 assistant 消息的 properties（落进
- * {@code chat_message.turn_id}），回放时按它批量查 {@code chat_turn}。
+ * 因为消息表只知道自己属于哪个会话，不知道"是哪一轮产生的"。补法：写回时把
+ * {@code turn_id} 挂进 assistant 消息的 properties（落进 {@code chat_message.turn_id}），
+ * 回放时按它批量查 {@code chat_turn}。
  *
- * <h2>★ 这条边为什么必须单独测</h2>
+ * <p>为什么这条边要单独测：写的一侧（{@code AgentPipeline#writeBack}）与读的一侧各自都能通过，
+ * 而"存了但读不出来"（properties 键名写歪、或回放忘了查库）只有把两端放进同一个断言才抓得到 ——
+ * 症状是"历史里那一行永远是空的"，<b>不报错</b>。
  *
- * <p>写的一侧（{@code AgentPipeline#writeBack}）与读的一侧（本类）<b>各自都能通过</b>：
- * 一条断言"库里存了 turn_id"，一条断言"stats 能序列化"。而
- * <b>"存了但读不出来"</b>（properties 键名写歪、或回放忘了查库）只有把两端放进
- * 同一个断言才抓得到 —— 它的症状是"历史里那一行永远是空的"，<b>不报错</b>。
- *
- * <p>用 mock 而不是真库：这里要验的是"拼装逻辑"，真库那条往返由
+ * <p>用 mock 而不是真库：这里验的是拼装逻辑，真库那条往返由
  * {@code MysqlMessageStoreTest#turnIdRoundTripsThroughDatabase} 负责。
  */
 class HistoryStatsTest {

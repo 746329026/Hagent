@@ -8,11 +8,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * <b>阈值单位换算与分档边界</b> —— 这两件事都是"不报错但结果错"的类型，必须钉死。
+ * <b>阈值单位换算与分档边界</b> —— 两件"不报错但结果错"的事，必须钉死。
  *
- * <h2>★ 为什么单位换算要单独测</h2>
- *
- * <p>本项目配置用【距离】（与校准证据同单位），而框架的
+ * <p>为什么单位换算要单独测：配置用【距离】（与校准证据同单位），而框架的
  * {@code SearchRequest.similarityThreshold} 与 {@code Document.getScore()} 用【相似度】。
  * 一处 {@code 1 - x} 写反或漏写，<b>不会有任何异常</b>：
  * <ul>
@@ -20,11 +18,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>{@code bandOf} 算错 → "高相关"标签贴到了最不相关的块上，而模型据此作答。</li>
  * </ul>
  *
- * <h2>★ 边界值是重点</h2>
- *
- * <p>分档用 {@code <=} 还是 {@code <}，只在"分数恰好等于阈值"时有差别 ——
- * 而这种输入在真实检索里几乎不会出现，所以<b>手工测试永远碰不到它</b>。
- * 单元测试在这里正好补上：直接喂精确的边界值。
+ * <p>边界值是重点：分档用 {@code <=} 还是 {@code <}，只在"分数恰好等于阈值"时有差别 ——
+ * 而这种输入在真实检索里几乎不会出现，<b>手工测试永远碰不到它</b>，
+ * 单元测试在这里直接喂精确的边界值补上。
  */
 class RetrievalPropertiesTest {
 
@@ -94,8 +90,8 @@ class RetrievalPropertiesTest {
         assertThat(settingsOf(props).bandOf(0.8171)).as("公司总部在哪里").isEqualTo(RelevanceBand.HIGH);
         assertThat(settingsOf(props).bandOf(0.5415)).as("请假流程是什么（相关却落【低】）").isEqualTo(RelevanceBand.LOW);
 
-        // ★ 无关提问也拿到高分 —— 这不是 bug，是模型的区分度问题。
-        //   把这条断言写下来，是为了让"阈值挡不住无关问题"这件事在被遗忘之前留档。
+        // 无关提问也拿到高分 —— 这不是 bug，是模型的区分度问题。
+        // 写下来是为了让"阈值挡不住无关问题"这件事在被遗忘之前留档。
         assertThat(settingsOf(props).bandOf(0.7402))
                 .as("今天杭州天气怎么样 —— 无关，却落【高】。提示词约束正是为它而设")
                 .isEqualTo(RelevanceBand.HIGH);
@@ -113,8 +109,8 @@ class RetrievalPropertiesTest {
     void floatingPointBoundaryStillClassifiesCorrectly() {
         RetrievalProperties props = defaults();
 
-        // ★ 这正是本类存在的价值之一：真实检索永远不会恰好落在边界上，
-        //   所以这个偏差在手工测试里一辈子碰不到 —— 而它会让"边界那一档"判错。
+        // 这正是本类存在的价值之一：真实检索永远不会恰好落在边界上，
+        // 所以这个偏差在手工测试里一辈子碰不到 —— 而它会让"边界那一档"判错。
         double inexact = 1.0 - 0.70;
         assertThat(inexact)
                 .as("先把浮点事实本身钉住：它确实不是精确的 0.30")
@@ -132,7 +128,7 @@ class RetrievalPropertiesTest {
     }
 
     // ========================================================================
-    // 启动期校验（决策 8：配置写错就起不来）
+    // 启动期校验（配置写错就起不来）
     // ========================================================================
 
     @Test
@@ -193,7 +189,7 @@ class RetrievalPropertiesTest {
         assertThat(props.getMediumMaxDistance()).isEqualTo(0.45);
     }
 
-    /** 分档规则阶段 12 已搬进领域值对象 —— 属性类不再持有领域规则（审计 P1-10）。 */
+    /** 分档规则住在领域值对象里 —— 属性类只负责绑定配置，不再持有领域规则。 */
     private static com.hagent.retrieval.RetrievalSettings settingsOf(com.hagent.config.RetrievalProperties p) {
         return new com.hagent.retrieval.RetrievalSettings(
                 p.isEnabled(), p.getTopK(), p.similarityThreshold(),

@@ -22,36 +22,29 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * 会话目录的文件实现 —— 零基础设施兜底，与 {@code FileConversationRecordStore} 配套。
+ * 会话目录的文件实现 —— 零基础设施兜底，与 {@code FileMessageStore} 配套。
  *
- * <h2>★ 存储形态：一个 sidecar 文件，不是"一会话一文件"</h2>
+ * <h2>存储形态：一个 sidecar 文件，不是"一会话一文件"</h2>
  *
- * <p>记录层的文件实现是<b>一会话一文件</b>（{@code {id}.json}），但目录<b>不能</b>照抄：
- * 目录的操作是"{@link #list} 全部 + 按时间排序"，若一会话一文件，
- * 每次打开侧栏都要<b>遍历整个目录、逐个读文件</b>再排序 —— 会话一多就明显变慢。
+ * <p>记录层是一会话一文件，但目录<b>不能</b>照抄：目录的主要操作是"{@link #list} 全部 + 按时间排序"，
+ * 若一会话一文件，每次打开侧栏都要<b>遍历整个目录、逐个读文件</b>再排序 —— 会话一多就明显变慢。
  *
  * <p>所以目录落在一个 {@code _catalog.json} 里（下划线开头，不会与 UUID 文件名撞）：
  * <pre>
- *   { "conversations": { "<uuid>": { "title": "...", "mode": "chat",
+ *   { "conversations": { "&lt;uuid&gt;": { "title": "...", "mode": "chat",
  *                                    "createdAt": 1723…, "updatedAt": 1723… } } }
  * </pre>
  *
- * <h2>★ 代价（诚实声明）：全局锁</h2>
+ * <h2>代价：全局锁</h2>
  *
- * <p>单文件意味着<b>所有会话共用一把锁</b> —— 这正是记录层当初拒绝单文件的理由
- * （"全部会话串行"）。这里接受它的原因：
- * <ul>
- *   <li>目录的写操作是<b>每回合一次</b>（更新活跃时间），比消息写入少一个数量级，
- *       而且它只是改一个 long；</li>
- *   <li>本实现本身就是"零基础设施兜底"，它的定位不是扛并发；</li>
- *   <li>换成"一会话一文件的目录项"会让读路径变成 O(会话数) 次文件操作，
- *       用一个更常见的慢换取一个更少见的并发问题 —— 不划算。</li>
- * </ul>
+ * <p>单文件意味着<b>所有会话共用一把锁</b>（这正是记录层拒绝单文件的理由）。这里接受它：
+ * 目录的写操作是<b>每回合一次</b>（更新活跃时间），比消息写入少一个数量级，且只是改一个 long；
+ * 本实现本身就是兜底，定位不是扛并发；而"一会话一文件的目录项"会让读路径变成
+ * O(会话数) 次文件操作 —— 用一个更常见的慢换取一个更少见的并发问题，不划算。
  *
- * <h2>★ 时间戳存 epoch 毫秒（long），不存 ISO 字符串</h2>
+ * <h2>时间戳存 epoch 毫秒（long），不存 ISO 字符串</h2>
  *
- * <p>字符串要解析、要时区、要格式约定；long 是<b>绝对时间</b>，没有歧义。
- * 展示格式属于前端，不属于存储。
+ * <p>字符串要解析、要时区、要格式约定；long 是<b>绝对时间</b>，没有歧义。展示格式属于前端。
  */
 @Slf4j
 public class FileSessionStore implements SessionStore {
@@ -118,7 +111,7 @@ public class FileSessionStore implements SessionStore {
             Entry existing = file.conversations().get(conversationId);
             Entry next = existing == null
                     ? new Entry(SessionStore.titleOf(titleSeed), safeMode.wireName(), now, now)
-                    // ★ 已存在：只更新 updatedAt。标题与模式原地不动（接口契约）。
+                    // 已存在：只更新 updatedAt。标题与模式原地不动（接口契约）。
                     : new Entry(existing.title(), existing.mode(), existing.createdAt(), now);
             if (existing != null && next.equals(existing)) {
                 return; // 同一毫秒内的重复 touch：不写盘
@@ -167,12 +160,11 @@ public class FileSessionStore implements SessionStore {
     /**
      * 读出目录文件。
      *
-     * <p>文件不存在 / 内容为空 / JSON 损坏 都返回<b>空目录</b>并记 WARN，
-     * 而不是抛异常 —— 与 {@code FileConversationRecordStore#readStored} 同一立场：
+     * <p>文件不存在 / 内容为空 / JSON 损坏 都返回<b>空目录</b>并记 WARN，而不是抛异常 ——
      * 一个坏文件不该让整个应用的侧栏打不开。
      *
-     * <p>★ 但"损坏"与"空"在日志里<b>必须能区分</b>：前者是事故（目录丢了），
-     * 后者是正常的新环境。都打同一句"读不到"会让事故看起来像首次运行。
+     * <p>但"损坏"与"空"在日志里<b>必须能区分</b>：前者是事故（目录丢了），后者是正常的新环境。
+     * 都打同一句"读不到"会让事故看起来像首次运行。
      */
     private Catalog read() {
         if (Files.notExists(catalogFile)) {
@@ -218,8 +210,8 @@ public class FileSessionStore implements SessionStore {
     /**
      * 一个会话的目录项（持久化形态）。
      *
-     * <p>它是 record 且字段全是"可序列化的基本类型"（String / long），
-     * 所以 Jackson 不需要额外模块（Instant 就需要 JSR310 模块，见类注释）。
+     * <p>字段全是"可序列化的基本类型"（String / long），所以 Jackson 不需要额外模块
+     * （{@code Instant} 就需要 JSR310 模块——时间戳因此存 epoch 毫秒）。
      */
     public record Entry(String title, String mode, long createdAt, long updatedAt) {
     }

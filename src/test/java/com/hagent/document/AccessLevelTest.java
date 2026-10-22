@@ -7,21 +7,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link AccessLevel} 的解析规则。
+ * {@link AccessLevel} 的解析规则：严格策略必须抛，宽松策略返回空。
  *
- * <h2>★ 为什么这个类现在才出现（阶段 12 第 2 步）</h2>
- *
- * <p>在此之前，"密级字符串 → 枚举"的规则被<b>抄了三遍</b>：
- * {@code AccessLevel.parse}（入库，抛异常）、{@code RetrievedChunk.level}（检索，静默回退）、
- * {@code FileLongTermMemoryStore.parseLevelOrWarn}（长期记忆，WARN + 回退）。
- * 三处<b>规则</b>相同、<b>策略</b>不同 —— 而没有任何测试盯着"它们说的是同一条规则"。
- *
- * <p>现在规则只有一处（{@code parse} 与 {@code tryParse} 共用匹配逻辑），
- * 于是测试可以只钉两件事：
- * <ol>
- *   <li><b>严格</b>策略：非法值必须<b>抛</b>，且消息里点名"允许的取值"（作者要能改对）；</li>
- *   <li><b>宽松</b>策略：非法值返回<b>空</b>（由调用点决定 WARN / 默认），空白输入给默认值。</li>
- * </ol>
+ * <p>规则只有一处（{@code parse} 与 {@code tryParse} 共用匹配逻辑），两处策略不同：
+ * 严格侧非法值抛异常且消息里点名允许的取值（否则作者只知道错了、不知道改成什么），
+ * 宽松侧返回空由调用点决定 WARN / 默认值。本类钉住两者对合法值给同一答案。
  */
 class AccessLevelTest {
 

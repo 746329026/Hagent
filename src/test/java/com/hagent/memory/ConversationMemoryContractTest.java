@@ -14,31 +14,16 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 会话记忆的<b>契约测试</b> —— 一套断言，<b>所有"层组合"都必须通过</b>。
+ * 会话记忆的契约测试 —— 一套断言，所有"层组合"都必须通过。
  *
- * <h2>★ 它解决什么问题（工作协议第 6 条的机制化）</h2>
+ * <p>要用的搭配有三种：mysql + redis（生产）、mysql + none（降级）、file + none（零基础设施）。
+ * 若每个组合各写一套测试，写着写着断言就不一样了，"换实现只改配置"这句话便没有证据
+ * （配置能换，但行为可能不同、且没人发现）；有了这个基类，新实现天然被同一组断言检验。
  *
- * <p>本项目现在有两层、各有多个实现，组合起来有三种要用的搭配：
- * <pre>
- *   mysql + redis   （生产）
- *   mysql + none    （降级：不起 Redis）
- *   file  + none    （零基础设施）
- * </pre>
+ * <p>断言写在【门面】这一层：{@link ConversationMemory} 是切面依赖的抽象，也是用户可观察的语义边界；
+ * 记录层自己的语义（只按条数取尾部、不做 token 裁剪）由各实现的单元测试覆盖，不在这里重复。
  *
- * <p>没有这个抽象类的话，每个组合各写一套测试，<b>写着写着断言就不一样了</b> ——
- * 于是"换实现只改配置"这句话就没有证据（配置能换，但行为可能不同，而且没人发现）。
- * 有了它，<b>新实现天然被同一组断言检验</b>，加一个组合只是继承一个类。
- *
- * <h2>★ 为什么断言写在【门面】这一层</h2>
- *
- * <p>{@link ConversationMemory} 是切面依赖的抽象，也是用户可观察的语义边界。
- * 记录层自己的语义（只按条数取尾部、不做 token 裁剪）由各实现的单元测试覆盖，
- * 不在这里重复 —— 那属于"实现细节"，不是"契约"。
- *
- * <h2>★ 每个用例用独立的会话 ID</h2>
- *
- * <p>因为 mysql / redis 两个组合共用<b>真实</b>的库与实例，
- * 固定 ID 会让用例之间互相污染；用例结束即清理。
+ * <p>每个用例用独立会话 ID：mysql / redis 组合共用真实库与实例，固定 ID 会让用例互相污染；用例结束即清理。
  */
 abstract class ConversationMemoryContractTest {
 
@@ -112,9 +97,8 @@ abstract class ConversationMemoryContractTest {
     void dataSurvivesANewInstance() {
         memory.append(conversationId, List.of(new UserMessage("持久化验证")));
 
-        // ★ 这条是"上下文层可丢、记录层权威"的直接证据：
-        //   换一个门面实例后，即使上下文层是空的（新实例/新节点/TTL 已过），
-        //   也必须能从记录层重建出同样的内容。
+        // 这是"上下文层可丢、记录层权威"的直接证据：换一个门面实例后，
+        // 即使上下文层是空的（新实例/新节点/TTL 已过），也必须能从记录层重建出同样的内容。
         ConversationMemory reopened = newMemory();
 
         assertThat(reopened.load(conversationId, BIG))

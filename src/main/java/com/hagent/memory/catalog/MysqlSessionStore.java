@@ -16,26 +16,20 @@ import java.util.regex.Pattern;
 /**
  * 会话目录的 MySQL 实现。
  *
- * <h2>★ 装配上的同一个坑（与 {@code MysqlConversationRecordStore} 一致）</h2>
+ * <h2>装配：接收 {@link DataSource} 而不是 {@code JdbcTemplate}</h2>
  *
- * <p>接收 {@link DataSource} 而不是 {@code JdbcTemplate}，由调用方
- * {@code MemoryConfig} 用 {@code @Qualifier("dataSource")} 按<b>名字</b>取业务主库。
- * 理由见 {@code MysqlConversationRecordStore} 的类注释：
- * 项目里有两个数据源（MySQL 主库 / pgvector 的 PostgreSQL），
- * 按类型注入会拿到<b>指向 PostgreSQL</b> 的那个，而症状只是"表不存在"。
+ * <p>由调用方用 {@code @Qualifier("dataSource")} 按<b>名字</b>取业务主库。项目里有两个数据源
+ * （MySQL 主库 / pgvector 的 PostgreSQL），按类型注入会拿到<b>指向 PostgreSQL</b> 的那个，
+ * 而症状只是"表不存在"（理由见 {@link com.hagent.memory.record.MysqlMessageStore} 的类注释）。
  *
- * <h2>★ {@link #touch} 用一条语句完成"懒创建 + 不覆盖"</h2>
+ * <h2>{@link #touch} 用一条语句完成"懒创建 + 不覆盖"</h2>
  *
- * <p>{@code INSERT ... ON DUPLICATE KEY UPDATE updated_at = ...}：
- * 会话不存在时插入（标题与模式取本次参数），已存在时<b>只更新活跃时间</b>，
- * 标题与模式原地不动 —— 这正是接口契约要的语义，而且
- * <b>没有"先 SELECT 再决定 INSERT 还是 UPDATE"的竞态</b>。
+ * <p>{@code INSERT ... ON DUPLICATE KEY UPDATE updated_at = ...}：会话不存在时插入（标题与模式取
+ * 本次参数），已存在时<b>只更新活跃时间</b> —— 正是接口契约要的语义，而且<b>没有"先 SELECT 再决定
+ * INSERT 还是 UPDATE"的竞态</b>。
  *
- * <p>★ 刻意<b>不</b>用 {@code VALUES(col)} 语法（{@code ON DUPLICATE KEY UPDATE title = VALUES(title)}）：
- * 那样会把标题覆盖回"第一句话"，用户改过的名字会在下一句话时消失。
- * 这类"少写一个条件就静默丢用户输入"的地方，编译器帮不上忙，只能靠注释与测试。
- * （也不写 {@code VALUES()} 函数：它在 MySQL 8.0.20+ 已是 deprecated，
- * 早晚要改；不需要它的语义，就不要引入这个依赖。）
+ * <p><b>刻意不用</b> {@code VALUES(col)} 把标题写进 UPDATE 子句：那样会把标题覆盖回"第一句话"，
+ * 用户改过的名字会在下一句话时消失。这类"少写一个条件就静默丢用户输入"的地方编译器帮不上忙。
  */
 @Slf4j
 public class MysqlSessionStore implements SessionStore {
@@ -112,9 +106,9 @@ public class MysqlSessionStore implements SessionStore {
         if (affected > 0) {
             return true;
         }
-        // ★ 一个真实的 MySQL 坑：UPDATE 的影响行数在"新值与旧值完全相同"时是 0，
-        //   所以 affected==0 有两种可能 —— "会话不存在"与"标题没变"。
-        //   直接把 0 当成"不存在"会让前端在用户原样提交时收到 404（看起来像会话丢了）。
+        // 一个真实的 MySQL 坑：UPDATE 的影响行数在"新值与旧值完全相同"时是 0，
+        // 所以 affected==0 有两种可能 —— "会话不存在"与"标题没变"。
+        // 直接把 0 当成"不存在"会让前端在用户原样提交时收到 404（看起来像会话丢了）。
         return find(conversationId).isPresent();
     }
 
@@ -142,9 +136,8 @@ public class MysqlSessionStore implements SessionStore {
     /**
      * 启动自检：表必须存在且列齐。
      *
-     * <p>与记录层的自检同一立场（决策 8：不静默降级）——
-     * 表不存在的话症状是"侧栏永远是空的"，而它<b>不会报错</b>，
-     * 排查方向会被引向"前端没渲染"。
+     * <p>与记录层的自检同一立场（<b>不静默降级</b>）—— 表不存在的话症状是"侧栏永远是空的"，
+     * 而它<b>不会报错</b>，排查方向会被引向"前端没渲染"。
      */
     private void verifySchemaOrThrow() {
         try {

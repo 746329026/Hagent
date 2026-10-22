@@ -7,20 +7,13 @@ import org.springframework.ai.chat.model.ToolContext;
 /**
  * 工具上下文的<b>读写约定</b> —— 键名与身份解析的唯一出处。
  *
- * <h2>★ 为什么它从 {@code KnowledgeRetrievalTool} 搬出来（协议第 12、13 条）</h2>
+ * <p>键与解析放在这里，而不是挂在某个工具名下：长期记忆的工具也读同一个身份键，
+ * 写成 {@code KnowledgeRetrievalTool.TOOL_CONTEXT_USER} 会让名字<b>指向别处</b>；
+ * 三条"缺失/类型不对 → 匿名 + WARN"的分支若各抄一份，迟早出现
+ * "检索按匿名处理、记忆却按缺省权限处理"这种<b>不一致的失败方向</b>。
  *
- * <p>这两个键原本定义在 {@code KnowledgeRetrievalTool} 里。阶段 11 加入长期记忆的三个工具后，
- * 它们也要读同一个 {@code hagentToolUser} —— 如果继续写
- * {@code KnowledgeRetrievalTool.TOOL_CONTEXT_USER}，名字就在<b>指向别处</b>：
- * 后来者会以为这个键只有检索工具用，或者去检索工具里找一个通用约定。
- *
- * <p>解析逻辑同理：三条"缺失/类型不对 → 匿名 + WARN"的分支如果各抄一份，
- * 迟早出现"检索按匿名处理、记忆却按缺省权限处理"这种<b>不一致的失败方向</b>。
- *
- * <h2>★ 缺身份时为什么是"匿名"而不是"拒绝"</h2>
- *
- * <p>与 {@code UserContextInterceptor} 的立场一致：<b>匿名 = 最小权限，不是报错</b>。
- * 但<b>必须 WARN</b>：调用方漏传这件事本身要被看见，否则表现为
+ * <p><b>缺身份时是"匿名"而不是"拒绝"</b>（与 {@code UserContextInterceptor} 的立场一致）：
+ * 匿名 = 最小权限，不是报错。但<b>必须 WARN</b> —— 漏传本身要被看见，否则表现为
  * "结果莫名其妙地少"或"记忆写进了别人的目录"。
  */
 @Slf4j

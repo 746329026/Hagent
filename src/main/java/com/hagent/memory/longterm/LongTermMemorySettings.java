@@ -5,9 +5,9 @@ package com.hagent.memory.longterm;
  *
  * <p>理由与两条约束见 {@link com.hagent.memory.record.MessageStoreSettings} 的类注释。
  *
- * <p>★ 这三个上限不是"代码结构"，它们决定的是<b>成本</b>（索引每轮都注入 prompt）
- * 与<b>安全性</b>（单条记忆多大），所以放在配置里；但<b>怎么用它们</b>
- * （超限是拒绝写还是截断）是领域决策，留在 {@link FileLongTermMemoryStore}。
+ * <p>这三个上限决定的不是代码结构，而是<b>成本</b>（索引每轮都注入 prompt）与
+ * <b>安全性</b>（单条记忆多大），所以放在配置里；但<b>怎么用它们</b>（超限是拒绝写还是截断）
+ * 是领域决策，留在 {@link FileLongTermMemoryStore}。
  */
 public interface LongTermMemorySettings {
 

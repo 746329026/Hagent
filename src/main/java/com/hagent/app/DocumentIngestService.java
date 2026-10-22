@@ -35,8 +35,6 @@ import java.util.stream.Stream;
 /**
  * 文档入库服务 —— <b>知识库写入链路的编排者</b>。
  *
- * <h2>完整链路</h2>
- *
  * <pre>
  *   读取文件 → 解析 frontmatter → 算文档哈希
  *        ↓
@@ -46,46 +44,24 @@ import java.util.stream.Stream;
  *        └─ 存在但哈希已变  → 删旧块 → 切分 → 打标签 → 写入         （UPDATED）
  * </pre>
  *
- * <h2>★ 幂等设计：两级判据</h2>
+ * <h2>幂等判据：{@code source}（文档身份）+ {@code docHash}（内容指纹）</h2>
  *
- * <p>判据是 {@code source}（文档身份）+ {@code docHash}（内容指纹），
- * 两者组合回答"要不要动手"：
+ * <p>库中没有该 source → 写入；有且 docHash 相同 → <b>跳过</b>（重新切分与 embedding 是纯浪费）；
+ * 有但 docHash 变了 → <b>先删后写</b>。<b>删除是必需的步骤</b>：不删旧块就直接写新块，"旧版本 +
+ * 新版本"会同时存在于库中，检索时<b>旧内容照样会被命中</b> —— 用户拿到一份已经被废止的规定，
+ * 而系统毫无异常。
  *
- * <table border="1">
- *   <caption>判定表</caption>
- *   <tr><th>库中有该 source？</th><th>docHash 相同？</th><th>动作</th><th>为什么</th></tr>
- *   <tr><td>否</td><td>—</td><td>写入</td><td>新文档</td></tr>
- *   <tr><td>是</td><td>是</td><td><b>跳过</b></td><td>内容没变，重新切分与 embedding 是纯浪费</td></tr>
- *   <tr><td>是</td><td>否</td><td>先删后写</td><td>文档更新了</td></tr>
- * </table>
+ * <h2>关于"块 ID"的刻意选择</h2>
  *
- * <p><b>为什么删除是必需的步骤</b>：如果不删旧块就直接写新块，那么
- * "一篇文档的旧版本 + 新版本"会同时存在于库中，检索时<b>旧内容照样会被命中</b> ——
- * 用户会拿到一份已经被废止的规定，而系统毫无异常。这是内容更新场景下
- * 最危险的静默错误。
+ * <p>本项目<b>不自己指定块 ID</b>，交给框架生成随机 UUID：pgvector 表的 id 是 {@code uuid} 类型，
+ * 自己指定就得保证生成的字符串是合法 UUID；更重要的是<b>幂等已由 docHash 判定负责</b>，再引入
+ * "确定性 ID"就是第二套幂等机制 —— 两套并存时"谁说了算"会变得难以推理。一套机制做一件事。
  *
- * <h2>★ 关于"块 ID"的一个刻意选择</h2>
+ * <h2>为什么直查 SQL 而不是只用 VectorStore</h2>
  *
- * <p>本项目<b>不自己指定块 ID</b>，交给框架生成随机 UUID。原因：
- * <ul>
- *   <li>框架的建表 DDL 里 {@code id uuid PRIMARY KEY DEFAULT uuid_generate_v4()}，
- *       而 pgvector 表默认用 {@code uuid} 类型 —— 自己指定 ID 就必须保证
- *       生成的字符串是合法 UUID，否则写入报类型错误；</li>
- *   <li>更重要的是：<b>幂等已经由 docHash 判定负责了</b>。
- *       再引入"确定性 ID"就是第二套幂等机制 —— 两套机制并存时，
- *       "谁说了算"会变得难以推理（例如 docHash 说没变、ID 冲突说变了）。</li>
- * </ul>
- * 一套机制做一件事，比两套机制互相兜底更容易维护。
- *
- * <h2>★ 为什么直接查 SQL 而不是只用 VectorStore</h2>
- *
- * <p>{@code VectorStore} 的接口只有 {@code add} / {@code delete} / {@code similaritySearch}，
- * <b>没有"按元数据条件查询"的方法</b>（{@code delete(Filter.Expression)} 只删不查）。
- * 而幂等判定恰恰需要"查这个 source 现在是什么哈希"。
- *
- * <p>所以这里用 {@code JdbcTemplate} 直查向量表 —— 这是必要的，不是绕过框架：
- * 写走 {@code VectorStore}（由它保证与建表 DDL 一致），
- * 查走原生 SQL（框架没提供）。两条路径访问同一张表，表名与 schema 都取自同一份配置。
+ * <p>{@code VectorStore} 没有"按元数据条件查询"的方法（{@code delete(Filter.Expression)} 只删不查），
+ * 而幂等判定恰恰需要"查这个 source 现在是什么哈希"。所以写走 {@code VectorStore}（由它保证与建表
+ * DDL 一致），查走 {@code JdbcTemplate} 原生 SQL —— 两条路径访问同一张表，表名与 schema 同源配置。
  */
 @Slf4j
 @Service
@@ -118,9 +94,7 @@ public class DocumentIngestService {
         this.vectorStoreProperties = vectorStoreProperties;
     }
 
-    // ========================================================================
-    // 对外入口
-    // ========================================================================
+    // ---- 对外入口 ----
 
     /**
      * 入库一份文档（幂等）。
@@ -185,12 +159,8 @@ public class DocumentIngestService {
     /**
      * 批量入库整个知识库目录（递归扫描）。
      *
-     * <p><b>单份失败不中止整批</b>，而是记录后继续 —— 理由：批量入库的场景是
-     * "同步一批文档"，其中一份格式不对就全批不执行，会让"98 份成功、1 份失败"
-     * 变成"0 份成功"。所以这里<b>收集</b>失败而非立即抛出。
-     *
-     * <p>但失败必须被<b>报告出来</b>：方法返回的结果里带上失败清单，
-     * 由调用方决定是打日志、告警还是当作错误。绝不能静默吞掉 ——
+     * <p><b>单份失败不中止整批</b>，而是记录后继续 —— 一份格式不对就让整批不执行，会把"98 份成功"
+     * 变成"0 份成功"。但失败必须被<b>报告出来</b>（见 {@link BatchIngestReport}），绝不能静默吞掉：
      * "以为同步了 99 份，实际只有 98 份"是最难发现的一类问题。
      */
     public BatchIngestReport ingestAll() {
@@ -225,27 +195,17 @@ public class DocumentIngestService {
         return report;
     }
 
-    // ========================================================================
-    // 幂等判定：直查向量表的 metadata
-    // ========================================================================
+    // ---- 幂等判定：直查向量表的 metadata ----
 
     /**
      * 查询某个来源当前在库里的文档哈希；该来源不存在时返回 {@code null}。
      *
-     * <p><b>SQL 的两个安全要点</b>：
-     * <ul>
-     *   <li><b>表名只能用字符串拼接</b> —— SQL 不支持把表名当占位符。
-     *       它来自我们自己的配置（{@code VectorStoreProperties}），不是外部输入，
-     *       因此不构成注入风险。这里额外加了双引号，避免表名恰好是 SQL 关键字时解析出错。</li>
-     *   <li><b>{@code source} 必须用占位符</b> —— 它最终来自文件路径（外部输入），
-     *       拼进 SQL 就是注入漏洞。</li>
-     * </ul>
+     * <p><b>SQL 的两个安全要点</b>：<b>表名只能用字符串拼接</b>（SQL 不支持表名占位符；它来自我们
+     * 自己的配置，不是外部输入），额外加双引号以免表名恰好是 SQL 关键字；<b>{@code source} 必须用
+     * 占位符</b> —— 它最终来自文件路径（外部输入），拼进 SQL 就是注入漏洞。
      *
-     * <p>用 {@code LIMIT 1}：一篇文档的所有块携带<b>同一个</b> docHash，取任意一条即可，
-     * 顺便避免在"某篇文档块特别多"时扫全表。
-     *
-     * <p>{@code metadata ->> 'docHash'}：{@code ->>} 是把 json 值取成 text 的操作符。
-     * 用它的原因是 docHash 是字符串，直接比较 text 最直接。
+     * <p>用 {@code LIMIT 1}：一篇文档的所有块携带<b>同一个</b> docHash，取任意一条即可，顺便避免
+     * "某篇文档块特别多"时扫全表。{@code metadata ->> 'docHash'} 的 {@code ->>} 是把 json 取成 text。
      */
     private String findExistingDocHash(String source) {
         String sql = String.format(
@@ -269,16 +229,13 @@ public class DocumentIngestService {
                 vectorStoreProperties.getSchemaName(), vectorStoreProperties.getTableName());
     }
 
-    // ========================================================================
-    // 切分结果 → 向量库文档
-    // ========================================================================
+    // ---- 切分结果 → 向量库文档 ----
 
     /**
      * 把切好的块包装成 {@link Document}（带上完整元数据）。
      *
-     * <p><b>这里只做"包装"，不做任何判断</b> —— 密级、种类、有效期都由
-     * {@link LoadedDocument} 决定，本方法不覆盖它们。这样"入库写什么标签"
-     * 只有一个决策点（frontmatter + 种类默认值），而不是两处都可能改。
+     * <p><b>这里只做"包装"，不做任何判断</b> —— 密级、种类、有效期都由 {@link LoadedDocument} 决定。
+     * 这样"入库写什么标签"只有一个决策点，而不是两处都可能改。
      */
     private List<Document> toDocuments(LoadedDocument loaded, List<Chunk> chunks, String docHash) {
         List<Document> documents = new ArrayList<>(chunks.size());
@@ -305,15 +262,12 @@ public class DocumentIngestService {
     /**
      * 计算文档指纹。
      *
-     * <p>包含<b>正文 + 关键 frontmatter 字段</b>，而不是只哈希正文。理由：
-     * <b>只改了密级（或种类、有效期）时，正文没变但入库结果必须改变</b>。
-     * 若指纹只算正文，那么"把某文档从 INTERNAL 改成 PUBLIC"这种改动
-     * 会被判定为"内容未变"而跳过 —— 权限调整静默失效，
-     * 这是安全问题而非功能问题。
+     * <p>包含<b>正文 + 关键 frontmatter 字段</b>，而不是只哈希正文：<b>只改了密级（或种类、有效期）
+     * 时正文没变，但入库结果必须改变</b>。若指纹只算正文，"把某文档从 INTERNAL 改成 PUBLIC"会被
+     * 判定为"内容未变"而跳过 —— 权限调整静默失效，这是安全问题而非功能问题。
      *
-     * <p>刻意<b>不</b>把 {@code dept} 参与哈希：它来自目录级配置，
-     * 改了配置会让全库重新入库，代价大于收益。这是一个明确的取舍，
-     * 所以在此写明 —— 将来若要支持"按部门改密级"，需重新评估这一条。
+     * <p>刻意<b>不</b>把 {@code dept} 参与哈希：它来自目录级配置，改了配置会让全库重新入库，代价
+     * 大于收益。这是明确的取舍，所以写明 —— 将来若要"按部门改密级"，需重新评估这一条。
      */
     private String computeDocHash(LoadedDocument loaded) {
         StringBuilder sb = new StringBuilder();
@@ -330,18 +284,14 @@ public class DocumentIngestService {
         return Fingerprints.content(sb.toString());
     }
 
-    // ========================================================================
-    // 目录扫描
-    // ========================================================================
+    // ---- 目录扫描 ----
 
     /**
      * 递归列出知识库目录下的候选文档。
      *
-     * <p>返回<b>相对路径且统一用 {@code /}</b> —— 与 {@code LoadedDocument#source()}
-     * 的约定一致，否则同一份文档会因分隔符不同而被当成两份。
-     *
-     * <p>排序是刻意的：让批量入库的顺序稳定（按路径字典序），
-     * 这样日志与报告的先后顺序在多次运行之间可比较。
+     * <p>返回<b>相对路径且统一用 {@code /}</b> —— 与 {@code LoadedDocument#source()} 的约定一致，
+     * 否则同一份文档会因分隔符不同而被当成两份。<b>排序是刻意的</b>：批量入库顺序稳定（按路径字典序），
+     * 日志与报告的先后顺序才能在多次运行之间比较。
      */
     private List<String> listCandidateSources(Path root) {
         List<String> extensions = ingestProperties.getExtensions();

@@ -5,9 +5,9 @@ package com.hagent.memory.context;
  *
  * <p>理由与两条约束见 {@link com.hagent.memory.record.MessageStoreSettings} 的类注释。
  *
- * <p>★ <b>这里刻意没有 {@code maxRetained}。</b>本层要保留的条数是
- * "两种模式条数上限的较大者"，那是<b>领域规则</b>（因为本层不知道本次是哪个模式），
- * 它由 {@code RedisConversationContextCache} 自己算 —— 端口只给两个原始上限。
+ * <p><b>这里刻意没有 {@code maxRetained}</b>：本层要保留的条数是"两种模式条数上限的较大者"，
+ * 那是<b>领域规则</b>（本层不知道本次是哪个模式），由 {@link RedisConversationContextCache}
+ * 自己算 —— 端口只给两个原始上限。
  */
 public interface ContextCacheSettings {
 

@@ -18,18 +18,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * <b>包的归属守卫</b> —— "有唯一正确归属"的那几类类，必须在对的包里。
  *
- * <h2>★ 为什么要有一个"测目录结构"的测试</h2>
+ * <p>要测目录结构，是因为同一个操作性错误犯过<b>两次</b>：新类按"它讲什么业务"放、而不是按
+ * "它是什么种类"放（{@code LongTermMemoryProperties} / {@code LongTermMemoryConfig} 就被放进了
+ * {@code memory.longterm}）。<b>重复 ≥2 次必须机制化</b>，不许只口头提醒。
  *
- * <p>因为同一个操作性错误犯过<b>两次</b>：
- * <ol>
- *   <li>踩坑 #25（阶段 8）：新类按"它讲什么业务"放，而不是按"它是什么种类"放；</li>
- *   <li>阶段 11：{@code LongTermMemoryProperties} / {@code LongTermMemoryConfig}
- *       又被放进了 {@code memory.longterm}（"它装配记忆，就跟记忆走"）。</li>
- * </ol>
- * 按协议第 6 条：**重复 ≥2 次必须机制化**，不许只口头提醒。
- *
- * <h2>它检查什么（全部规则，<b>零例外</b>）</h2>
- *
+ * <p>它检查的规则（全部规则，<b>零例外</b>）：
  * <pre>
  *   *Properties      → com.hagent.config        （13/13）
  *   @Configuration   → com.hagent.config        （8/8）
@@ -38,20 +31,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   *Tool / *Tools   → com.hagent.tool          （2/2）
  * </pre>
  *
- * <p><b>为什么这些类别可以设卡</b>：它们的归属是<b>唯一</b>的 ——
- * "装配"只有一个家、"控制器"只有一个家。
- * 而 {@code *Store} / {@code *Builder} / {@code *Codec} 这类是<b>能力域</b>，
- * 边界天然模糊（一个类同时属于两个域时怎么放？），写进测试只会逼人加一堆例外，
- * 反而不如不写。**只对"有唯一正确答案"的事设卡**，是让这条规则长期有效的前提。
+ * <p><b>为什么这些类别可以设卡</b>：它们的归属是<b>唯一</b>的。而 {@code *Store} /
+ * {@code *Builder} / {@code *Codec} 这类是<b>能力域</b>，边界天然模糊（同时属于两个域时怎么放？），
+ * 写进测试只会逼人加一堆例外。**只对"有唯一正确答案"的事设卡**，是这条规则长期有效的前提。
  *
- * <h2>★ 这道守卫自己也被验证过"会红"（踩坑 #27 的纪律）</h2>
- *
- * <pre>
- *   植入 2 个违规类（memory.longterm 下的 TempWrongPackage*）
- *     → 2 条失败 → 删掉后绿
- *   ★ 植入时还发现第一版漏了【全限定注解写法】
- *     （{@code @org.springframework.context.annotation.Configuration}）→ 已修
- * </pre>
+ * <p>这道守卫自己也验证过"会红"：植入 2 个违规类 → 2 条失败 → 删掉后绿
+ * （植入时还发现第一版漏了全限定注解写法，已修）。
  */
 class PackagePlacementTest {
 
@@ -63,8 +48,8 @@ class PackagePlacementTest {
     /**
      * 行首的 {@code @Configuration}。
      *
-     * <p>★ 允许<b>全限定写法</b>：第一版只匹配裸 {@code @Configuration}，
-     * 而植入缺陷时正好写成了全限定形式 → **守卫没抓到**。临时脚本、生成代码里这种写法很常见。
+     * <p>必须允许<b>全限定写法</b>：第一版只匹配裸 {@code @Configuration}，而植入缺陷时正好写成
+     * 全限定形式 → **守卫没抓到**。临时脚本、生成代码里这种写法很常见。
      */
     private static final Pattern CONFIGURATION_ANNOTATION =
             Pattern.compile("(?m)^\\s*@(?:[\\w.]+\\.)?Configuration\\b");
@@ -115,14 +100,14 @@ class PackagePlacementTest {
     }
 
     /**
-     * ★★ 阶段 12 第 0 步：<b>非 controller 包不得依赖 controller 包</b>。
+     * <b>非 controller 包不得依赖 controller 包</b>。
      *
-     * <p>为什么这条必须留在<b>源码扫描</b>里、不能交给 ArchUnit：
-     * {@code WebConfig} 曾用 {@code ChatController.ID} 暴露响应头，
-     * 而那是<b>编译期常量</b> —— javac 把值内联进 {@code WebConfig}，字节码里<b>零指令</b>
-     * 引用 {@code ChatController}（{@code javap -c} 实证）。⇒ <b>任何字节码级守卫都看不见这条边</b>。
+     * <p>为什么这条必须留在<b>源码扫描</b>里、不能交给 ArchUnit：{@code WebConfig} 曾用
+     * {@code ChatController.ID} 暴露响应头，而那是<b>编译期常量</b> —— javac 把值内联进
+     * {@code WebConfig}，字节码里<b>零指令</b>引用 {@code ChatController}（{@code javap -c} 实证）。
+     * ⇒ <b>任何字节码级守卫都看不见这条边。</b>
      *
-     * <p>这就是本项目两条守卫<b>必须并存</b>的原因：ArchUnit 管"字节码级真实依赖与环"，
+     * <p>这就是两条守卫<b>必须并存</b>的原因：ArchUnit 管"字节码级真实依赖与环"，
      * 这里管"源码级 import 与包归属"。删掉任何一条，都会有一类错误变成无人值守。
      */
     @Test

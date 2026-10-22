@@ -10,16 +10,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * SseSupport 放行判定的回归测试。
  *
- * <p><b>为什么要给它写测试</b>（对应本项目"关键路径必须有回归测试"的约定）：
- * 放行判定是"统一响应 vs SSE"冲突的唯一防线 —— 这个判断漏掉任何一个分支，
- * 对应的流式接口就会<b>静默损坏</b>（前端没反应、服务端不报错）。
- * 所以它属于"错了不容易发现、但错了很致命"的逻辑，必须用测试锁死三种形态。
+ * <p>放行判定是"统一响应 vs SSE"冲突的唯一防线：漏掉任何一个分支，对应的流式接口就会静默损坏
+ * （前端没反应、服务端不报错），所以必须用测试锁死三种形态。
  */
 class SseSupportTest {
 
     @Test
     void sseEmitterMustBypass() {
-        // 阶段 1/3 的流式端点返回 SseEmitter，必须放行
+        // 流式端点返回 SseEmitter，必须放行
         assertThat(SseSupport.shouldBypassWrapping(new SseEmitter(), null)).isTrue();
     }
 

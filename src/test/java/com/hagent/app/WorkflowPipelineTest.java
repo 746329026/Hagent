@@ -30,9 +30,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * 阶段 13：工作流模式的编排行为（<b>用假模型</b>，不花钱、可重复）。
+ * 工作流模式的编排行为（<b>用假模型</b>，不花钱、可重复）。
  *
- * <p>钉住三件事，它们都是"不报错但会错"的类型：
+ * <p>钉住三件事，都是"不报错但会错"的类型：
  * <ol>
  *   <li><b>先拆解、再逐步执行</b>：计划必须在任何 {@code StepStarted} 之前出现，
  *       且每一步都有 {@code StepFinished}；</li>
@@ -182,9 +182,8 @@ class WorkflowPipelineTest {
     /**
      * 取最后一个 {@link PipelineEvent.ModelOutput.Final}。
      *
-     * <p>★ 阶段 14 起<b>不能</b>再用 {@code events.getLast()}：流末尾多了
-     * {@link PipelineEvent.TurnFinished}（本轮统计），它排在 Final 之后。
-     * 这里按类型找，而不是按位置 —— 位置会随"又加了一个事件"而变。
+     * <p>不能用 {@code events.getLast()}：流末尾还有 {@link PipelineEvent.TurnFinished}（本轮统计），
+     * 排在 Final 之后。按类型找而不是按位置 —— 位置会随"又加了一个事件"而变。
      */
     private static PipelineEvent.ModelOutput.Final finalOf(List<PipelineEvent> events) {
         for (int i = events.size() - 1; i >= 0; i--) {

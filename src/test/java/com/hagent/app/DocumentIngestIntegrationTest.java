@@ -20,27 +20,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 入库链路中<b>幂等且自给自足</b>的那部分测试。
  *
- * <h2>★ 设计原则：每个测试方法自己准备前置状态</h2>
- *
- * <p>最初的实现把 13 个用例写在同一个类里、用 {@code @Order} 排顺序，
- * 后一个用例依赖"前一个已经把某文档入库了"。那套写法在<b>全量运行时失败</b>：
- * 数据库里残留着上一次运行的数据，于是"首次入库"变成了"重复入库"。
- *
- * <p>加入自动清库后，顺序依赖的写法又反过来失效（清库把前一个用例的成果抹掉了）。
- * <b>两次失败指向同一个根因：测试方法之间有隐式依赖。</b>
- *
- * <p>所以拆成两个类：
- * <ul>
- *   <li><b>本类</b>：每个方法自给自足（清库 → 自己入库 → 断言），可以任意顺序、任意次数运行；</li>
- *   <li>{@code DocumentIngestStableStateTest}：需要"全库已入库"这一稳定状态，
- *       因此在 {@code @BeforeAll} 里一次性准备好，之后所有断言都是只读的。</li>
- * </ul>
- *
- * <p>这个划分的好处不只是"能跑通"：<b>能独立运行的测试才是一个可靠的回归防线</b> ——
- * 依赖顺序的测试在失败时，你无法确定是自己的改动引起的，还是顺序被 JUnit 换了。
- *
- * <p>清库由 {@link KnowledgeCleanupListener} 在<b>每个测试方法之前</b>完成，
- * 所以本类的每个方法都从"向量表为空"开始。
+ * <p>每个测试方法自己准备前置状态：清库（{@link KnowledgeCleanupListener} 在每个方法前完成）
+ * → 自己入库 → 断言，因此可以任意顺序、任意次数运行。拆成两个类的原因是需求相反：本类自给自足，
+ * {@code DocumentIngestStableStateTest} 需要"全库已入库"的稳定状态，在 {@code @BeforeAll} 里一次备好。
+ * <b>顺序依赖的测试在失败时，你无法确定是改动引起的，还是顺序被 JUnit 换了。</b>
  */
 @SpringBootTest
 @TestExecutionListeners(
@@ -68,7 +51,7 @@ class DocumentIngestIntegrationTest {
     private JdbcTemplate pgVectorJdbcTemplate;
 
     // ========================================================================
-    // 向量表本身（阶段 6 实测发现的坑）
+    // 向量表本身（initializeSchema 未生效时表永远不会建）
     // ========================================================================
 
     @Test
@@ -95,9 +78,8 @@ class DocumentIngestIntegrationTest {
         List<String> names = columns.stream().map(c -> String.valueOf(c.get("column_name"))).toList();
         assertThat(names).contains("id", "content", "metadata", "embedding");
 
-        // 把实际类型打印出来 —— 下一轮做检索过滤要按 metadata 写条件，
-        // 而 json 与 jsonb 对索引/操作符的支持不同，事先知道是有用的。
-        // 实测结果：metadata 是 json（不是 jsonb），embedding 是 vector 类型
+        // 实测结果：metadata 是 json（不是 jsonb），embedding 是 vector 类型 ——
+        // 检索过滤要按 metadata 写条件，而 json 与 jsonb 对索引/操作符的支持不同
         columns.forEach(c -> System.out.printf("[表结构实测] %s = %s%n",
                 c.get("column_name"), c.get("data_type")));
     }

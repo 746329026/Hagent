@@ -16,11 +16,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 契约组合③：<b>mysql 记录层 + redis 上下文层</b> —— 生产组合。
+ * 契约组合③：mysql 记录层 + redis 上下文层 —— 生产组合。
  *
- * <p>除了继承来的契约断言，这里额外验一条<b>只有这个组合才能验</b>的性质：
- * 缓存被清掉之后，仍能从记录层重建 —— 也就是阶段 7 的核心承诺
- * "<b>Redis 是模型上下文，不是对话记录的存放处</b>"。
+ * <p>除继承来的契约断言，这里额外验一条只有这个组合才能验的性质：缓存被清掉之后，
+ * 仍能从记录层重建 —— 也就是"Redis 是模型上下文，不是对话记录的存放处"这个承诺。
  */
 @SpringBootTest(properties = {
         "hagent.memory.chat.circuit-break-seconds=0"

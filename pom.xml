@@ -4,35 +4,25 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
 
     <!--
-      ============================================================================
       Hagent · 高扩展性企业办公 Agent
-      ============================================================================
-      本文件是整个项目的"宪法"：它决定你能用哪些武器。
-      下面每个依赖都对应一条真实需求；没有需求支撑的依赖一律不加。
 
-      版本策略：全部使用最新 GA 稳定版，拒绝里程碑版（-Mx / -RCx）。
-      理由：里程碑版 API 未冻结（方法可能改名甚至删除）、无安全维护、社区资料稀少。
+      版本策略：全部使用最新 GA 稳定版，禁用里程碑版（API 未冻结、无安全维护）。
+      依赖原则：每个依赖都要有明确用途。当前暂未启用的扩展依赖（MyBatis-Plus / POI /
+      PDF & Markdown Reader）在各自注释里写明它将来为哪块能力铺垫，不做无名预留。
 
-      注意：XML 注释内不允许连续两个连字符，否则 Maven 报 Non-parseable POM。
-      因此本文件所有区域用 ===== 分隔。
-      ============================================================================
+      注意：XML 注释内不允许出现连续两个连字符，因此本文件用 ===== 分节。
     -->
 
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- (1) 项目坐标：我是谁
-         groupId / artifactId / version 三者合起来 = 别人引用你时用的唯一身份证。 -->
+    <!-- 项目坐标：别人引用本项目的唯一身份证 -->
     <groupId>com.hagent</groupId>
     <artifactId>hagent</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>hagent</name>
     <description>高扩展性企业办公 Agent（Spring AI + 手工 RAG + 多步 Agent + 双层记忆）</description>
 
-    <!-- (2) parent：继承 Spring Boot 的依赖管理
-         parent 会继承两样东西：
-           1) 版本仲裁：几万个主流库的"已验证兼容版本号"，所以下面很多依赖可以不写版本；
-           2) 插件默认配置：比如 spring-boot-maven-plugin 的默认执行配置。
-         这就是"为什么 Spring Boot 项目里大部分依赖不用写版本号"的答案。 -->
+    <!-- 继承 Spring Boot 的版本仲裁与插件默认配置 -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
@@ -40,14 +30,6 @@
         <relativePath/>
     </parent>
 
-    <!-- (3) 属性：集中管理版本号
-         版本号只写一处，下面多处引用；将来升级只改一行。
-         java.version 是 Spring Boot 约定的属性名，编译插件会自动读取它，
-         不需要我们再手写 maven.compiler.source / target。
-
-         project.build.sourceEncoding 是另一条重要防线：
-         它告诉 Maven "我的源码是 UTF-8"。不写时 Java 用操作系统默认编码
-         （中文 Windows 上是 GBK）读源码，中文注释会乱码，甚至引发编译告警。 -->
     <properties>
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -57,22 +39,10 @@
         <poi.version>5.4.1</poi.version>
     </properties>
 
-    <!-- (4) dependencyManagement：只"管版本"，不"引依赖"
-         最容易搞错的一点：这里的依赖【不会】被真正引入项目，
-         它只声明"如果下面 dependencies 用到这个坐标，就用这个版本"。
-
-         什么是 BOM（Bill of Materials / 物料清单）：
-           Spring AI 有几十个模块（deepseek / ollama / pgvector / markdown-reader ...），
-           若每个都写 version，就会出现"模块版本互相不匹配"的灾难。
-           spring-ai-bom 是官方维护的"这一版 AI 配套哪个版本的各模块"的清单。
-           用 import 导入后，所有 spring-ai-* 依赖都不用写版本号，且保证兼容。
-
-         import 这个 scope 只对 <type>pom</type> 有效：
-           它表示"把这个 pom 的 dependencyManagement 内容合并进来"，
-           而不是"把这个包依赖进来"。
-
-         实测补充：Spring Boot 的 parent 里【不包含】spring-ai，也不包含 poi-ooxml
-         （可直接搜索 spring-boot-dependencies 的 pom 验证）。 -->
+    <!--
+      dependencyManagement 只"管版本"不"引依赖"。
+      Spring AI 有几十个模块，用 BOM（import + pom scope）统一仲裁，避免逐模块写版本导致不匹配。
+    -->
     <dependencyManagement>
         <dependencies>
             <dependency>
@@ -82,7 +52,7 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-            <!-- MyBatis-Plus 不在 Spring Boot 的仲裁清单里，所以单独指定版本 -->
+            <!-- MyBatis-Plus 不在 Spring Boot 仲裁清单里，版本必须写死 -->
             <dependency>
                 <groupId>com.baomidou</groupId>
                 <artifactId>mybatis-plus-spring-boot4-starter</artifactId>
@@ -91,42 +61,26 @@
         </dependencies>
     </dependencyManagement>
 
-    <!-- (5) dependencies：真正引入的依赖
-         scope 速查（默认 compile，即编译期 / 测试期 / 运行期都在）：
-           compile  : 我代码里 import 了它
-           runtime  : 编译期不需要、运行期必须有（典型：JDBC 驱动）
-           test     : 只有测试代码用，运行期不在
-           provided : 编译要它，但运行环境自己会提供（典型：外部容器的 servlet-api） -->
     <dependencies>
 
-        <!-- 5.1 Web 服务：提供 HTTP 接口。内含 spring-web / spring-webmvc / 内嵌 Tomcat。 -->
+        <!-- Web 服务：内嵌 Tomcat + Spring MVC -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- 5.2 参数校验：把非法输入挡在业务代码之外
-             作用不是"方便调试"，而是让 @Valid + 注解在参数进入 Service 之前就拒绝它，
-             再配合全局异常处理器统一转成 {code,message}，
-             于是业务代码一次 try-catch 都不用写。 -->
+        <!-- 参数校验：@Valid 在业务代码之前拦非法输入，异常由全局处理器统一转 {code,message} -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
-        <!-- 5.3 模型接入：对话上云、向量化在本地
-             这是本项目的成本决策，不是"多接一家"：
-               chat      -> DeepSeek 云端（强模型，负责多步 Agent 决策）
-               embedding -> Ollama 本地（向量化调用量远大于对话，本地零边际成本）
-             补充事实：DeepSeek 官方不提供 embedding API，所以这层必须换实现。
-
-             重要坑（实测踩过）：两个 starter 同时存在时，两边都会创建 ChatModel Bean，
-             启动会报 "expected single matching bean but found 2: deepSeekChatModel, ollamaChatModel"。
-             解法不是 @Primary，而是在 application.yml 里显式声明能力归属：
-               spring.ai.model.chat=deepseek
-               spring.ai.model.embedding=ollama
-             注意 ollama.init.chat.pull-model-strategy=never 只阻止"拉模型"，
-             并不阻止创建 ChatModel Bean，两者不是一回事。 -->
+        <!--
+          模型接入：chat 上云（DeepSeek）、embedding 在本地（Ollama），是成本决策而非"多接一家"。
+          ★ 两个 starter 同时存在时都会创建 ChatModel Bean，启动会报 "found 2"。
+            解法是在 application.yml 里显式声明能力归属（model.chat / model.embedding），
+            不是用 @Primary 打补丁；ollama 的 pull-model-strategy 只阻止拉模型，不阻止建 Bean。
+        -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-deepseek</artifactId>
@@ -136,121 +90,94 @@
             <artifactId>spring-ai-starter-model-ollama</artifactId>
         </dependency>
 
-        <!-- 5.4 四种存储，各司其职
-             pgvector : 向量索引（RAG 检索）
-             MySQL    : 业务数据（会话记录 / 审计 / 文档元数据），业务主库
-             Redis    : 缓存 + 会话记忆
-             .md 文件 : 长期记忆（人可读可审计，不占基础设施） -->
+        <!--
+          四种存储各司其职：
+            pgvector = 向量索引；MySQL = 业务主库；Redis = 缓存/上下文；.md = 长期记忆。
+        -->
 
-        <!-- 向量库：对应"可替换 VectorStore"抽象，默认实现在这里。
-             它会通过传递依赖自动带入 org.postgresql:postgresql 驱动，
-             所以不需要单独声明 PostgreSQL 驱动。实测因果链：
-               hagent -> spring-ai-pgvector-store -> org.postgresql:postgresql:42.7.13 -->
+        <!--
+          向量库：默认实现（通过 BOM 仲裁版本）。
+          注意：PostgreSQL 驱动由它传递引入；spring-boot-starter-jdbc / HikariCP 也来自它 ——
+          业务主库的连接能力目前挂在这条传递链上（已知耦合，见 README 说明）。
+        -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>
         </dependency>
 
-        <!-- ===== 阶段 16：MCP 客户端 =====
-             本项目只做【客户端】：工具来自 MCP/time-server 这类**独立进程**
-             （它们各自是独立项目，见 MCP/ 目录），本应用负责连上、把工具交给模型。
-
-             ★ 注意它不是 server starter：把 server starter 放进主应用，会让主应用
-               自己也对外提供 MCP 服务（多一个协议端点），而我们要的只是消费方。
-
-             ★ 它带来的一个副作用必须同时处理：它会自动注册一个 SyncMcpToolCallbackProvider
-               （也是一个 ToolCallbackProvider）。若不管，容器里就有【两个】同类型 Bean，
-               而 AgentPipeline 按类型注入单个 —— 启动即报"找到两个"。
-               处置：在 application.yml 里 spring.ai.mcp.client.toolcallback.enabled=false，
-               工具清单统一由 ToolRegistration 合并（唯一注册入口，协议第 13 条）。 -->
+        <!--
+          MCP 客户端（阶段 16）：工具来自独立进程（MCP/time-server 这类项目）。
+          只做客户端，不引入 server starter —— 否则主应用自己也会对外提供 MCP 端点。
+          ★ 它会自动注册 SyncMcpToolCallbackProvider，与我们的 ToolRegistration 同类型冲突，
+            故在 application.yml 里关闭（spring.ai.mcp.client.toolcallback.enabled=false），
+            工具清单统一由 ToolRegistration 合并（唯一注册入口）。
+        -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-mcp-client</artifactId>
         </dependency>
 
-        <!-- 业务持久层：MyBatis-Plus。
-             为什么不用 JPA：企业办公场景有大量报表型 / 条件复杂的查询，
-             这类 SQL 用 JPA 的 Criteria/JPQL 表达很别扭，而 MyBatis 允许直接写 SQL，
-             更容易优化和排查（代价：简单 CRUD 也要写映射，所以用 Plus 版补足）。
-             注意：starter-jdbc（含 HikariCP 连接池）由它传递引入，不用单独声明。
-             实测因果链：
-               hagent -> mybatis-plus-spring-boot4-starter -> spring-boot-starter-jdbc -->
+        <!--
+          业务持久层（扩展铺垫，当前未使用）：现在所有 SQL 都经 JdbcTemplate 直接执行，
+          MyBatis 的 API 一行未引用。保留它，是为将来"复杂条件查询 / 报表 / 分页"这类
+          用 JdbcTemplate 写会明显变啰嗦的场景做准备；届时不需再改依赖。
+          （若确认永远不用，可删；但 HikariCP 由 pgvector starter 提供，删它不影响数据源。）
+        -->
         <dependency>
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-spring-boot4-starter</artifactId>
         </dependency>
 
-        <!-- MySQL JDBC 驱动。
-             scope=runtime：代码里没有一行 import 它，只写了 jdbc:mysql:// 字符串，
-             驱动类由 Spring 按类名反射加载，故编译期不需要、运行期必须有。
-             实测对照（按 scope 过滤依赖树的差异）：
-               compile 树：无 mysql-connector-j
-               runtime 树：有
-               test    树：有
-             若误写成 test，它会从运行期 classpath 消失，启动时报找不到驱动。 -->
+        <!-- MySQL JDBC 驱动：代码只写 jdbc:mysql:// 字符串，靠类名反射加载，故 scope=runtime -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Redis 客户端（同步版 RedisTemplate）。
-             为什么不用 reactive 版：本项目是 Spring MVC + SseEmitter，不是 WebFlux 全栈。
-             用 ReactiveRedisTemplate 只会平白多一层 Mono/Flux 包装，
-             数据存的东西完全一样，代码却更难懂。
-             唯一值得用它的前提是"整条链路都是响应式的"，我们不是。 -->
+        <!-- Redis 同步客户端：本项目是 Spring MVC + SseEmitter，不用 WebFlux 全栈，不需要 reactive 版 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
-        <!-- 5.5 文档解析（知识库入库用）
-
-             Markdown 解析器：为什么不用普通文本读取？它支持读取 frontmatter，
-             这样文档标签（密级 / 部门 / 生效日期）能写在文件头部被结构化解析，
-             而不是靠文件名 substring 猜，后者是参考实现踩过的坑。 -->
+        <!--
+          文档解析（扩展铺垫）：
+            markdown reader —— 当前未使用：.md 由 SourceLoader 手工解析 frontmatter（依赖 snakeyaml）；
+            pdf reader      —— 当前未使用：SourceLoader 只支持 .md / .txt（PDF 入库是后续能力）。
+          保留它们，是为"改用框架 reader / 支持 PDF 企业制度文件"准备的，不是当前运行路径。
+        -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-markdown-document-reader</artifactId>
         </dependency>
-
-        <!-- PDF 解析器：企业制度文件大量是 PDF，必须支持入库。 -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-pdf-document-reader</artifactId>
         </dependency>
 
-        <!-- 5.6 办公产出
-             POI 能读写 Office 格式；我们用它的 ooxml 部分生成 PPT，
-             即企业办公链路的真实产出物：把数据整理成汇报材料。 -->
+        <!--
+          办公产出（扩展铺垫，当前未使用）：POI 用于将来生成 PPT / Excel 等交付物，
+          当前项目的产出是文本回答，故一行代码未引用。
+        -->
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi-ooxml</artifactId>
             <version>${poi.version}</version>
         </dependency>
 
-        <!-- 5.7 编译期工具
-             Lombok 不是运行时库，而是编译期的注解处理器：
-             读 @Slf4j / @Getter，在编译时"生成"真正的 Java 代码（log 字段、getXxx 方法），
-             生成完就功成身退，运行期完全不需要它。
-             optional=true：别人依赖本项目时，不会被强制也拿到 Lombok。
-
-             实测记录（三步实验）：
-               有 annotationProcessorPaths -> 编译成功，javap 能看到 log 字段与 getName()
-               完全无配置                  -> 编译仍成功，但 javac 打印"注解处理未显式请求"告警
-               加 proc=none                -> 编译失败：找不到符号 log / getName()
-             结论：不写配置是"碰巧能用"（依赖 javac 扫描 classpath），
-                   写了配置才是"保证能用"，且版本锁定可避免依赖版本与处理器版本不一致。 -->
+        <!--
+          Lombok：编译期注解处理器，运行期不需要（optional）。
+          annotationProcessorPaths 显式声明它：不写只是"碰巧能用"（javac 扫描 classpath），
+          显式声明才是"保证能用"，并锁定处理器版本。
+        -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
 
-        <!-- 5.8 测试
-             starter-test 已内含 JUnit 5 / Mockito / AssertJ / Awaitility / JsonPath，
-             但不含 reactor-test，所以流式（Flux）相关测试必须单独加。
-             scope=test：只有测试代码用它，打包上线时不会进 jar。 -->
+        <!-- 测试：starter-test 已含 JUnit 5 / Mockito / AssertJ；流式测试另需 reactor-test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -262,13 +189,10 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- 5.8.1 架构守卫（阶段 12 第 0 步）—— ArchUnit。
-             为什么需要它：手写 import 扫描【看不见】全限定名引用与常量内联，
-             更做不了"包级无环"的判断（见 docs/架构问题.md 复核结论第 7 条）。
-             为什么是这个制品、不是 archunit-junit5：
-               本项目 JUnit 是 6.0.3，而 archunit-junit5 会把 junit-platform 5.x 拽进来；
-               我们只用 core（它的依赖只有 slf4j-api），规则写成普通 @Test 方法即可。
-             版本必须写死：它不在 Spring Boot 的 dependencyManagement 里，不写会漂。 -->
+        <!--
+          架构守卫（ArchUnit）：管"包级无环"与分层方向。
+          只用 core 制品，不用 archunit-junit5 —— 本项目 JUnit 是 6.x，后者会把 junit-platform 5.x 拽进来。
+        -->
         <dependency>
             <groupId>com.tngtech.archunit</groupId>
             <artifactId>archunit</artifactId>
@@ -276,36 +200,30 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- 5.9 YAML 解析：读取知识库文档 .md 头部的 frontmatter（kind/title/level/dept/有效期）
-             为什么显式声明它：snakeyaml 本来会经由 spring-boot-starter 传递进来，
-             但"传递依赖"意味着它的存在不由我们控制 —— 将来 Boot 换掉内部实现，
-             我们就会在毫无征兆的情况下编译失败。凡是代码里【直接 import】的东西，
-             都应当显式声明（与前面显式声明 Lombok 注解处理器是同一个理由）。
-             版本不写：由 Spring Boot 的 dependencyManagement 仲裁，避免版本漂移。 -->
+        <!--
+          SnakeYAML：SourceLoader 用它解析 .md 头部的 frontmatter。
+          虽然它会经 spring-boot-starter 传递进来，但代码里【直接 import】的库应显式声明，
+          不然将来 Boot 换实现就会在无征兆下编译失败。
+        -->
         <dependency>
             <groupId>org.yaml</groupId>
             <artifactId>snakeyaml</artifactId>
         </dependency>
     </dependencies>
 
-    <!-- (6) 构建插件 -->
     <build>
         <plugins>
 
-            <!-- 编译插件：两个配置都有明确目的，不是可选项。
-                 1) parameters=true
-                    保留方法参数名。Spring 的构造器注入、@RequestParam 名推断都依赖它；
-                    缺失时只给 "missing parameter name information" 这种模糊提示，极难排查。
-                 2) annotationProcessorPaths 显式声明 Lombok
-                    告诉编译器"这个 jar 是拿去生成代码的，不是拿去运行的"（JSR-269 机制）。
-                    不写时 javac 靠扫描 classpath 找到 Lombok，会打印告警且未来版本可能不处理。
-                    version 继承 parent 的依赖管理值，保证"依赖版本"与"处理器版本"永远是同一个。 -->
+            <!--
+              编译插件：
+                1) parameters=true —— 保留方法参数名，Spring 的构造器注入与参数名推断依赖它；
+                2) annotationProcessorPaths —— 显式声明 Lombok 处理器（JSR-269）。
+            -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
                     <parameters>true</parameters>
-
                     <annotationProcessorPaths>
                         <path>
                             <groupId>org.projectlombok</groupId>
@@ -315,9 +233,7 @@
                 </configuration>
             </plugin>
 
-            <!-- Spring Boot 打包插件：把项目打成可执行 jar
-                 （内含内嵌 Tomcat，java -jar 就能起服务），
-                 并负责把 Lombok 这类编译期依赖排除出最终产物。 -->
+            <!-- 打包成可执行 jar（内含 Tomcat），并排除编译期依赖 Lombok -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

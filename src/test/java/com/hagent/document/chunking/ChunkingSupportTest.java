@@ -8,28 +8,22 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link ChunkingSupport#enforceMaxSize} 的<b>边界条件测试</b>。
+ * {@link ChunkingSupport#enforceMaxSize} 的边界条件测试。
  *
- * <h2>★ 为什么必须用暴力组合测，而不是挑几个手写用例</h2>
+ * <p>这里有一个只在特定长度组合下才出现的缺陷：上一块末尾的重叠很长时，追加重叠后没有再次检查大小，
+ * 于是可能突破 {@code maxSize}。手写用例很难恰好撞上（取决于"句子长度 / 重叠长度 / 上限"三者的相对关系），
+ * 所以用穷举组合把参数空间扫一遍，让缺陷无法靠"运气好没测到"存活。
  *
- * <p>本方法里有一个只在<b>特定长度组合</b>下才出现的缺陷：当"上一块的末尾重叠"
- * 恰好很长时，追加重叠后没有再次检查大小，于是可能突破 {@code maxSize}。
- *
- * <p>手写用例很难恰好撞上这个组合 —— 它取决于"句子长度 / 重叠长度 / 上限"
- * 三者的相对关系。所以这里用<b>穷举组合</b>的方式把参数空间扫一遍，
- * 让缺陷无法靠"运气好没测到"而存活。
- *
- * <p>这条测试的价值在于它防的后果很重：块超过 {@code maxSize} 时，
- * embedding 会<b>静默截断</b> —— 不报错、返回正常维度的向量，
- * 但块的尾部内容<b>永远无法被检索到</b>。
+ * <p>后果很重：块超过 {@code maxSize} 时 embedding 会静默截断 —— 不报错、返回正常维度的向量，
+ * 但块尾部的内容永远无法被检索到。
  */
 class ChunkingSupportTest {
 
     /**
      * 生成"混合长度 + 含句末标点"的文本 —— 刻意制造各种句子边界组合。
      *
-     * <p>用固定种子（{@code new Random(42)}）而不是随机种子：测试必须可复现。
-     * 随机种子下"这次过了、下次挂了"的测试比没有测试更糟。
+     * <p>用固定种子（{@code new Random(42)}）而不是随机种子：测试必须可复现 ——
+     * "这次过了、下次挂了"的测试比没有测试更糟。
      */
     private static String mixedSentenceText(int sentenceCount) {
         java.util.Random random = new java.util.Random(42);

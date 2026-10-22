@@ -19,32 +19,16 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * <b>检索分数语义的实测探针</b> —— 在写"相关度分档"之前，必须先用真实数据回答一个问题：
+ * 检索分数语义的实测探针：{@code similaritySearch(...).getScore()} 是【相似度】还是【距离】？
  *
- * <pre>
- *   VectorStore.similaritySearch(...).getScore() 到底是【相似度】还是【距离】？
- *   取值范围是多少？与 HANDOFF 里那份"余弦距离"实测表能不能对上？
- * </pre>
+ * <p>决定分档方向的恰恰是这一个符号 —— 若 score 是距离，同一个阈值就得反过来用。
+ * 写反了不会报错：检索照样返回结果，只是"高相关"的标签贴到了最不相关的块上，而模型据此作答。
  *
- * <h2>为什么不能靠记忆或推测</h2>
+ * <p>对照基准：用余弦距离测过同一批提问，若 {@code score ≈ 1 - 距离} 则 score 是相似度。
  *
- * <p>决定分档方向的恰恰是这一个符号：
- * <ul>
- *   <li>若 {@code score} 是<b>相似度</b>（越大越相关），"高相关"的阈值应当<b>大于</b>某个数；</li>
- *   <li>若 {@code score} 是<b>距离</b>（越小越相关），同一个阈值就得<b>反过来用</b>。</li>
- * </ul>
- * 写反了<b>不会报错</b>：检索照样返回结果，只是"高相关"的标签贴到了最不相关的块上，
- * 而模型据此作答 —— 典型的静默错误。
- *
- * <p>本项目已经有一份可对照的基准：HANDOFF 3.5 节用余弦距离测过同一批提问，
- * 相关提问的距离在 0.2168 ~ 0.4827，无关提问在 0.2883 ~ 0.5055。
- * 如果这里的 {@code score} 满足 {@code score ≈ 1 - 距离}，两种语义就对齐了。
- *
- * <h2>本测试同时暴露一个结论：阈值挡不住无关问题</h2>
- *
- * <p>把相关与无关提问的分数都打印出来，可以看到两者的分布<b>完全重叠</b>。
- * 这不是实现缺陷，是 {@code mxbai-embed-large} 对中文短文本区分度不足的必然结果，
- * 所以"阈值"只能定位成<b>粗筛</b>，真正的兜底必须靠提示词约束。
+ * <p>同时暴露一个结论：相关与无关提问的分数分布完全重叠 —— 这是
+ * {@code mxbai-embed-large} 对中文短文本区分度不足的必然结果，阈值只能定位成粗筛，
+ * 真正的兜底靠提示词约束。
  */
 @SpringBootTest
 @TestPropertySource(properties = {
@@ -78,13 +62,8 @@ class RetrievalScoreProbeTest {
     /**
      * 自给自足：每个用例前先把 4 份示例文档入库，再检索。
      *
-     * <p><b>为什么不用 {@code KnowledgeCleanupListener}</b>：那个监听器会
-     * {@code TRUNCATE} 向量表，而本类要的恰恰是"库里确实有内容"。
-     * 两个测试类对"前置状态"的假设相反，所以走相反的准备方式 ——
-     * 这与"每个测试类自己说清依赖什么状态"的原则一致。
-     *
-     * <p>入库是<b>幂等</b>的（内容未变更即 {@code SKIPPED_UNCHANGED}），
-     * 所以重复运行不会重复写入，也不会因为库里已有数据而失败。
+     * <p>不用 {@code KnowledgeCleanupListener}（它会 TRUNCATE 向量表），本类要的恰恰是"库里确实有内容"。
+     * 入库是幂等的（内容未变更即 {@code SKIPPED_UNCHANGED}），重复运行不会重复写入。
      */
     @BeforeEach
     void ensureSamplesIngested() {
@@ -121,20 +100,11 @@ class RetrievalScoreProbeTest {
     }
 
     /**
-     * ★ 第二问：{@code SearchRequest.similarityThreshold} 的单位是【相似度】还是【距离】？
+     * {@code SearchRequest.similarityThreshold} 的单位是【相似度】还是【距离】？
      *
-     * <p>这个问题必须实测，因为框架生成的 SQL 是（读 {@code PgDistanceType} 的字节码常量池）：
-     * <pre>
-     *   SELECT *, embedding &lt;=&gt; ? AS distance FROM %s WHERE embedding &lt;=&gt; ? &lt; ? %s ORDER BY distance LIMIT ?
-     * </pre>
-     * 其中那个 {@code < ?} 的界<b>到底是 threshold 本身，还是 1 - threshold</b>，
-     * 决定了我们配的"粗筛阈值"是"至少多像"还是"最多多远"—— 两者方向相反。
-     *
-     * <p>判据很简单：用 threshold = 0.7 检索，看返回结果的 score 落在哪一侧。
-     * <ul>
-     *   <li>若全部 {@code score >= 0.7} → threshold 是<b>相似度下限</b>（越大越严）；</li>
-     *   <li>若全部 {@code score <= 0.7} → threshold 是<b>距离上限</b>（越小越严）。</li>
-     * </ul>
+     * <p>框架生成的 SQL 是 {@code ... WHERE embedding <=> ? < ? ...}，那个界的含义决定
+     * 我们配的"粗筛阈值"是"至少多像"还是"最多多远"—— 两者方向相反。
+     * 判据：threshold = 0.7 时，全部 {@code score >= 0.7} → 相似度下限；全部 {@code score <= 0.7} → 距离上限。
      */
     @Test
     @DisplayName("★ 实测 similarityThreshold 的单位 —— 决定粗筛阈值该往哪个方向配")
@@ -165,8 +135,8 @@ class RetrievalScoreProbeTest {
                 System.out.println("   【结论】threshold 是【距离上限】：score 全部 <= " + threshold);
             }
         }
-        // 不设硬断言 —— 本测试是"测量"，语义方向由上面这行结论记录下来，
-        // 真正的断言在 RetrievalProperties 的单元测试里（那里断言的是配置→相似度下限的换算）
+        // 不设硬断言 —— 本测试是"测量"，语义方向由上面的结论记录下来；
+        // 真正的断言在 RetrievalProperties 的单元测试里（配置→相似度下限的换算）
         assertThat(hits).isNotNull();
     }
 

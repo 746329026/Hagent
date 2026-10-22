@@ -7,11 +7,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link MemoryMode} 的线上名称映射（阶段 10）。
+ * {@link MemoryMode} 的线上名称映射。
  *
- * <p>为什么这件事值得单独测：它是<b>请求体、响应体、数据库三处共用</b>的一层翻译。
- * 翻译写错的表现极其安静 —— "模式存进库变成了 null"或"客户端传 workflow
- * 却按 chat 的 1/10 预算在跑"，两种都不会报错。
+ * <p>值得单独测：它是请求体、响应体、数据库三处共用的一层翻译，写错的表现极其安静 ——
+ * "模式存进库变成了 null"或"客户端传 workflow 却按 chat 的 1/10 预算在跑"，两种都不报错。
  */
 class MemoryModeTest {
 

@@ -14,18 +14,16 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 阶段 14：回合账的<b>真实落库</b>（真 MySQL）。
+ * 回合账的真实落库测试（真 MySQL）。
  *
- * <h2>★ 为什么它必须是集成测试（而不是假的 JdbcTemplate）</h2>
+ * <p>这张表最容易出错的不是 Java 代码，而是 Java 与 DDL 的口径是否一致：列的顺序、可空性、
+ * 以及"到底哪几个字段被写成 NULL"。这些只有真库能证明 —— 桩一个 JdbcTemplate 只能证明
+ * "我调了 update(…)"，证明不了"写对了列"。
  *
- * <p>这张表最容易出错的不是 Java 代码，而是<b>Java 与 DDL 的口径是否一致</b>：
- * 列的顺序、可空性、以及"到底哪几个字段被写成 NULL"。这些只有真库能证明 ——
- * 用 Mockito 桩一个 JdbcTemplate 只能证明"我调了 update(…)"，证明不了"写对了列"。
+ * <p>它同时是启动自检的反向证据：本类能加载上下文，就说明 {@code MysqlTurnStore} 的构造器
+ * 在"表 + 三个索引都在"时才放行。
  *
- * <p>同时它也是<b>启动自检</b>的反向证据：本类能加载上下文，就说明
- * {@code MysqlTurnStore} 的构造器在"表 + 三个索引都在"时才放行（决策 8）。
- *
- * <p>⚠️ 前置：先执行 {@code src/main/resources/db/chat_turn.sql}（与另外三张表同一约定）。
+ * <p>前置：先执行 {@code src/main/resources/db/chat_turn.sql}（与另外三张表同一约定）。
  */
 @SpringBootTest
 class MysqlTurnStoreTest {

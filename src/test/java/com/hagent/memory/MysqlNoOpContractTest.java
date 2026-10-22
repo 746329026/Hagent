@@ -4,10 +4,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 /**
- * 契约组合②：<b>mysql 记录层 + none 上下文层</b> —— 降级组合（不起 Redis）。
+ * 契约组合②：mysql 记录层 + none 上下文层 —— 降级组合（不起 Redis）。
  *
- * <p>它证明一件重要的事：<b>上下文层的"有无"不改变对外语义</b>。
- * 这正是"上下文层是可丢的派生层"这句话的直接证据 ——
+ * <p>它证明上下文层的"有无"不改变对外语义 —— 这正是"上下文层是可丢的派生层"的直接证据：
  * 如果少了缓存就出现行为差异，那它就不是缓存，而是第二个权威存储。
  */
 @SpringBootTest(properties = {

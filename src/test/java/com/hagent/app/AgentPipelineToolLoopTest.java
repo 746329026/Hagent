@@ -39,27 +39,22 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * <b>工具循环的行为契约</b> —— 阶段 9.1 的核心防线。
+ * <b>工具循环的行为契约</b> —— 核心防线。
  *
- * <h2>★ 它守的四件事（都是"写错了不报错"的类型）</h2>
- *
+ * <p>它守四件事，都是"写错了不报错"的类型：
  * <ol>
  *   <li><b>循环真的会"多走一步"</b>：模型请求工具 → 执行 → 把结果回灌 → <b>再调模型</b>。
  *       若忘了回灌（或回灌后没再调模型），表现为"模型说了一句『我要查一下』就结束了"，
  *       <b>用户永远拿不到答案，而没有任何报错</b>；</li>
- *   <li><b>循环会正常结束</b>：模型不再请求工具时就收尾，
- *       而不是无限地再调一次；</li>
- *   <li>★ <b>步数上限真的会拦住绕圈的模型</b>：这一条尤其重要 ——
- *       它是唯一"由我们控制"的出口，而<b>每多走一步都是一次计费的模型调用</b>；</li>
+ *   <li><b>循环会正常结束</b>：模型不再请求工具时就收尾，而不是无限地再调一次；</li>
+ *   <li><b>步数上限真的会拦住绕圈的模型</b>：它是唯一"由我们控制"的出口，
+ *       而<b>每多走一步都是一次计费的模型调用</b>；</li>
  *   <li><b>工具结果确实被送给了模型</b>：断言第 2 次调用的提示词里有 {@code ToolResponseMessage}
- *       （这是"工具真的被执行并回流"的直接证据，而不是只看最终文本猜）。</li>
+ *       —— 这是"工具真的被执行并回流"的直接证据，而不是只看最终文本猜。</li>
  * </ol>
  *
- * <h2>测试怎么做到"确定"</h2>
- *
- * <p>用假的 {@code ChatModel} 按<b>脚本</b>逐次返回：第 1 次要求调工具、第 2 次给最终答案。
- * 用假的 {@link ToolCallback} 记录被调用次数并返回固定结果。
- * 两者都不碰真实 API，因此可重复、不花钱。
+ * <p>用假的 {@code ChatModel} 按<b>脚本</b>逐次返回、用假的 {@link ToolCallback} 记录调用次数并返回
+ * 固定结果：两者都不碰真实 API，因此可重复、不花钱。
  */
 class AgentPipelineToolLoopTest {
 
@@ -131,7 +126,7 @@ class AgentPipelineToolLoopTest {
         return props;
     }
 
-    /** 步数上限（循环跑几轮）—— 阶段 12 起它是独立的一份配置，且按模式分档。 */
+    /** 步数上限（循环跑几轮）—— 独立的一份配置，且按模式分档。 */
     private AgentLoopProperties agentLoopProperties(int chatMaxSteps) {
         AgentLoopProperties props = new AgentLoopProperties();
         props.setChatMaxSteps(chatMaxSteps);
@@ -515,7 +510,7 @@ class AgentPipelineToolLoopTest {
     }
 
     // ========================================================================
-    // 五、★ 审计（阶段 9.3）：工具调用必须留下可追溯的记录
+    // 五、审计：工具调用必须留下可追溯的记录
     // ========================================================================
 
     @Test
@@ -554,7 +549,7 @@ class AgentPipelineToolLoopTest {
         assertThat(record.toolName()).isEqualTo("getWeather");
         assertThat(record.arguments()).as("参数原文要留档（审计要能回答『它被喂了什么』）").contains("杭州");
         assertThat(record.result()).as("结果原文要留档（模型看到的同一份）").contains("26 度");
-        // ★ 阶段 14：审计必须能回答"谁、哪一轮" —— 否则它只是操作日志
+        // 审计必须能回答"谁、哪一轮" —— 否则它只是操作日志
         assertThat(record.userId())
                 .as("主体。缺了它，'上周三这个人做了什么'永远答不出来")
                 .isEqualTo(UserContext.ANONYMOUS.userId());
@@ -639,7 +634,7 @@ class AgentPipelineToolLoopTest {
     }
 
     // ========================================================================
-    // 六、阶段 10：步骤骨架（StepStarted）与思考的分步落库
+    // 六、步骤骨架（StepStarted）与思考的分步落库
     // ========================================================================
 
     /** 造一个"第 1 步调工具、第 2 步给答案"的模型。 */
@@ -749,18 +744,13 @@ class AgentPipelineToolLoopTest {
     @Test
     @DisplayName("★★ 工具执行【不允许】跑在 Reactor 的非阻塞线程上 —— 否则真机上检索必崩")
     void toolExecutionMustNotRunOnNonBlockingThread() {
-        // ★★ 这条断言来自一次真机事故（阶段 10 联调）：接真实 WebClient 时，
-        //    模型流的元素在 reactor-http-nio-*（Netty 事件循环）上发出，
-        //    于是 handleToolCalls 也在那条线程上被订阅 ——
-        //    而检索工具内部是【阻塞】调用（Ollama embedding 的 RestClient 底层要 Mono.block()），
-        //    Reactor 会直接拒绝在非阻塞线程上 block：
-        //      IllegalStateException: block()/blockFirst()/blockLast() are blocking,
-        //      which is not supported in thread reactor-http-nio-4
-        //    结果每次检索都抛异常 → 被降级成"没命中" → 模型回答"知识库中未找到相关内容"。
-        //
-        // ★ 为什么 279 个用例全绿还是漏了：所有假模型都用 Flux.just(...)，
-        //    元素在调用线程（允许阻塞）上发出。这条用例刻意用 publishOn(Schedulers.parallel())
-        //    模拟"元素来自非阻塞线程"，把那条边补上。
+        // ★★ 一次真机事故的结论：接真实 WebClient 时模型流的元素在 reactor-http-nio-*（Netty 事件循环）
+        //    上发出，于是 handleToolCalls 也在那条线程上被订阅；而检索工具内部是【阻塞】调用
+        //    （Ollama embedding 的 RestClient 底层要 Mono.block()），Reactor 直接拒绝：
+        //    "block() ... not supported in thread reactor-http-nio-4"。
+        //    后果：每次检索都抛异常 → 被降级成"没命中" → 模型答"知识库中未找到相关内容"。
+        //    ★ 此前全绿是因为假模型用 Flux.just(...)，元素在调用线程（允许阻塞）上发出；
+        //    这里刻意用 publishOn(Schedulers.parallel()) 补上那条边。
         java.util.concurrent.atomic.AtomicBoolean nonBlocking =
                 new java.util.concurrent.atomic.AtomicBoolean(false);
         java.util.concurrent.atomic.AtomicReference<String> threadName =

@@ -8,17 +8,15 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * 会话列表 / 历史 / 改名 的传输对象（阶段 10）。
+ * 会话列表 / 历史 / 改名 的传输对象。
  *
  * <p><b>为什么集中在一个文件里、用嵌套 record</b>：它们是<b>同一个契约的四个面</b>
- * （侧栏一行、一条消息、一个会话的详情、一次改名请求），字段之间互相引用，
- * 拆成四个文件会让"它们是一套"这件事在目录里看不出来。
- * 而单个 record 仍然各自独立、不可变 —— 与 {@code PipelineEvent} 的嵌套方式一致。
+ * （侧栏一行、一条消息、一个会话的详情、一次改名请求），字段互相引用，
+ * 拆成四个文件会让"它们是一套"在目录里看不出来。
  *
- * <p>★ 这些 record 的<b>字段名就是前端契约</b>：改名字等于破坏前端，
- * 而它不会报错，只会让前端拿到 {@code undefined}。所以它们刻意不直接复用
- * 存储层的 {@code SessionStore.Session} / {@code ReasoningTrace.Section} ——
- * 那两个类是<b>存储形态</b>，允许随实现演化。
+ * <p>★ 这些 record 的<b>字段名就是前端契约</b>：改名不会报错，只会让前端拿到 {@code undefined}。
+ * 所以刻意不直接复用存储层的 {@code SessionStore.Session} / {@code ReasoningTrace.Section} ——
+ * 那两个是<b>存储形态</b>，允许随实现演化。
  */
 public final class SessionDtos {
 
@@ -43,11 +41,10 @@ public final class SessionDtos {
     }
 
     /**
-     * 一段思考（一个"步"的思考）。
+     * 一段思考（一个"步"的思考）—— <b>SSE 与历史回放共用的形状</b>。
      *
-     * <p>这是 <b>SSE 与历史回放共用的形状</b>：流式时前端靠 {@code step} 事件自己攒出同样的结构，
-     * 回放时后端从 {@code chat_message.reasoning} 的文本里解析出来。
-     * 两条路径的渲染逻辑因此<b>只有一份</b>。
+     * <p>流式时前端靠 {@code step} 事件自己攒出同样的结构，回放时后端从
+     * {@code chat_message.reasoning} 的文本里解析出来 —— 两条路径的渲染逻辑只有一份。
      *
      * @param step  第几步（从 1 开始）
      * @param tools 该步之后模型请求调用的工具名（可能为空）
@@ -57,18 +54,13 @@ public final class SessionDtos {
     }
 
     /**
-     * 一轮对话的统计（阶段 14 后补）—— <b>SSE 与历史回放共用的形状</b>。
+     * 一轮对话的统计 —— <b>SSE 与历史回放共用的形状</b>。
      *
-     * <p>★ 它存在这里的理由与 {@link ReasoningSection} 完全相同：实时那一行小字来自
-     * {@code stats} SSE 事件，刷新页面后那一行来自历史接口。两条路径**必须给同一份形状**，
-     * 否则前端要为"同一行字"写两套渲染逻辑 —— 而那正是最容易各自演化出差异的地方。
+     * <p>理由与 {@link ReasoningSection} 相同：实时那一行小字来自 {@code stats} 事件，
+     * 刷新后来自历史接口，两条路径必须给同一份形状，否则前端要为同一行字写两套渲染。
+     * 数字只有一个来源（{@code chat_turn}），所以"刷新前后数字不一样"在结构上不可能发生。
      *
-     * <p>★ <b>数字只有一个来源</b>（{@code chat_turn}）：实时那条直接来自刚算出的
-     * {@code TurnRecord}，历史那条按 {@code turn_id} 查库。所以"刷新前后数字不一样"
-     * 在结构上不可能发生。
-     *
-     * <p>⚠️ <b>不含身份</b>（{@code user_id} / {@code role}）：浏览器就是这个人，
-     * 回显没有信息量，只是把身份写进前端状态。
+     * <p>⚠️ <b>不含身份</b>（{@code user_id} / {@code role}）：浏览器就是这个人，回显没有信息量。
      *
      * @param status            {@code SUCCESS} / {@code FAILED} / {@code CANCELLED}
      * @param elapsedMs         整轮耗时（毫秒）
@@ -91,15 +83,13 @@ public final class SessionDtos {
      * 历史里的一条消息。
      *
      * <p>★ <b>没有时间戳</b>：消息表有 {@code created_at}，但"一条消息是几点"目前
-     * <b>没有任何消费者</b>（对话界面按顺序排就够了），而把它读出来要多走一趟
-     * 类型转换。等真有"显示消息时间"的需求再加 —— 那时改的是这个 record 与一次查询。
+     * <b>没有任何消费者</b>（按顺序排就够了），而把它读出来要多走一趟类型转换。
      *
      * @param role      {@code USER} / {@code ASSISTANT} / {@code SYSTEM}
      * @param content   正文
      * @param reasoning 该条消息的思考分段。<b>空列表表示没有思考</b>（不是 null）；
      *                  只有 {@code ASSISTANT} 可能有内容
-     * @param stats     这一轮的统计（阶段 14 后补）。<b>可能为 null</b>：
-     *                  阶段 14 之前写入的历史、或账写入失败的轮次都没有数字 ——
+     * @param stats     这一轮的统计。<b>可能为 null</b>：账写入失败的轮次没有数字 ——
      *                  <b>不编造</b>，前端据此决定不显示那一行
      */
     public record SessionMessage(String role, String content, List<ReasoningSection> reasoning,
@@ -109,9 +99,8 @@ public final class SessionDtos {
     /**
      * 一个会话的完整详情：元信息 + 全部消息。
      *
-     * <p><b>为什么把 session 一起返回</b>：前端点开一个历史会话时，需要
-     * ①标题（显示在顶部）②模式（决定是否显示"工作流编排开发中"的提示）
-     * ③消息。合在一个响应里，避免"打开会话"变成两次请求（而且两次之间可能不一致）。
+     * <p><b>为什么把 session 一起返回</b>：前端点开历史会话时需要 ①标题 ②模式 ③消息。
+     * 合在一个响应里，避免"打开会话"变成两次请求（而且两次之间可能不一致）。
      */
     public record SessionDetail(SessionSummary session, List<SessionMessage> messages) {
     }
@@ -119,9 +108,9 @@ public final class SessionDtos {
     /**
      * 改名请求。
      *
-     * <p>{@code @Size(max = 128)} 与 {@code chat_conversation.title} 的
-     * {@code VARCHAR(128)} 对齐 —— <b>在校验层就拦住</b>，
-     * 而不是让数据库抛 {@code Data too long}（那会变成 500，且看起来像服务故障）。
+     * <p>{@code @Size(max = 128)} 与 {@code chat_conversation.title} 的 {@code VARCHAR(128)}
+     * 对齐 —— <b>在校验层就拦住</b>，而不是让数据库抛 {@code Data too long}
+     * （那会变成 500，且看起来像服务故障）。
      */
     public record RenameRequest(
             @NotBlank(message = "标题不能为空")

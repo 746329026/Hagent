@@ -21,17 +21,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 记录层【文件实现】的集成测试（真实读写文件，不打桩）。
  *
- * <p><b>为什么必须有这类测试</b>：文件实现里有几处"错了不会报错"的细节 ——
- * 原子写入、按会话隔离、清空与删除的语义差异。
- * 尤其"历史能不能跨实例重读"这一条：它正是"换实现只改配置"能否成立的基础，
- * 而它在开发时最容易被"反正内存里还有"掩盖过去。
+ * <p>文件实现里有几处"错了不会报错"的细节：原子写入、按会话隔离、清空与删除的语义差异；
+ * 尤其"历史能不能跨实例重读" —— 它是"换实现只改配置"能否成立的基础，
+ * 而开发时最容易被"反正内存里还有"掩盖过去。
  *
- * <p>★ <b>本类的测试范围（阶段 7 收窄过）</b>：只测<b>记录层</b>的语义 ——
- * 它只按<b>条数</b>取最近 N 条，<b>不做 token 预算裁剪</b>（那是门面的事）。
- * 预算裁剪、以及"对外语义与实现无关"这两件事，由
- * {@code ConversationMemoryContractTest} 在门面层验证。
- *
- * <p>测试用临时目录，互不干扰；用例结束即清理。
+ * <p>只测记录层的语义：按条数取最近 N 条、不做 token 预算裁剪（那是门面的事，
+ * 由 {@code ConversationMemoryContractTest} 在门面层验证）。测试用临时目录，用例结束即清理。
  */
 class FileMessageStoreTest {
 
@@ -136,8 +131,7 @@ class FileMessageStoreTest {
         for (int i = 1; i <= 50; i++) {
             store.append("c1", List.of(new UserMessage("消息" + i)));
         }
-        // 记录层的职责是"完整"，它不该因为"预算小"而丢数据 ——
-        // 裁剪是门面按预算做的事（ConversationMemoryContractTest 覆盖）
+        // 记录层的职责是"完整"，不该因为"预算小"而丢数据 —— 裁剪是门面按预算做的事
         assertThat(store.readLatest("c1", 1000)).hasSize(50);
     }
 

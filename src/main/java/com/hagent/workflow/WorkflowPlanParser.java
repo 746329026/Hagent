@@ -9,7 +9,7 @@ import java.util.List;
 /**
  * 把模型的<b>一段文本</b>解析成 {@link WorkflowPlan}（纯函数，不碰网络、不碰 Spring）。
  *
- * <h2>★ 为什么要这么"宽进严出"</h2>
+ * <h2>为什么要这么"宽进严出"</h2>
  *
  * <p><b>宽进</b>：模型输出常常长这样 ——
  * <pre>
@@ -19,11 +19,11 @@ import java.util.List;
  *   ```
  *   需要我开始吗？
  * </pre>
- * 直接 {@code readValue} 必然失败。所以先把第一个 {@code {} 到最后一个 {@code }} 之间的
- * 内容抠出来，**再**解析；未知字段一律忽略（模型爱加 {@code "notes"} 就加）。
+ * 直接 {@code readValue} 必然失败。所以先把第一个 {@code {} 到最后一个 {@code }} 之间
+ * 的内容抠出来，<b>再</b>解析；未知字段一律忽略（模型爱加 {@code "notes"} 就加）。
  *
  * <p><b>严出</b>：解析完立刻交给 {@link WorkflowPlan} 校验（步数 1..8、编号连续、goal 非空），
- * 不合法就抛 {@link InvalidPlanException}，<b>绝不"尽量凑一份计划出来"</b>。
+ * 不合法就抛 {@link InvalidPlanException}，<b>绝不"尽量凑一份计划出来"</b> ——
  * 凑出来的计划会让执行阶段跑一条谁都没批准过的路线。
  *
  * <p>★ 步骤号以<b>数组顺序</b>为准（1、2、3…），模型写下的 {@code index} 不采信 ——
@@ -34,12 +34,10 @@ public final class WorkflowPlanParser {
     /**
      * ★ 自带一个 mapper，而不是从 Spring 注入。
      *
-     * <p>理由：本包是<b>纯领域</b>（零 Spring 依赖），而这份 DTO 只有
-     * {@code goal} / {@code steps} / {@code doneWhen} 三个字符串字段 ——
-     * 用不到项目里任何自定义 Jackson 配置。注入一个 mapper 会把"谁能构造解析器"
-     * 绑到容器上，测试与领域都跟着变重。
-     *
-     * <p>{@code ObjectMapper} 在配置完成后是线程安全的，所以静态共享没问题。
+     * <p>本包是<b>纯领域</b>（零 Spring 依赖），而这个 DTO 只有 {@code goal} / {@code steps} /
+     * {@code doneWhen} 三个字符串字段，用不到项目里任何自定义 Jackson 配置；注入一个 mapper
+     * 会把"谁能构造解析器"绑到容器上。{@code ObjectMapper} 配置完成后是线程安全的，
+     * 所以静态共享没问题。
      */
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

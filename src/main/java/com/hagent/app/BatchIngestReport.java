@@ -6,24 +6,11 @@ import com.hagent.document.IngestResult;
 import java.util.List;
 
 /**
- * 批量入库报告。
+ * 批量入库报告 —— <b>失败清单是结构化字段，不只是日志</b>。
  *
- * <h2>★ 为什么把"失败清单"放进报告，而不是只抛异常</h2>
- *
- * <p>批量入库面对的是"一整个目录的文档"。其中一份格式不对时，有两种处理方式：
- * <pre>
- *   ① 立即抛异常中止整批  → 98 份正常的文档也一份都没入库
- *   ② 跳过失败的那份继续  → 98 份入库成功，但有 1 份<b>没入进去</b>
- * </pre>
- *
- * <p>本项目选 ②（理由：批量同步场景下"部分成功"远好于"全部失败"），
- * 但 ② 有一个必须堵住的漏洞：<b>如果失败信息只出现在日志里，调用方拿到的
- * 只是一个"完成了"的信号</b> —— 于是"以为同步了 99 份，实际只有 98 份"。
- * 这正是本项目全篇在防的"看起来成功"。
- *
- * <p>所以把失败清单作为报告的<b>结构化字段</b>返回，让调用方<b>能够</b>
- * 据此判断（打日志、告警、或视为错误）。是否把它当错误，是调用方的决定 ——
- * 但数据必须给到它。
+ * <p>批量入库选"跳过失败的继续"（部分成功远好于全部失败），但有一个必须堵住的漏洞：失败信息
+ * 只进日志时，调用方拿到的只是一个"完成了"的信号 —— "以为同步了 99 份，实际只有 98 份"。
+ * 所以失败清单随报告返回，让调用方<b>能够</b>判断（打日志、告警或视为错误）；是否当错误由它决定。
  *
  * @param results  每份文档的处理结论（含跳过的）
  * @param failures 未能入库的文档及原因
@@ -53,8 +40,7 @@ public record BatchIngestReport(List<IngestResult> results,
 
     /** 本次实际写入的块总数。 */
     public int writtenChunkCount() {
-        // 不需要 filter(IngestResult::written)：被跳过 / 正文为空的文档 chunkCount 本来就是 0，
-        // 而那一层 filter 恰恰是"written 语义含糊"被用来兜的地方。
+        // 不需要 filter(IngestResult::written)：被跳过 / 正文为空的文档 chunkCount 本来就是 0
         return results.stream().mapToInt(IngestResult::chunkCount).sum();
     }
 
@@ -71,8 +57,7 @@ public record BatchIngestReport(List<IngestResult> results,
      * 单个失败项。
      *
      * @param source 出问题的来源路径 —— 必须带上，否则调用方无法定位是哪一份
-     * @param reason 失败原因（异常消息）。<b>只用于日志与排查</b>，
-     *               不要直接回显给最终用户 —— 它可能包含文件系统路径等内部信息
+     * @param reason 失败原因（异常消息）。<b>只用于日志与排查</b>，可能含内部路径，不要回显给最终用户
      */
     public record Failure(String source, String reason) {
     }

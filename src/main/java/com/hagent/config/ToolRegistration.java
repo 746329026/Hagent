@@ -24,43 +24,21 @@ import java.util.List;
 /**
  * <b>工具注册</b> —— 本项目所有可被模型调用的工具的<b>唯一装配点</b>。
  *
- * <h2>★ 为什么是"注册"而不是"各自 @Component 完事"</h2>
+ * <p>★ 为什么集中在"注册"而不是各自 {@code @Component} 完事：<b>模型能看到哪些工具</b>必须有一处
+ * 集中决定 —— 它是<b>能力边界</b>（看一眼就知道模型能做什么，也是审计与评审的入口），
+ * 将来做按角色过滤（最小权限）、改名、审计开关时，改动只在这里。
  *
- * <p>工具类本身可以是普通 Bean，但<b>模型能看到哪些工具</b>必须有一处集中决定：
- * <ul>
- *   <li>它是"能力边界" —— 看一眼这个类就知道模型能做什么（审计与评审的入口）；</li>
- *   <li>将来要做<b>按角色过滤</b>（最小权限）时，改动只在这里；</li>
- *   <li>参考实现（{@code kewei-ai-agent} 的 {@code ToolRegistration}）也是这么做的，
- *       而且它进一步分成了 {@code allTools} 与 {@code memoryTools} 两组。</li>
- * </ul>
- *
- * <h2>★ 为什么用 {@code MethodToolCallbackProvider} 而不是第三方 {@code ToolCallbacks}</h2>
- *
- * <p>参考实现用的是 {@code org.springframework.ai.support.ToolCallbacks.from(...)} ——
- * 它来自第三方包 {@code org.springaicommunity:spring-ai-agent-utils}，且那个项目用的是
- * Spring AI <b>2.0.0-M2</b>。
- *
- * <p>本项目<b>不引入那个依赖</b>：框架自带等价的
- * {@link MethodToolCallbackProvider}（就在我们已有的 {@code spring-ai-model} jar 里，
- * 而且参考实现那个工具类内部也是靠它做 {@code @Tool} 内省的）。
+ * <p>★ 为什么用框架自带的 {@code MethodToolCallbackProvider}，而不是第三方
+ * {@code org.springaicommunity:spring-ai-agent-utils} 的 {@code ToolCallbacks.from(...)}：
+ * 框架已自带等价能力（就在已有的 {@code spring-ai-model} jar 里），
  * <b>少一个第三方依赖 = 少一处版本漂移风险</b>。
  *
- * <h2>★★ 工具的描述从哪来（这条决定"要不要写进提示词"）</h2>
+ * <p>★★ 工具描述的来源：方法上的 {@code @Tool(description=...)} 与参数上的
+ * {@code @ToolParam(description=...)}，由框架翻译成 JSON Schema 随请求发给模型。
+ * ⇒ <b>工具用法绝不写进 system prompt</b>：那是"同一件事说两遍"，两处必然漂移。
  *
- * <p>来自方法上的 {@code @Tool(description=...)} 与参数上的 {@code @ToolParam(description=...)}，
- * 由框架自动翻译成 JSON Schema 随请求发给模型（已核实 {@code DeepSeekChatModel}
- * 会调用 {@code getFunctionTools(toolDefinitions)} 把它们转成
- * {@code FunctionTool(name, description, inputSchema)}）。
- *
- * <p>⇒ <b>工具用法绝不写进 system prompt</b>。写进去就是"同一件事说两遍"，
- * 而两处必然漂移（这正是已撤回的"前置意图提取层"的毛病）。
- *
- * <h2>★ 可插拔：检索工具的开与关</h2>
- *
- * <p>{@code hagent.rag.retrieval.enabled=false} 时本 Bean 返回<b>空数组</b> ——
+ * <p>★ 可插拔：{@code hagent.rag.retrieval.enabled=false} 时检索工具<b>不注册</b> ——
  * 模型看不到 {@code retrieveKnowledge}，也就无从检索。
- * 这是刻意的语义调整（阶段 9）：该开关原先表示"切面不产片段"，
- * 现在表示"<b>检索这个能力整体拔掉</b>"。
  */
 @Slf4j
 @Configuration
@@ -70,8 +48,8 @@ public class ToolRegistration {
     /**
      * 注册模型可用的全部工具。
      *
-     * <p>★ 阶段 11 起<b>返回空数组不再是关掉检索的结果</b>：长期记忆的 3 个工具与检索无关，
-     * 检索关掉时它们照常在。空数组只可能出现在"一个工具类都没注册"的编程错误里。
+     * <p>★ 长期记忆的 3 个工具与检索开关无关：记忆是"跨会话的事实"，不是知识库的一部分 ——
+     * 关掉检索时它们照常在。空数组只可能出现在"一个工具类都没注册"的编程错误里。
      *
      * @param retrievalProperties 检索开关；关掉则不注册检索工具
      */
@@ -103,40 +81,24 @@ public class ToolRegistration {
 
     /**
      * 把工具清单包成框架的 {@link ToolCallbackProvider} 交给管线 ——
-     * <b>阶段 16 起它还是"本地工具 + MCP 工具"的唯一合并点</b>。
+     * 同时也是"<b>本地工具 + MCP 工具</b>"的唯一合并点。
      *
-     * <h3>★ 为什么不直接让 {@code AgentPipeline} 注入 {@code ToolCallback[]}</h3>
+     * <p>★ 为什么不直接让 {@code AgentPipeline} 注入 {@code ToolCallback[]}：语义不同 ——
+     * 注入 Provider 表达的是"<b>能提供工具的东西</b>"，这正是框架设计该接口的用意，
+     * 也与"可插拔"天然对齐（MCP 工具就靠这一点接进来，管线一行没改）。
+     * 而且<b>光有 {@code ToolCallback[]} 这个 Bean，容器里就没有 {@code ToolCallbackProvider}</b> ——
+     * 所有 {@code @SpringBootTest} 会在创建 {@code agentPipeline} 时失败
+     * （{@code No qualifying bean of type 'ToolCallbackProvider'}），框架的自动配置不会补它。
      *
-     * <p>两种写法都能跑，但<b>语义不同</b>：
-     * <ul>
-     *   <li>注入数组 → 管线的依赖是"一堆工具"，工具从哪来、怎么注册**不在依赖里**；</li>
-     *   <li>注入 {@code ToolCallbackProvider} → 管线的依赖是"<b>能提供工具的东西</b>"，
-     *       这正是框架设计这个接口的用意，而且它与"可插拔"的语义天然对齐
-     *       （阶段 16 的 MCP 工具就是靠这一点接进来的：管线一行没改）。</li>
-     * </ul>
+     * <p>★ 为什么 MCP 工具也在这里合并：工具来源有两种，但<b>"模型能看到哪些工具"只能有一个
+     * 决定点</b>，否则按角色过滤、改名、审计开关都要写两遍，而它们必然漂移。
      *
-     * <p>★ 还有一个现实原因：**光有 {@code ToolCallback[]} 这个 Bean，
-     * 容器里就没有 {@code ToolCallbackProvider}** —— 于是所有 {@code @SpringBootTest}
-     * 会在创建 {@code agentPipeline} 时失败（实测：66 个集成测试全红，
-     * 报 {@code No qualifying bean of type 'ToolCallbackProvider'}）。
-     * 框架自己的自动配置<b>不会</b>补这个 Bean（除非类路径上有 MCP 之类的客户端）。
-     * 所以这里显式提供，装配关系一目了然。
+     * <p>更硬的理由是<b>装配冲突</b>：starter 默认也会注册一个 {@code SyncMcpToolCallbackProvider}
+     * （同样实现 {@link ToolCallbackProvider}），两个同类 Bean 并存 → 按类型注入单个 → 启动期
+     * {@code expected single matching bean but found 2}。所以 {@code application.yml} 里关掉了
+     * {@code spring.ai.mcp.client.toolcallback.enabled}，由本方法接管。
      *
-     * <h3>★ 阶段 16：为什么 MCP 工具也在这里合并，而不是让 starter 自己注册</h3>
-     *
-     * <p>工具来源现在有两种（本地 {@code @Tool}、外部进程的 MCP 工具），但
-     * <b>"模型能看到哪些工具"只能有一个决定点</b>：否则将来做按角色过滤、改名、
-     * 审计开关时，要在两个地方各写一遍，而它们必然漂移。
-     *
-     * <p>更硬的理由是<b>装配冲突</b>：starter 默认也会注册一个
-     * {@code SyncMcpToolCallbackProvider}（同样实现 {@link ToolCallbackProvider}）。
-     * 两个同类 Bean 并存 → {@code AgentPipeline} 按类型注入单个 → 启动期
-     * "expected single matching bean but found 2" 直接失败。
-     * 所以 {@code application.yml} 里关掉了 {@code spring.ai.mcp.client.toolcallback.enabled}，
-     * 由本方法接管（这是"唯一注册入口"的守门人）。
-     *
-     * <p>★ <b>没有挂 MCP 时（默认情况）行为完全不变</b>：{@code mcpClients} 为空 →
-     * 原样返回本地工具，与阶段 15 之前的代码等价。
+     * <p>★ <b>没有挂 MCP 时（默认情况）行为不变</b>：{@code mcpClients} 为空 → 原样返回本地工具。
      *
      * @param mcpClients MCP 客户端（由 starter 创建；<b>可能一个都没有</b> ——
      *                   {@code mcp} profile 未激活时就是空列表，那是合法状态）
@@ -153,9 +115,8 @@ public class ToolRegistration {
 
         ToolCallback[] mcpTools = SyncMcpToolCallbackProvider.builder()
                 .mcpClients(clients)
-                // ★ 一律加前缀：MCP 工具名由**外部进程**决定，我们无法假设它不叫
-                //   retrieveKnowledge / saveMemory。撞名的后果是我们的本地工具被悄悄顶掉
-                //   （同名时后注册的覆盖先注册的，且不报错）。
+                // ★ 一律加前缀：MCP 工具名由**外部进程**决定，没法假设它不叫 retrieveKnowledge /
+                //   saveMemory —— 撞名的后果是本地工具被悄悄顶掉（同名时后注册的覆盖先注册的，且不报错）。
                 .toolNamePrefixGenerator(ToolRegistration::mcpToolName)
                 .build()
                 .getToolCallbacks();
@@ -175,16 +136,11 @@ public class ToolRegistration {
     /**
      * 「MCP 配置在，但没启用」—— <b>必须说出来</b>，否则它是一次静默的能力缺失。
      *
-     * <h3>★ 这条日志是踩出来的（2026-10-22 实测）</h3>
-     *
-     * <p>现象：不带 {@code mcp} profile 启动 → 应用一切正常、4 个工具、回答流畅，
-     * 但模型手里<b>根本没有</b>时间工具；用户问"现在是什么时间"，模型只能凭印象答。
-     * <b>没有任何一行日志说明"外部工具没启用"</b>，于是排查方向全在代码上。
-     *
-     * <p>这与本项目反复在防的那类错误同源：<b>能力缺失与正常工作在观测上同形</b>。
-     * 处置不是"下次记得加 profile"（协议第 6 条），而是让装配点自己把话说出来 ——
-     * 它同时知道两件事：{@code application-mcp.yml} 在不在 classpath 上、
-     * 以及这一次有没有真的连上 MCP。
+     * <p>★ 这条日志是踩出来的：不带 {@code mcp} profile 启动时，应用一切正常、工具与回答都正常，
+     * 但模型手里<b>根本没有</b>时间工具 —— 用户问"现在是什么时间"，模型只能凭印象答，
+     * 而<b>没有任何一行日志说明"外部工具没启用"</b>，于是排查方向全在代码上。
+     * 处置不是"下次记得加 profile"，而是让装配点自己把话说出来：
+     * 它同时知道 {@code application-mcp.yml} 在不在 classpath 上、这一次有没有真的连上 MCP。
      */
     private void warnIfMcpConfiguredButInactive(org.springframework.core.env.Environment environment,
                                                 int localToolCount) {
@@ -205,15 +161,11 @@ public class ToolRegistration {
     }
 
     /**
-     * MCP 工具名的统一形状：{@code mcp_<server>_<tool>}。
+     * MCP 工具名的统一形状：{@code mcp_<server>_<tool>}，例 {@code mcp_hagent_time_getCurrentTime}。
      *
-     * <p>例：{@code mcp_hagent_time_getCurrentTime}。三个理由：
-     * <ol>
-     *   <li><b>防撞名</b>：MCP 工具名不归我们管（见上面注释）；</li>
-     *   <li><b>可追溯</b>：审计表 {@code chat_tool_invocation.tool_name} 里一眼看出
-     *       "这是外部进程提供的工具"，而不是本地 Java 工具；</li>
-     *   <li><b>可替换</b>：同一个工具从本地搬到 MCP server，名字前缀变化本身就是线索。</li>
-     * </ol>
+     * <p>三个理由：① <b>防撞名</b>（MCP 工具名不归我们管）；② <b>可追溯</b> ——
+     * 审计表 {@code chat_tool_invocation.tool_name} 里一眼看出"这是外部进程提供的工具"；
+     * ③ <b>可替换</b> —— 同一个工具从本地搬到 MCP server，名字前缀变化本身就是线索。
      */
     private static String mcpToolName(org.springframework.ai.mcp.McpConnectionInfo connection,
                                       io.modelcontextprotocol.spec.McpSchema.Tool tool) {
@@ -226,10 +178,10 @@ public class ToolRegistration {
     }
 
     /**
-     * 命名规则的<b>纯函数</b>版本（阶段 16 起把它独立出来，唯一目的：可被单测直接钉住）。
+     * 命名规则的<b>纯函数</b>版本（独立出来的唯一目的：可被单测直接钉住）。
      *
-     * <p>非法字符一律换成下划线：工具名会进 JSON Schema、审计表与日志，
-     * 而 {@code hagent-time} 这种带连字符的 server 名在部分提供方那里不合法；
+     * <p>非法字符一律换成下划线：工具名会进 JSON Schema、审计表与日志，而
+     * {@code hagent-time} 这种带连字符的 server 名在部分提供方那里不合法；
      * 换掉的是<b>暴露给模型的名字</b>，调用 server 时仍用它原来的名字。
      */
     static String mcpToolName(String serverName, String toolName) {
@@ -249,14 +201,12 @@ public class ToolRegistration {
      * <p><b>为什么用 {@code @ConditionalOnProperty(matchIfMissing = true)} 而不是在方法里判 if</b>：
      * 关掉审计时应该<b>根本没有这个 Bean</b>，而不是"有了但什么都不做" ——
      * 后者会让 {@code AgentPipeline} 拿到一个假存储、以为自己写的审计真的落库了。
-     * 与阶段 6 那条"配置未实现的实现 → 启动期失败，不静默降级"同一个立场。
      *
      * <p>★ 关掉时管线侧看到的是"没有审计存储"（构造器收 {@code ObjectProvider}），
      * 于是它明确记一条 WARN 说"审计已关闭"，而不是静默地不写。
      *
-     * @param dataSource <b>业务主库</b>数据源 —— 必须按名字取。
-     *                   理由见 {@code MysqlToolInvocationStore} 的类注释（踩坑 29：
-     *                   {@code @Primary} 会让按类型注入静默拿到向量库）。
+     * @param dataSource <b>业务主库</b>数据源 —— 必须按名字取：{@code @Primary} 会让按类型注入
+     *                   静默拿到向量库（理由见 {@code MysqlToolInvocationStore} 的类注释）。
      */
     @Bean
     @ConditionalOnProperty(name = "hagent.tool.audit.enabled", havingValue = "true",

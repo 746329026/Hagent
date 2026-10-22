@@ -15,29 +15,25 @@ import java.util.List;
 /**
  * 上下文层的 Redis 实现 —— 承载"<b>模型这一次要用的上下文</b>"。
  *
- * <h2>★ 它与记录层（MySQL）的关系：派生，不是副本</h2>
+ * <h2>它与记录层的关系：派生，不是副本</h2>
  *
- * <p>本层<b>可以丢</b>：TTL 到期、换实例、显式清空，都只是"下次读取要回源重建"。
- * 权威永远在记录层 —— 所以本层的任何失败都<b>不该</b>让对话失败（门面按 WARN 处理）。
+ * <p>本层<b>可以丢</b>：TTL 到期、换实例、显式清空，都只是"下次读取要回源重建"。权威永远在记录层
+ * —— 所以本层的任何失败都<b>不该</b>让对话失败（门面按 WARN 处理）。也正因为"可丢"，
+ * 这里的 TTL 不再是"数据寿命"而是"<b>缓存寿命</b>"：24 小时未活跃的会话从本层消失，
+ * 但历史仍在记录层。
  *
- * <p>也正因为"可丢"，这里的 TTL 语义已经变了：它不再是"数据寿命"，
- * 而是"<b>缓存寿命</b>"。24 小时未活跃的会话从本层消失，但它的历史仍在 MySQL 里。
+ * <h2>为什么不需要锁（与文件实现的关键差别）</h2>
  *
- * <h2>★ 为什么不需要锁（与记录层的 file 实现的关键差别）</h2>
+ * <p>文件实现必须加锁，因为它的"读-改-写"不是原子的。这里用 {@code RIGHT_PUSH}（列表右推）实现追加：
+ * 单条命令在服务端原子执行，<b>天然无竞态、无需锁</b>。
+ * <p>反例：<b>把整个列表读出来、在内存里追加、再整体写回，同样不是原子的</b> —— 那是把 file 版的
+ * 做法照抄到 redis 上，会丢消息。
  *
- * <p>文件实现必须加锁，因为它的"读-改-写"不是原子的。
- * 而这里用 {@code RIGHT_PUSH}（列表右推）实现追加：单条命令在服务端原子执行，
- * <b>天然无竞态，无需锁</b>。
+ * <h2>为什么追加后要 LTRIM</h2>
  *
- * <p>★ 特别注意一个反例：<b>把整个列表读出来、在内存里追加、再整体写回，同样不是原子的</b>。
- * 参考实现就踩过这个坑（把 file 版的做法照抄到了 redis 上）。
- *
- * <h2>★ 为什么追加后要 LTRIM</h2>
- *
- * <p>本层<b>只服务"最近 N 条"</b>（N = 两种模式条数上限的较大者，
- * 由裁剪预算决定，见 {@code MemoryTrimmer}）。若不裁剪，一个长会话会在 Redis 里
- * 无限增长（只受 TTL 约束）—— 而超出的部分<b>永远不会被读到</b>。
- * LTRIM 让本层的容量上界是<b>显式的</b>，而不是"取决于 TTL 与聊天频率的巧合"。
+ * <p>本层<b>只服务"最近 N 条"</b>。不裁剪的话长会话会在 Redis 里无限增长（只受 TTL 约束），
+ * 而超出的部分<b>永远不会被读到</b>。LTRIM 让本层的容量上界是<b>显式的</b>，
+ * 而不是"取决于 TTL 与聊天频率的巧合"。
  */
 @Slf4j
 public class RedisConversationContextCache implements ConversationContextCache {
@@ -50,8 +46,8 @@ public class RedisConversationContextCache implements ConversationContextCache {
     /**
      * 本层保留的最大条数 = 两种模式条数上限的较大者。
      *
-     * <p>取较大者而不是各存各的：本层<b>不知道</b>调用方这次用的是哪个模式
-     * （预算在门面手里），存少了会让工作流模式读到残缺的上下文。
+     * <p>取较大者而不是各存各的：本层<b>不知道</b>调用方这次用的是哪个模式（预算在门面手里），
+     * 存少了会让工作流模式读到残缺的上下文。
      */
     private final int maxRetained;
 
@@ -77,7 +73,7 @@ public class RedisConversationContextCache implements ConversationContextCache {
         String key = keyOf(conversationId);
         Long size = redis.opsForList().size(key);
         if (size == null || size == 0) {
-            // ★ key 不存在 → 未命中。Redis 会自动删除空列表，所以 size==0 等价于"键不在"
+            // key 不存在 → 未命中。Redis 会自动删除空列表，所以 size==0 等价于"键不在"
             return null;
         }
         long fetchCount = Math.min(size, maxMessages);

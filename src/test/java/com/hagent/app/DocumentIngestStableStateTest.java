@@ -17,29 +17,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 需要"<b>整个知识库已入库</b>"这一稳定状态的测试。
  *
- * <h2>★ 为什么要单独一个类（而不是和入库测试混在一起）</h2>
+ * <p>为什么要单独一个类：入库测试（{@code DocumentIngestIntegrationTest}）在每个方法前清空
+ * 向量表，而本类的断言（"批量入库应当全部跳过"、"一篇文档的块数应等于 chunkTotal"）
+ * 只有在<b>整个目录都已入库</b>时才有意义。两类需求塞进一个类就只能靠 {@code @Order} 排顺序 ——
+ * 而<b>顺序依赖的测试在单独跑与全量跑时行为不同</b>，失败时无法判断是代码坏了还是顺序变了。
  *
- * <p>入库测试（{@code DocumentIngestIntegrationTest}）在<b>每个方法前清空向量表</b>，
- * 以保证每个用例自给自足。而本类的用例性质相反：
- * "批量入库应当全部跳过"、"一篇文档的块数应等于其 chunkTotal"——
- * 这些断言只有在<b>整个目录都已入库</b>时才有意义。
+ * <p>{@code @BeforeAll} 里的准备是幂等的：先查库里有没有数据，<b>没有才</b> {@code ingestAll()}。
+ * 于是本类单独运行、以及被入库测试清过库后运行，都能自己备好数据 ——
+ * <b>不依赖任何其它测试的执行结果</b>，这正是这类测试最该保住的性质。
  *
- * <p>把两类需求塞进一个类，只能靠 {@code @Order} 排顺序 ——
- * 而那正是本项目在阶段 6 踩过的坑：<b>顺序依赖的测试在单独跑与全量跑时行为不同</b>，
- * 失败时无法判断是代码坏了还是顺序变了。
- *
- * <h2>★ {@code @BeforeAll} 里的"幂等准备"</h2>
- *
- * <p>{@code setUp} 先检查库里有没有数据，<b>没有才执行 {@code ingestAll()}</b>。
- * 这样本类：
- * <ul>
- *   <li>单独运行时：自己准备数据（因为库可能是空的）；</li>
- *   <li>在全量测试中被"入库测试"清过库后运行时：同样能自己准备好。</li>
- * </ul>
- * 那一步检查看起来多余，却让本类<b>不依赖任何其它测试的执行结果</b> ——
- * 而"不依赖前序状态"正是这类测试最容易丢掉、又最该保住的性质。
- *
- * <p>用 {@code @TestInstance(PER_CLASS)} 是为了让 {@code @BeforeAll} 可以是实例方法
+ * <p>{@code @TestInstance(PER_CLASS)} 是为了让 {@code @BeforeAll} 可以是实例方法
  * （JUnit 默认要求它是静态的，而静态方法拿不到 {@code @Autowired} 注入的字段）。
  */
 @SpringBootTest
@@ -68,8 +55,7 @@ class DocumentIngestStableStateTest {
         Integer existing = pgVectorJdbcTemplate.queryForObject(
                 "SELECT COUNT(*)::int FROM hagent_knowledge", Integer.class);
         if (existing != null && existing > 0) {
-            // 库里已有数据（可能是入库测试留下的，或上一次运行留下的）——
-            // 不再重复入库，直接进入"已入库"状态
+            // 库里已有数据（入库测试或上一次运行留下的）—— 不再重复入库
             return;
         }
         seedReport = ingestService.ingestAll();
@@ -131,7 +117,7 @@ class DocumentIngestStableStateTest {
     @DisplayName("★ 没有任何块超过 chunking.max-size（防 embedding 静默截断）")
     void noChunkExceedsConfiguredMaxSize() {
         // 配置值是 400；这里用 400 而不是读配置，是为了让"配置被改大"时测试也能拦住它 ——
-        // 一旦有人把 max-size 调过 1000，embedding 就会静默截断，而这条断言会立刻失败
+        // 一旦 max-size 被调过 1000，embedding 就会静默截断，而这条断言会立刻失败
         List<String> tooLong = pgVectorJdbcTemplate.queryForList(
                 "SELECT metadata ->> 'source' || ' len=' || LENGTH(content) FROM hagent_knowledge "
                         + "WHERE LENGTH(content) > 400",

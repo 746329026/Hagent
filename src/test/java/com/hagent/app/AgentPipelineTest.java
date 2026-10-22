@@ -34,23 +34,18 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * {@link AgentPipeline} 的事件流契约 —— <b>阶段 8 新增的核心防线</b>。
+ * {@link AgentPipeline} 的事件流契约 —— <b>核心防线</b>。
  *
- * <h2>★ 它保护的是四条"实测出来、写错不报错"的行为</h2>
- *
+ * <p>它保护四条"实测出来、写错不报错"的行为：
  * <ol>
- *   <li><b>每片是增量，Final 必须自己拼接</b> —— 实测真实响应 184 片中
- *       最后一片 text 长度为 0、而全片拼接才是完整回答。
+ *   <li><b>每片是增量，Final 必须自己拼接</b> —— 实测真实响应 184 片中最后一片 text 长度为 0；
  *       若实现改成"取最后一片"，回答会变成空字符串<b>且不报错</b>；</li>
- *   <li><b>空片必须过滤</b> —— 实测首片是 {@code text=null, reasoning=空串}。
- *       不过滤会往 SSE 里发空事件；</li>
+ *   <li><b>空片必须过滤</b> —— 实测首片是 {@code text=null, reasoning=空串}，不过滤会往 SSE 里发空事件；</li>
  *   <li><b>思考与回答两段互斥、都要累积</b> —— 前端要分两块渲染；</li>
- *   <li><b>写回发生在 Final 之前，且只写一次</b> —— 否则"前端收到 Final 时历史还没落库"，
- *       或一个请求写两遍。</li>
+ *   <li><b>写回发生在 Final 之前，且只写一次</b> —— 否则"前端收到 Final 时历史还没落库"，或一个请求写两遍。</li>
  * </ol>
  *
- * <p>这些断言用<b>假的 ChatModel</b> 构造出与实测完全相同的分片形状，
- * 因此不需要真实 API Key、不花钱，且可重复。
+ * <p>断言用<b>假的 ChatModel</b> 构造出与实测完全相同的分片形状：不需要真实 API Key、不花钱、可重复。
  */
 class AgentPipelineTest {
 
@@ -96,9 +91,8 @@ class AgentPipelineTest {
     /**
      * 造一个 pipeline，模型的流式输出由 {@code chunks} 指定（<b>不带工具</b>）。
      *
-     * <p>★ 阶段 9 起本构造器需要 {@code chatModel.getOptions()} 是
-     * {@code DeepSeekChatOptions}（它要"克隆配置 + 挂工具"，见 AgentPipeline 的启动自检），
-     * 所以这里必须真的把它 stub 出来 —— 否则构造期就失败。
+     * <p>{@code chatModel.getOptions()} 必须是 {@code DeepSeekChatOptions}
+     * （管线要"克隆配置 + 挂工具"，见启动自检），所以要真的 stub 出来，否则构造期就失败。
      */
     private AgentPipeline pipeline(RecordingMemory memory, List<ChatResponse> chunks) {
         return pipeline(memory, chunks, TestLongTermMemory.empty());
@@ -127,7 +121,7 @@ class AgentPipelineTest {
     }
 
     // ========================================================================
-    // 六、阶段 11：长期记忆索引进 system
+    // 六、长期记忆索引进 system
     // ========================================================================
 
     @Test
@@ -316,8 +310,8 @@ class AgentPipelineTest {
                 .map(PipelineEvent.ModelOutput.class::cast)
                 .toList();
 
-        // ★ 注意阶段 9 的语义：这三个 chunk 属于【同一次】模型调用（= 同一步循环），
-        //   所以事件是 思考、思考、回答、Final（Final 由这一步收尾时发出）。
+        // 这三个 chunk 属于【同一次】模型调用（= 同一步循环），
+        // 所以事件是 思考、思考、回答、Final（Final 由这一步收尾时发出）。
         assertThat(modelEvents).hasSize(4);
         assertThat(modelEvents.subList(0, 2))
                 .allMatch(e -> e instanceof PipelineEvent.ModelOutput.Reasoning);
@@ -371,18 +365,6 @@ class AgentPipelineTest {
 
     // ========================================================================
     // 四、检索事件
-    // ========================================================================
-
-    // ========================================================================
-    // ★ 阶段 9 删除了两个用例：retrievedEventIsEmittedFirst / retrievedEventIsEmittedEvenWhenEmpty
-    //
-    //   它们断言"管线把检索结果作为第一个事件发出"。阶段 9 把检索改成
-    //   retrieveKnowledge 工具之后，管线【不再自己做检索】，因此也不再发
-    //   PipelineEvent.Retrieved —— 这个事件改由【工具】发出（阶段 9.2 接线）。
-    //
-    //   ⇒ 对应断言会在工具侧重建（工具既能返回文本给模型，也能发出带结构化片段的
-    //     Retrieved 事件给前端）。这与 PromptBuilderTest 里那三条同一个道理：
-    //     测试跟着职责走。
     // ========================================================================
 
     @Test

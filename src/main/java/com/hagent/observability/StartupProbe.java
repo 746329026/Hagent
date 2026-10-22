@@ -27,25 +27,19 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 启动探针 —— 阶段 0 的核心验收手段。
- *
- * <p><b>为什么需要它</b>：验证类代码最常见的失败方式是"静默不执行"——
- * 程序看起来一切正常，其实什么都没检查。所以本类的设计原则是：
+ * 启动探针 —— 验证类代码最常见的失败方式是"静默不执行"（看起来一切正常，其实什么都没检查），
+ * 所以本类的设计原则是：
  * <ol>
  *   <li>整个探测过程包在 try-catch(Throwable) 里，任何异常都写入结果并 log.error，
  *       绝不允许"探针失败 = 静默无输出"；</li>
- *   <li>区分两类证据：<b>Bean 归属</b>证明"Spring 装配了谁"，
- *       <b>真实调用</b>证明"它真的能用" —— 两者层次不同，缺一不可；</li>
+ *   <li>区分两类证据：<b>Bean 归属</b>证明"Spring 装配了谁"，<b>真实调用</b>证明"它真的能用"；</li>
  *   <li>幂等 + 可手动重跑（供 /health/detail?refresh=true 使用）。</li>
  * </ol>
  *
- * <p><b>本项目已由探针抓到的真实问题</b>：
- * <ul>
- *   <li>chat 模型名写错（deepseek-chat 不存在）时，API 会<b>静默降级</b>到
- *       deepseek-flash 且不报错 —— 所以探针必须核对"实际返回的模型名"，
- *       而不只是看"我配置了什么"；</li>
- *   <li>embedding 维度是 pgvector 建表 vector(N) 的依据，必须实测而非照抄。</li>
- * </ul>
+ * <p>检查项：ChatModel / EmbeddingModel 实现归属、配置的模型名、API Key 是否存在、
+ * chat 实调并<b>核对实际返回的模型名</b>（模型名写错时 API 会静默降级且不报错，
+ * 只看"我配置了什么"发现不了）、embedding 实测维度（pgvector 建表 {@code vector(N)} 的依据）、
+ * Redis 连通性、pgvector 扩展是否已安装。
  */
 @Slf4j
 @Component
@@ -85,42 +79,21 @@ public class StartupProbe {
     /**
      * 启动自检：<b>框架的 {@code ChatMemory} 不得进入容器</b>。
      *
-     * <h3>★ 这条检查是"一个失败的方案"换来的（值得完整读一遍）</h3>
+     * <p>Spring AI 2.0.1 的 {@code ChatMemoryAutoConfiguration} 只带 {@code @ConditionalOnClass}
+     * 与 {@code @ConditionalOnMissingBean}、<b>没有 enabled 开关</b>，我们的 Bean 一删它必然装上
+     * {@code InMemoryChatMemoryRepository} + {@code MessageWindowChatMemory}
+     * （纯堆内存、无 token 预算，重启即丢且不报错）。
      *
-     * <p>阶段 8 删除了 {@code ChatMemoryAdapter} —— 它原先是一个<b>占位 Bean</b>，
-     * 靠"占着这个类型"来阻止框架的默认实现进来。当时的想法是：
-     * <b>删掉它 + 加一条"出现即失败"的启动自检</b>。
+     * <p>所以正解是在配置层排除该自动配置（{@code spring.autoconfigure.exclude}，见
+     * {@code application.yml}），而本检查<b>反向确认排除仍然生效</b>：
+     * Bean 不在 → 正常；Bean 在 → 说明有人删了那行配置、或框架改了自动配置类名/条件 → <b>启动失败</b>。
+     * 于是守护方式从"占坑 Bean"（没人调用的类，隐式）变成"配置 + 一条会报错的检查"。
      *
-     * <p><b>实测证明那个想法不成立</b>：Spring AI 2.0.1 的
-     * {@code ChatMemoryAutoConfiguration} 只带 {@code @ConditionalOnClass}
-     * 与两个 {@code @ConditionalOnMissingBean}，
-     * <b>没有任何 {@code enabled} 开关</b>（javap 实测）。
-     * 也就是说：我们的 Bean 一删，框架<b>必然</b>装上
-     * {@code InMemoryChatMemoryRepository} + {@code MessageWindowChatMemory}，
-     * 于是那条"出现即失败"的自检<b>永远通不过</b> —— 首次跑测试就全红，
-     * 65 个 {@code @SpringBootTest} 全部上下文加载失败。
+     * <p>放在构造期而不是做成探针的一条：探针条目失败只影响 {@code allPassed}
+     * （仅被 {@code /health/detail} 读取），而这条属于"装配错误 → 启动失败"。
      *
-     * <p><b>正解</b>：在配置层把该自动配置排除掉
-     * （{@code spring.autoconfigure.exclude}，见 {@code application.yml}），
-     * 而本检查<b>反向确认排除仍然生效</b>：
-     * <ul>
-     *   <li>Bean 不在 → 正常（排除生效）；</li>
-     *   <li>Bean 在 → 说明有人删了那行配置，或框架改了自动配置类名/条件 → <b>启动失败</b>。</li>
-     * </ul>
-     *
-     * <p>这个转换的意义：原来靠"占坑"（一个没人调用的类）守，现在靠
-     * "<b>配置 + 一条会报错的检查</b>"守 —— 前者是隐式的，后者出错时会说话。
-     *
-     * <h3>★ 为什么检查放在构造期，而不是做成探针的一条</h3>
-     *
-     * <p>探针的其它条目失败<b>只影响 {@code allPassed}</b>（仅被 {@code /health/detail} 读取），
-     * 不会阻止启动。而这条属于"装配错误 → 启动失败"，与
-     * {@code MemoryConfigValidator}、{@code ragAnswerPromptResource} 同一立场。
-     *
-     * <h3>怎么修</h3>
-     *
-     * <p>看到这条异常时，先看 {@code application.yml} 的
-     * {@code spring.autoconfigure.exclude} 是否还在、类名是否仍与框架一致。
+     * <p>看到这条异常时：先看 {@code application.yml} 的 {@code spring.autoconfigure.exclude}
+     * 是否还在、类名是否仍与框架一致。
      */
     private void assertNoFrameworkChatMemory(ObjectProvider<ChatMemory> frameworkChatMemory) {
         if (frameworkChatMemory.getIfAvailable() == null) {
@@ -158,8 +131,8 @@ public class StartupProbe {
     /**
      * 执行探测（幂等，已执行过则直接返回）。
      *
-     * <p>这里用 synchronized 是合理场景：保护的是确实被多线程共享且非线程安全的
-     * LinkedHashMap，且只串行化"探测"这个低频动作，不影响业务吞吐。
+     * <p>{@code synchronized} 保护的是被多线程共享且非线程安全的 {@code LinkedHashMap}，
+     * 且只串行化"探测"这个低频动作，不影响业务吞吐。
      */
     public synchronized void runProbe() {
         if (!executed.compareAndSet(false, true)) {
@@ -214,9 +187,9 @@ public class StartupProbe {
     /**
      * 真调云端 chat，并<b>核对实际返回的模型名</b>。
      *
-     * <p>为什么必须核对：请求一个不存在的模型名时，API 会静默降级并正常返回，
-     * 只会把响应里的 model 字段换成实际使用的模型。不核对就发现不了 ——
-     * 你会以为在用一个强模型，实际在用另一个。实测已验证该行为。
+     * <p>必须核对：请求一个不存在的模型名时，API 会<b>静默降级</b>并正常返回，
+     * 只把响应里的 model 字段换成实际使用的模型 —— 不核对就会发现不了
+     * "以为在用一个强模型，实际在用另一个"。
      */
     private ProbeItem probeChat() {
         if (!isKeyPresent()) {

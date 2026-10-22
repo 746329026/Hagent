@@ -8,33 +8,28 @@ import javax.sql.DataSource;
 /**
  * 回合账的 MySQL 实现（表 {@code chat_turn}）。
  *
- * <h2>★ 三条与 {@code MysqlToolInvocationStore} 同源的立场（不重复论证，只列）</h2>
- *
+ * <p>三条与工具审计同源的立场：
  * <ol>
  *   <li><b>启动自检</b>：表 / 三个索引缺任何一个 → <b>启动即失败</b>并打印可执行的修法。
- *       理由与记录层、工具审计完全相同：等到第一次收尾才发现，
- *       意味着"这之间的所有轮次永久没有账" —— 而账只能从此刻开始攒，事后无法补录。</li>
- *   <li><b>写入失败只记 ERROR，不抛异常</b>（见 {@link TurnStore} 的类注释）。</li>
- *   <li><b>按名字取数据源</b>：调用方必须 {@code @Qualifier("dataSource")}。
- *       按类型注入会静默拿到向量库（阶段 7 踩坑 29）。</li>
+ *       等到第一次收尾才发现，意味着"这之间的所有轮次永久没有账" ——
+ *       账只能从此刻开始攒，事后无法补录；</li>
+ *   <li><b>写入失败只记 ERROR，不抛异常</b>（见 {@link TurnStore} 的类注释）；</li>
+ *   <li><b>按名字取数据源</b>：调用方必须 {@code @Qualifier("dataSource")}，
+ *       按类型注入会静默拿到向量库。</li>
  * </ol>
  *
- * <h2>★ 为什么用默认构造参数（而不是像工具审计那样给一个 null 兜底）</h2>
+ * <p>{@code record(null)} 只做无操作、一行都不写：本表<b>没有可空到"整行不用写"的字段</b>
+ * （{@code status} / {@code elapsed_ms} / {@code model_calls} 都是本轮真实发生的值），
+ * 宁可少一行，也不写一行半真半假的。
  *
- * <p>本表<b>没有可空到"整行不用写"的字段</b>：{@code status}、{@code elapsed_ms}、
- * {@code model_calls} 都是本轮真实发生的值。所以 {@code record(null)} 只做无操作，
- * 一行都不写 —— 宁可少一行，也不写一行半真半假的。
- *
- * <h2>★ 为什么一次 INSERT 而不是"先插 RUNNING 再 UPDATE"</h2>
- *
- * <p>见 {@code db/chat_turn.sql} 的"为什么主键是 UUID"：{@code turn_id} 在轮次开始时
- * 就生成好了，工具审计当场就能带上它；收尾时这一行已经"齐了"，
- * 不需要 UPDATE、不需要僵尸行清理、不需要为并发写加锁。
+ * <p>收尾一次性 INSERT 而不是"先插 RUNNING 再 UPDATE"：{@code turn_id} 在轮次开始时就生成好了，
+ * 工具审计当场就能带上它；收尾时这一行已经"齐了"，于是不需要 UPDATE、不需要僵尸行清理、
+ * 不需要为并发写加锁。
  */
 @Slf4j
 public class MysqlTurnStore implements TurnStore {
 
-    /** 表名。★ 刻意<b>不做成配置键</b>：没有"需要换表名"的消费者（见 {@code db/chat_turn.sql}）。 */
+    /** 表名。刻意<b>不做成配置键</b>：没有"需要换表名"的消费者。 */
     private static final String TABLE = "chat_turn";
 
     /** 三个索引名（DDL 里各有一条注释说明它对应哪个查询）。 */
@@ -80,7 +75,7 @@ public class MysqlTurnStore implements TurnStore {
         if (turnIds == null || turnIds.isEmpty()) {
             return java.util.Map.of();
         }
-        // 去重 + 去掉 null：历史里可能有很多阶段 14 之前的消息（turn_id 为 NULL）
+        // 去重 + 去掉 null：历史里可能有 turn_id 为 NULL 的旧消息
         java.util.List<String> ids = turnIds.stream()
                 .filter(id -> id != null && !id.isBlank())
                 .distinct()
@@ -88,7 +83,7 @@ public class MysqlTurnStore implements TurnStore {
         if (ids.isEmpty()) {
             return java.util.Map.of();
         }
-        // ★ 一次 IN 查询，不是逐个查（历史回放要显示整段对话里每一轮的数字，N+1 会明显卡）
+        // 一次 IN 查询而不是逐个查：历史回放要显示每轮的数字，N+1 会明显卡
         String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
         java.util.Map<String, TurnRecord> result = new java.util.LinkedHashMap<>();
         jdbc.query("SELECT " + SELECT_COLUMNS + " FROM " + TABLE
@@ -112,8 +107,8 @@ public class MysqlTurnStore implements TurnStore {
                 TurnStatus.valueOf(rs.getString("status")),
                 rs.getString("finish_reason"),
                 rs.getLong("elapsed_ms"),
-                // ★ 可空整数必须用 getObject：getLong 会把 NULL 变成 0，
-                //   而"首字 0ms"与"根本没等到首字"是两件事（本阶段的核心口径之一）
+                // 可空整数必须用 getObject：getLong 会把 NULL 变成 0，
+                // 而"首字 0ms"与"根本没等到首字"是两件事
                 (Long) rs.getObject("first_token_ms", Long.class),
                 rs.getInt("model_calls"),
                 rs.getInt("tool_calls"),
@@ -152,8 +147,8 @@ public class MysqlTurnStore implements TurnStore {
                     record.planSteps(),
                     record.errorMessage());
         } catch (Exception e) {
-            // ★ 见 TurnStore 的类注释：账本不在关键路径上 → 不抛异常。
-            //   但必须记 ERROR 且写清后果 —— 静默丢账会让成功率凭空失真。
+            // 账本不在关键路径上 → 不抛异常；但必须记 ERROR 且写清后果 ——
+            // 静默丢账会让成功率与成本凭空失真。
             log.error("[回合账] 写入失败（本次对话不受影响；但这一轮【没有留下任何统计】，"
                             + "成功率与成本都会少一条）：轮次={} 会话={} 状态={} 原因={}",
                     record.turnId(), record.conversationId(), record.status(),
@@ -164,8 +159,8 @@ public class MysqlTurnStore implements TurnStore {
     /**
      * 启动自检：表 + 三个索引必须都在。
      *
-     * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 ——
-     * 与 {@code MysqlMessageStore} / {@code MysqlToolInvocationStore} 同一立场（决策 8）。
+     * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 —— 缺索引时查询会退化成全表扫描，
+     * 数据一多就变慢，而且不会报错。
      */
     private void verifySchemaOrThrow() {
         try {

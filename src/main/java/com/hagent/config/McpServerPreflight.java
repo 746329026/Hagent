@@ -13,38 +13,19 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * <b>MCP 连接的前置检查</b>（阶段 16）—— 在<b>任何 Bean 创建之前</b>确认
- * "配置里要拉起的 server jar 真的存在"。
+ * <b>MCP 连接的前置检查</b> —— 在<b>任何 Bean 创建之前</b>确认"配置里要拉起的 server jar 真的存在"。
  *
- * <h2>★ 为什么需要它（这条是实测出来的，不是假想）</h2>
+ * <p>★ 为什么需要：MCP server 是<b>独立项目</b>，主应用的构建不会构建它，所以"忘了先构建 server"
+ * 是常态。不拦的话，启动会在约 20 秒后报
+ * {@code TimeoutException: Did not observe any item or terminal signal within 20000ms} ——
+ * 这句话里<b>一个字都没提"jar 不存在"</b>（真实原因藏在更早的
+ * {@code Error: Unable to access jarfile ...} 里，而没人会往回翻 20 秒前的日志）。
  *
- * <p>MCP server 是<b>独立项目</b>，主应用的 {@code mvnw package} 不会构建它。
- * 所以"忘了先构建 server"是<b>常态</b>，而它现在的表现是：
+ * <p>★ 为什么放在 {@link EnvironmentPostProcessor} 而不是 Bean 里：要<b>抢在 MCP 客户端 Bean
+ * 之前</b> —— 客户端在容器 refresh 期间就会去连，放在 Bean 里（哪怕 {@code @PostConstruct}）都太晚。
  *
- * <pre>
- *   ... 20 秒后 ...
- *   Caused by: java.util.concurrent.TimeoutException:
- *       Did not observe any item or terminal signal within 20000ms in 'map'
- * </pre>
- *
- * <p>这句报错<b>一个字都没提"jar 不存在"</b>。真实原因藏在更早的一行
- * {@code STDERR Message received: Error: Unable to access jarfile ...} 里 ——
- * 而没有人会在 20 秒超时之后往回翻日志。
- *
- * <p>⇒ 这正是本项目反复在防的那类错误：<b>报错读起来像别的问题</b>。
- * 处置方式与 `MemoryConfigValidator` 一致：<b>能在启动期用一句话说清的，
- * 不要让它变成 20 秒后的一条超时</b>。
- *
- * <h2>★ 为什么放在 {@link EnvironmentPostProcessor} 而不是 Bean 里</h2>
- *
- * <p>因为要<b>抢在 MCP 客户端 Bean 之前</b>。放在 Bean 里（哪怕是 {@code @PostConstruct}）
- * 都已经太晚：客户端在容器 refresh 期间就会去连，失败了整条启动链以超时收场。
- *
- * <h2>★ 顺序为什么是 {@code LOWEST_PRECEDENCE}</h2>
- *
- * <p>与 {@code MemoryConfigValidator} 同样的理由（踩坑 #7）：
- * 加载 {@code application.yml} / {@code application-mcp.yml} 这件事<b>本身</b>
- * 也是由一个 EnvironmentPostProcessor 完成的；抢在它之前运行，读到的配置全是空的。
+ * <p>★ 顺序为什么是 {@code LOWEST_PRECEDENCE}：加载 {@code application.yml} 这件事本身也是由
+ * 一个 EnvironmentPostProcessor 完成的，抢在它之前运行会读到全空的配置。
  */
 public class McpServerPreflight implements EnvironmentPostProcessor, Ordered {
 
@@ -53,13 +34,13 @@ public class McpServerPreflight implements EnvironmentPostProcessor, Ordered {
 
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
-        // ★ 用 Binder 而不是 getProperty：连接名是**动态的**（time / excel / ...），
-        //   没法预先知道要读哪个键。Binder 还负责解析 ${java.home} / ${user.dir} 这类占位符。
+        // ★ 用 Binder 而不是 getProperty：连接名是动态的（time / excel / ...），没法预知键名；
+        //   Binder 还负责解析 ${java.home} / ${user.dir} 这类占位符。
         Map<String, Object> connections = Binder.get(environment)
                 .bind(CONNECTIONS_PREFIX, Bindable.mapOf(String.class, Object.class))
                 .orElse(Map.of());
 
-        // 没有 MCP 连接（未激活 mcp profile）是**正常状态**，不是错误
+        // 没有 MCP 连接（未激活 mcp profile）是正常状态，不是错误
         for (Map.Entry<String, Object> entry : connections.entrySet()) {
             verifyConnection(entry.getKey(), entry.getValue());
         }
@@ -95,9 +76,8 @@ public class McpServerPreflight implements EnvironmentPostProcessor, Ordered {
      * 从 jar 路径反推构建命令：{@code .../MCP/time-server/target/x.jar}
      * → {@code .\mvnw.cmd -B -ntp -f MCP/time-server/pom.xml package}。
      *
-     * <p>★ 为什么不按连接名猜项目名：连接名是 {@code time}，项目目录却是
-     * {@code time-server} —— 两套命名不该由检查代码去"约定"（约定会漂移）。
-     * 路径里的 {@code /target/} 才是可靠线索：那是 Maven 的固定产物目录。
+     * <p>★ 不按连接名猜项目名：连接名是 {@code time}，项目目录却是 {@code time-server} ——
+     * 两套命名不该由检查代码去"约定"（约定会漂移）。路径里的 {@code /target/} 才是可靠线索。
      */
     private static String buildCommand(String jar) {
         Path path = Path.of(jar);
@@ -114,13 +94,10 @@ public class McpServerPreflight implements EnvironmentPostProcessor, Ordered {
     /**
      * 把 {@code args} 归一化成列表。
      *
-     * <p>★ <b>这里有一段实测得来的坑</b>：当绑定目标是 {@code Object} 时，
-     * Spring 的 Binder 会把 {@code args[0] / args[1]} 绑成
-     * <b>{@code Map{"0": ..., "1": ...}}</b>，而不是 {@code List}。
-     * 我第一版代码只判了 {@code instanceof List}，于是"检查"静默地什么都没查 ——
-     * 而它看起来完全正常（启动照走、20 秒后照样超时）。
-     *
-     * <p>所以这里两种形态都认，并<b>按数字键排序</b>还原顺序（Map 的迭代顺序不可依赖）。
+     * <p>★ <b>实测的坑</b>：绑定目标是 {@code Object} 时，Spring 的 Binder 会把
+     * {@code args[0] / args[1]} 绑成 <b>{@code Map{"0": ..., "1": ...}}</b> 而不是 {@code List}。
+     * 只判 {@code instanceof List} 会让"检查"静默地什么都不查 —— 而它看起来完全正常。
+     * 所以两种形态都认，并<b>按数字键排序</b>还原顺序（Map 的迭代顺序不可依赖）。
      */
     private static List<String> argList(Object rawArgs) {
         if (rawArgs instanceof List<?> list) {

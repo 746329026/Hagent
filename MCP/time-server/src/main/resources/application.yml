@@ -1,16 +1,15 @@
 # ============================================================================
-# 时间 MCP Server（stdio）—— 阶段 16 的样板配置
+# 时间 MCP Server（stdio）配置
 # ============================================================================
 #
 # 【最重要的一条：stdout 是协议通道】
-#   客户端与 server 之间的 JSON-RPC 走 stdin/stdout。任何写进 stdout 的东西
-#   （日志、banner、启动信息）都会把协议帧搅乱 —— 症状是"客户端连上了，
-#   但一个工具都看不到"，而且服务端看起来一切正常。
-#   ⇒ 所以这里关了 banner，且日志 appender 全部改到 stderr（见 logback-spring.xml）。
+#   客户端与 server 的 JSON-RPC 走 stdin/stdout。任何写进 stdout 的东西（日志、banner）
+#   都会搅乱协议帧 —— 症状是"客户端连上了，但一个工具都看不到"，而服务端看起来一切正常。
+#   ⇒ 这里关了 banner，日志 appender 全部改到 stderr（见 logback-spring.xml）。
 #
 # 【为什么没有 server.port】
-#   这是非 web 应用（web-application-type: none）：MCP 的 stdio 形态不监听端口，
-#   进程的"服务接口"就是它的 stdin/stdout。
+#   这是非 web 应用（web-application-type: none）：stdio 形态不监听端口，
+#   进程的"服务接口"就是 stdin/stdout。
 # ============================================================================
 spring:
   application:
@@ -23,18 +22,17 @@ spring:
   ai:
     mcp:
       server:
-        # 展示给客户端的名字与版本（tools/list 里会带上 serverInfo）
+        # 展示给客户端的名字与版本（tools/list 的 serverInfo 会带上）
         name: hagent-time
         version: 1.0.0
-        # 显式声明用 stdio —— 与「不启动 web 容器」是同一条决定的两个写法，
-        # 写出来是为了让"这条 server 是 stdio 形态"在配置里可见。
+        # 显式声明 stdio —— 与"不启动 web 容器"是同一条决定的两个写法
         stdio: true
-        # 扫描 @McpTool 注解（本项目的工具就是这么登记的，默认就是 true，写出来更明确）
+        # 扫描 @McpTool 注解登记工具（默认就是 true，写出来更明确）
         annotation-scanner:
           enabled: true
 
 logging:
-  # ★ 关键：控制台输出会被 logback-spring.xml 改到 stderr；这里只调级别。
+  # 控制台输出已被 logback-spring.xml 改到 stderr，这里只调级别
   level:
     root: INFO
     com.hagent.mcp.time: DEBUG

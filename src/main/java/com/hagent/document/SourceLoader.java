@@ -16,17 +16,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 知识库文档加载器 —— 读取 {@code .md} 文件，解析头部的 frontmatter，产出 {@link LoadedDocument}。
+ * 知识库文档加载器 —— 读取 {@code .md} / {@code .txt}，解析头部的 frontmatter，产出 {@link LoadedDocument}。
  *
- * <h2>只支持 .md 与 .txt（本阶段的刻意收敛）</h2>
+ * <p>只做纯文本格式：{@code .docx} / {@code .pdf} 的解析会引入 POI 等重依赖与一堆边界情况
+ * （表格、图片、页眉页脚、扫描件），而 RAG 的真实难点在分块与检索，不在格式解析。
  *
- * <p>{@code .docx} / {@code .pdf} 的解析会引入 POI 等重依赖，
- * 并带来一堆边界情况（表格、图片、页眉页脚、扫描件）。而 RAG 的<b>真实难点
- * 在分块与检索，不在格式解析</b>。所以本阶段只做纯文本格式，
- * 把复杂度集中在真正重要的地方。
- *
- * <h2>frontmatter 的格式</h2>
- *
+ * <p>frontmatter 示例：
  * <pre>
  *   ---
  *   kind: POLICY
@@ -41,35 +36,19 @@ import java.util.regex.Pattern;
  *
  * <h2>★ 三个必须明确的取舍</h2>
  *
- * <h3>1. 不写 frontmatter 的文档怎么办</h3>
- * <p>并不是每份文档都会有人认真写 frontmatter。本加载器采取"<b>能推断就推断、
- * 推断不出就明确失败</b>"的策略：
- * <ul>
- *   <li>{@code title}：frontmatter → 第一个 {@code #} 标题 → 文件名（去掉扩展名）。
- *       三者必有其二，所以几乎总能得到；全部为空才报错。</li>
- *   <li>{@code kind}：<b>没有推断来源，必须显式指定</b>（由调用方传入的默认值或 frontmatter）。
- *       原因：kind 决定切分策略与默认密级，猜错的后果是"用错策略入库"且检索侧看不出来。</li>
- *   <li>{@code level}：frontmatter → {@code kind} 的默认密级。见 {@link AccessLevel} 里
- *       "为什么默认偏保守"。</li>
- * </ul>
+ * <p><b>1. 缺 frontmatter 时"能推断就推断、推不出就明确失败"</b>：{@code title} 取
+ * frontmatter → 第一个 {@code #} 标题 → 文件名；{@code kind} <b>没有推断来源，必须显式给出</b>
+ * （它决定切分策略与默认密级，猜错就是"用错策略入库"且检索侧看不出来）；{@code level} 取
+ * frontmatter → {@code kind} 的默认密级（见 {@link AccessLevel}）。
  *
- * <h3>2. frontmatter 取值非法时：报错，不静默回退</h3>
- * <p>若写了 {@code level: 绝密}（不存在的等级），静默当作 INTERNAL 会让作者
- * 以为"我标了绝密"而实际是内部 —— <b>标注失效且无人知晓</b>。
- * 所以 {@link AccessLevel#parse} 与 {@link DocumentKind#parse} 都会抛异常，
- * 由调用方决定是"整批失败"还是"跳过这一份并记录"。见 {@link DocumentKind} 的说明。
+ * <p><b>2. 取值非法就报错，不静默回退</b>：写了 {@code level: 绝密} 却存成 INTERNAL，
+ * 会让作者以为"标了绝密"而实际是内部 —— <b>标注失效且无人知晓</b>。故
+ * {@link AccessLevel#parse} 与 {@link DocumentKind#parse} 都抛异常，由调用方决定整批失败还是跳过这一份。
  *
- * <h3>3. ★ 路径必须落在知识库根目录内（安全边界）</h3>
- * <p>接收"用户/外部传入的路径"时，若直接拼接就可能被 {@code ../../} 穿越到
- * 知识库之外，读到系统文件或别的项目的资料 —— 这是典型的
- * <b>路径穿越（Path Traversal）</b>漏洞。本类用三步防住：
- * <ol>
- *   <li>先 {@code normalize()} 折叠 {@code ..}；</li>
- *   <li>再 {@code toAbsolutePath().normalize()} 得到最终绝对路径；</li>
- *   <li>最后<b>断言它以根目录开头</b>，否则拒绝。</li>
- * </ol>
- * 只做第 1 步是不够的 —— {@code normalize()} 只做字符串折叠，
- * 而符号链接、盘符大小写等情况要靠绝对路径比较才能覆盖。
+ * <p><b>3. 路径必须落在知识库根目录内（安全边界）</b>：防路径穿越 —— 直接拼接 {@code ../../}
+ * 就能读到库外的系统文件。三步防住：{@code normalize()} 折叠 {@code ..} →
+ * {@code toAbsolutePath().normalize()} → <b>断言以根目录开头</b>。
+ * 只做第一步不够：符号链接、盘符大小写要靠绝对路径比较才能覆盖。
  */
 @Slf4j
 @Component
@@ -78,9 +57,8 @@ public class SourceLoader {
     /**
      * frontmatter 块：文件<b>最开头</b>的 {@code ---} 到下一个 {@code ---}。
      *
-     * <p>{@code \A} 锚定文件开头是必须的 —— 否则正文中间的 {@code ---}
-     * （Markdown 的水平分隔线）会被误当成 frontmatter 起点，
-     * 把正文的一大段解析成 YAML（多半解析失败，或解析出莫名其妙的字段）。
+     * <p>{@code \A} 锚定文件开头是必须的 —— 否则正文中间的 {@code ---}（Markdown 的水平分隔线）
+     * 会被当成 frontmatter 起点，把一大段正文解析成 YAML。
      */
     private static final Pattern FRONTMATTER =
             Pattern.compile("\\A---\\s*\\n(.*?)\\n---\\s*(?:\\n|\\z)", Pattern.DOTALL);
@@ -92,9 +70,8 @@ public class SourceLoader {
     private final Yaml yaml;
 
     public SourceLoader() {
-        // 限制 YAML 的解析规模：frontmatter 是元数据，不该出现超大文档或深层嵌套。
-        // 不加限制时，恶意构造的 YAML（别名炸弹）可以让解析消耗巨量内存 ——
-        // 这是解析"外部内容"时的标准防护。
+        // 限制 YAML 解析规模：frontmatter 是元数据，不该出现超大文档或深层嵌套。
+        // 不加限制时，恶意构造的别名炸弹可以让解析消耗巨量内存。
         LoaderOptions options = new LoaderOptions();
         options.setMaxAliasesForCollections(20);
         options.setCodePointLimit(64 * 1024);
@@ -104,9 +81,10 @@ public class SourceLoader {
     /**
      * 加载一份文档。
      *
-     * @param root      知识库根目录（绝对路径）
-     * @param source    相对根目录的来源路径（可用 {@code /} 或 {@code \}）
-     * @param fallbackKind 文档未声明 kind 时使用的种类（由调用方提供，作为目录级默认值）`n     * @param extensions   允许的扩展名（<b>由配置提供</b>，不在此硬编码）
+     * @param root         知识库根目录（绝对路径）
+     * @param source       相对根目录的来源路径（可用 {@code /} 或 {@code \}）
+     * @param fallbackKind 文档未声明 kind 时使用的种类（调用方提供的目录级默认值）
+     * @param extensions   允许的扩展名（<b>由配置提供</b>，不在此硬编码）
      * @throws IllegalArgumentException 路径越界、文件不存在、格式不支持、frontmatter 取值非法
      * @throws IOException              读取失败
      */
@@ -116,9 +94,9 @@ public class SourceLoader {
         if (!Files.isRegularFile(file)) {
             throw new IllegalArgumentException("知识库文档不存在或不是普通文件：" + source);
         }
-        // ★ 阶段 12：扩展名白名单<b>只从配置来</b>（hagent.rag.ingest.extensions）。
-        //   原先是这里硬编码 ".md/.txt"、而扫描侧吃配置 —— 于是在配置里加 ".markdown" 之后，
-        //   批量入库会"先发现该文件、再拒绝它"，报错文案还指向一个跟配置无关的理由。
+        // ★ 扩展名白名单只从配置来（hagent.rag.ingest.extensions），本类不硬编码：
+        //   否则在配置里加 ".markdown" 后，批量入库会"先发现该文件、再拒绝它"，
+        //   报错文案还指向一个跟配置无关的理由。
         String fileName = file.getFileName().toString().toLowerCase();
         boolean supported = extensions != null && extensions.stream()
                 .anyMatch(ext -> ext != null && fileName.endsWith(ext.toLowerCase()));
@@ -138,8 +116,8 @@ public class SourceLoader {
     /**
      * 路径安全解析 —— 见类注释"安全边界"。
      *
-     * <p>把"越界"判断放在这里而不是调用方：调用方可能有多个（批量入库、
-     * 单文件入库、将来的文件监听），每个都记得检查是不可能靠得住的。
+     * <p>越界判断放在这里而不是调用方：调用方会有多个（批量入库、单文件入库、
+     * 将来的文件监听），每个都记得检查是不可能靠得住的。
      */
     Path resolveWithinRoot(Path root, String source) {
         if (source == null || source.isBlank()) {
@@ -157,11 +135,10 @@ public class SourceLoader {
     }
 
     /**
-     * 把来源路径规范成"文档身份"用的形式。
+     * 把来源路径规范成"文档身份"用的形式：统一分隔符为 {@code /}、去掉开头的 {@code ./}。
      *
-     * <p>两件事：<b>统一分隔符为 {@code /}</b>、<b>去掉开头的 {@code ./}</b>。
-     * 原因见 {@link LoadedDocument#source()} 的说明 —— 同一份文档在不同平台
-     * 必须得到<b>同一个 source</b>，否则"按 source 删旧块"会删不掉，导致重复入库。
+     * <p>原因见 {@link LoadedDocument#source()} —— 同一份文档在不同平台必须得到
+     * <b>同一个 source</b>，否则"按 source 删旧块"会删不掉，导致重复入库。
      */
     String toSourceKey(String source) {
         String key = source.replace('\\', '/');
@@ -265,25 +242,15 @@ public class SourceLoader {
     /**
      * 解析日期。
      *
-     * <h3>★ 这里踩过一个 YAML 的经典陷阱，值得记下来</h3>
+     * <p><b>YAML 陷阱</b>：{@code validFrom: 2024-01-01} 不加引号时，YAML 1.1 的隐式类型解析
+     * 会把它当成时间戳字面量转成 {@code java.util.Date}，于是 {@code String.valueOf(...)} 拿到
+     * {@code Date.toString()} 那种英文格式，再 {@code LocalDate.parse} 必然失败。
+     * 正确写法是加引号：{@code validFrom: "2024-01-01"} —— 引号是<b>类型声明</b>，不是装饰。
      *
-     * <p>集成测试直接报错：{@code frontmatter 的 validFrom 不是合法日期：Mon Jan 01 08:00:00 CST 2024}。
-     * 原因是 —— <b>在 YAML 里 {@code validFrom: 2024-01-01} 不是字符串，而是时间戳字面量</b>。
-     * YAML 1.1 的隐式类型解析会把这种写法直接转成 {@code java.util.Date}，
-     * 于是 {@code String.valueOf(...)} 得到的是 {@code Date.toString()} 那种英文格式，
-     * 再拿去 {@code LocalDate.parse} 必然失败。
-     *
-     * <p><b>正确的写法是加引号</b>：{@code validFrom: "2024-01-01"} ——
-     * 引号不是装饰，而是<b>类型声明</b>。如果不加引号，不同 YAML 库可能给出
-     * Date、LocalDate 或字符串三种结果，行为取决于实现细节。
-     *
-     * <p>本方法<b>同时接受</b>两种来源，这样作者写不写引号都能工作：
-     * <ul>
-     *   <li>{@code java.util.Date} / {@code java.time.LocalDate} 等日期对象 → 直接转换；</li>
-     *   <li>字符串 → 按 {@code yyyy-MM-dd} 解析。</li>
-     * </ul>
-     * 但仍然<b>对无法解析的值明确报错</b>，不静默忽略 ——
-     * 一个被忽略的生效日期，表现为"明明标了却没生效"，而这类问题将来做时间过滤时才会暴露。
+     * <p>本方法<b>同时接受</b>日期对象（{@code Date} / {@code LocalDate} / {@code LocalDateTime} /
+     * {@code Calendar}，直接转换）与字符串（按 {@code yyyy-MM-dd} 解析），作者写不写引号都能工作；
+     * 但无法解析时<b>明确报错</b>，不静默忽略 —— 被忽略的生效日期表现为"标了却没生效"，
+     * 而这类问题只会在将来做时间过滤时才暴露。
      */
     private LocalDate parseDate(Object value, String field, String sourceKey) {
         if (value == null) {

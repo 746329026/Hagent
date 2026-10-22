@@ -1,22 +1,18 @@
 # ============================================================================
 # 本地私有配置模板
 #
-#   ★ 这个 .example 文件可以进仓库（它不含任何真实密钥）
-#   ★ 真正使用的 application-local.yml 已被 .gitignore 排除，绝不进仓库
+#   ★ 本文件不含真实密钥，可以进仓库；真正使用的 application-local.yml
+#     已被 .gitignore 排除，绝不进仓库。
 #
 #   首次使用：
 #     copy src\main\resources\application-local.yml.example src\main\resources\application-local.yml
-#   然后填入真实值。
-#
-#   密钥也可以完全不落盘 —— 用环境变量注入（推荐）：
+#   然后填入真实值。密钥推荐用环境变量注入（不落盘）：
 #     $env:DEEPSEEK_API_KEY="sk-xxxx"
-#   此时下面的 api-key 保持 ${DEEPSEEK_API_KEY:} 即可。
 # ============================================================================
 
 spring:
   # ---------------- 业务主库：MySQL ----------------
-  # 归属决策：使用项目专属容器 hagent-mysql（端口 3307），
-  # 不用宿主机 3306 上的原生 MySQL，避免污染其它项目、保证版本可复现。
+  # 用项目专属容器 hagent-mysql（端口 3307），不污染宿主机其它 MySQL。
   datasource:
     url: jdbc:mysql://localhost:3307/hagent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
     username: root
@@ -28,17 +24,15 @@ spring:
       connection-timeout: 5000
       pool-name: HagentMysqlPool
 
-  # 说明：这里刻意【没有】任何 JPA / Hibernate 配置。
-  # 本项目持久层用 MyBatis-Plus，pom 里既无 spring-boot-starter-data-jpa，
-  # 依赖树里也没有 hibernate-orm / jakarta.persistence。
-  # （注意：依赖树里的 hibernate-validator 是【参数校验】的实现，与 ORM 的
-  #   hibernate-orm 是两个完全不同的东西，只是名字前缀相似。）
+  # 本项目没有 JPA / Hibernate：建表方式固定为【显式 DDL】（src/main/resources/db/*.sql），
+  # 表结构可评审、可版本化，不会被框架悄悄改掉。
+  # （依赖里的 hibernate-validator 是【参数校验】实现，与 ORM 无关。）
   #
-  # ★ 因此建表方式很明确：框架不会自动建表，建表由显式 DDL 完成（阶段 6 起）。
-  #   这比 Hibernate 的 ddl-auto 更可控：表结构可评审、可版本化，不会被框架悄悄改掉。
+  # 持久层当前用 JdbcTemplate 直接执行 SQL；pom 里的 MyBatis-Plus 是为复杂查询/报表预留的
+  # 扩展铺垫，当前没有 Mapper 接口，也不需要任何 mybatis 配置。
 
-  # ---------------- Redis：缓存 + 会话记忆 ----------------
-  # 本地容器 hagent-redis（valkey/valkey:8，协议与 Redis 完全兼容）
+  # ---------------- Redis：缓存 + 会话上下文 ----------------
+  # 本地容器 hagent-redis（valkey/valkey:8，协议与 Redis 兼容）
   data:
     redis:
       host: localhost
@@ -52,13 +46,12 @@ spring:
 
   sql:
     init:
+      # 建表由显式 DDL 完成，关闭框架的 schema 初始化
       mode: never
 
   ai:
     # ---------------- 密钥 ----------------
-    # 推荐：环境变量注入，密钥完全不落盘
-    #   $env:DEEPSEEK_API_KEY="sk-xxxx"
-    # 也可以直接写在冒号后面（本文件不进仓库）
+    # 推荐环境变量注入；也可直接写在冒号后面（本文件不进仓库）
     deepseek:
       api-key: "${DEEPSEEK_API_KEY:}"
 

@@ -1,29 +1,14 @@
-# ============================================================================
 # EnvironmentPostProcessor 注册文件
-# ============================================================================
 #
-# 【为什么需要这个文件】
-# EnvironmentPostProcessor 必须在【任何 Bean 创建之前】运行，
-# 因此不能用 @Component 注册 —— 那时候组件扫描根本还没开始。
-# Spring Boot 只能通过本文件（spring.factories）发现它们。
+# EnvironmentPostProcessor 必须在【任何 Bean 创建之前】运行，不能用 @Component 注册
+# （那时组件扫描还没开始），Spring Boot 只能通过本文件发现它们。
 #
-# 【★ 为什么 key 是 org.springframework.boot.EnvironmentPostProcessor】
-# 这个 key 就是接口的【全限定名】，两者必须完全一致。
+# ★ key = 接口的全限定名。Spring Boot 4.0 起该接口从 org.springframework.boot.env.*
+#   移到了 org.springframework.boot.*；旧的 deprecated 兼容分支会随旧接口一起移除，
+#   所以 key 与 Java import 必须同步改 —— 漏改一处应用照常启动、而校验根本不运行。
 #
-# Spring Boot 4.0 起该接口换了包：
-#     旧（3.x 及更早）: org.springframework.boot.env.EnvironmentPostProcessor
-#     新（4.0 起，本文件）: org.springframework.boot.EnvironmentPostProcessor
-#
-# 旧包名已标记 @Deprecated(forRemoval = true)，写旧 key 时 Spring Boot 4
-# 仍能加载（走一条 deprecated 兼容分支），但会警告，且该分支会随旧接口一起移除。
-# 所以【key 与 Java 代码里的 import 必须同步改】，漏改一处就会静默失效：
-# 应用照常启动，而校验根本没有运行 —— 正是本项目全篇在防的那类问题。
-#
-# 【为什么是 LOWEST_PRECEDENCE 而不是最先执行】
-# 加载 application.yml 这件事本身也是由一个 EnvironmentPostProcessor 完成的
-# （ConfigDataEnvironmentPostProcessor）。若我们抢在它之前运行，就读不到配置值。
-# 详见 MemoryConfigValidator#getOrder() 的注释。
-# ============================================================================
+# 顺序用 LOWEST_PRECEDENCE：加载 YAML 本身也是由一个 EnvironmentPostProcessor 完成的，
+# 抢在它之前运行会读不到配置值。
 org.springframework.boot.EnvironmentPostProcessor=\
 com.hagent.config.MemoryConfigValidator,\
 com.hagent.config.McpServerPreflight

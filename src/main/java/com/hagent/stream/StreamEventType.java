@@ -2,173 +2,98 @@ package com.hagent.stream;
 
 
 /**
- * SSE 事件名的**唯一出处**。
+ * SSE 事件名的<b>唯一出处</b>。
  *
- * <p><b>为什么要集中成常量，而不是散落字符串</b>（对应参考实现的一个坑）：
- * 事件名是<b>前后端契约</b>——前端根据事件名分支渲染。如果后端多个类里各写一份
- * {@code "message"}、{@code "done"}，就会"靠人工对齐"，改一个漏三个，拼错还不报错，
- * 前端表现为"某个事件静默不渲染"。
+ * <p>事件名是<b>前后端契约</b>（前端按事件名分支渲染）：散落成多个字符串就会"靠人工对齐"，
+ * 改一个漏三个、拼错还不报错，前端表现为"某个事件静默不渲染"。规则是业务代码永远写
+ * {@code StreamEventType.MESSAGE}、不出现裸字符串，改名只改这一处。
  *
- * <p>集中到这里的规则：<b>业务代码永远写 {@code StreamEventType.MESSAGE}，
- * 不出现裸字符串 {@code "message"}</b>。将来前端改名，只改这一处。
- *
- * <p><b>★ 扩展位（本阶段只放三个，不是遗漏，是克制）</b>：
- * 后续阶段会新增事件，但"现在不发出的事件，现在就不定义"——
- * 提前定义一堆没人发的事件，就是"备而不用"（本项目的血泪：清过两次这类债）。
- * 将来要加，只需：
- * <ol>
- *   <li>这里加一行常量（如阶段 9 的 {@code STEP}、阶段 10 的 {@code QUESTION}）；</li>
- *   <li>前端加一个分支。</li>
- * </ol>
- * 成本 ≈ 0，所以不需要现在预支。
- *
- * <p><b>★ 阶段 10 纠正了一段自相矛盾的注释</b>：本类早期版本写着
- * "工具调用不会作为一个事件名出现…未来大概率是 {@code STEP} 事件承载'正在做第 N 步'，
- * 工具调用体现在 step 事件的内容里，而不是独立成事件"。
- * 而阶段 9 实际把 {@code TOOL_CALL} / {@code TOOL_RESULT} 做成了独立事件
- * （{@link #TOOL_CALL} 的理由写得很清楚：调用与结果之间隔着一次真实的执行，
- * 先发"开始"前端才有反馈）。于是注释与代码直接对立。
- *
- * <p>正确的说法不是二选一，而是<b>分层</b>：
- * <pre>
- *   {@link #STEP}        骨架：第 N 步开始（没有它，工具调用只能摊成一串平铺的）
- *   {@link #TOOL_CALL}   明细：这一步里模型请求调用了什么
- *   {@link #TOOL_RESULT} 明细：这个调用返回了什么
- * </pre>
- * 一个 STEP 后面可以跟 0..N 组 CALL/RESULT。所以三者都要有，
- * 谁也不能取代谁 —— 只保留 step 会让"一步里调了哪几个工具"无处表达。
+ * <p>只定义当前真的会发出的事件（"备而不用"的债本项目清过两次），新增成本只有两行。
  */
 public final class StreamEventType {
 
     /**
-     * 模型逐片输出的文字（回答正文）。
+     * 模型逐片输出的文字（回答正文），数据是 JSON 字符串：{@code {"text":"…"}}。
      *
-     * <p>数据是 JSON 字符串：{@code {"text":"…"}}。
-     *
-     * <p>★ <b>阶段 10 起载荷从裸字符串改成对象</b>，原因是一个实测出来的真实缺陷：
-     * {@code SseEmitter.event().data(String)} <b>不转义换行</b>
-     * （{@code javap -c} 读 {@code SseEmitter$SseEventBuilderImpl} 可证：只有
-     * {@code append("data:")} + {@code append(数据)}）。于是 token 里的 {@code \n}
-     * 会把 SSE 帧切断、把段落空行吃掉 —— 表现为"回答排版偶尔错乱"。
-     * 包成 JSON 后换行被转义，帧边界不再依赖内容。
+     * <p>必须是对象而非裸字符串：{@code SseEmitter.event().data(String)} <b>不转义换行</b>，
+     * token 里的 {@code \n} 会切断 SSE 帧、吃掉段落空行；包成 JSON 后帧边界不再依赖内容。
      */
     public static final String MESSAGE = "message";
     /**
-     * 模型的<b>思考过程</b>逐片输出（阶段 8 新增，DeepSeek 的 {@code reasoningContent}）。
+     * 模型的<b>思考过程</b>逐片输出（DeepSeek 的 {@code reasoningContent}），格式同 {@link #MESSAGE}。
      *
-     * <p>数据格式与 {@link #MESSAGE} 相同：{@code {"text":"…"}}（理由见上）。
+     * <p>独立事件名：前端要把思考区与回答区渲染成两块，语义也不同（过程 vs 结果），
+     * 混进 {@code message} 只能靠内容猜边界。模型输出是两段互斥的（思考段正文恒为 null，
+     * 反之亦然），所以收到第一个 {@code message} 即可收起思考区。
      *
-     * <p><b>为什么它是独立的事件名而不是混进 {@code message}</b>：
-     * 前端要把"思考区"与"回答区"渲染成两块不同的内容，语义也不同 ——
-     * 思考是过程，回答是结果。混在一个事件里，前端只能靠内容猜边界。
-     *
-     * <p>实测模型的输出是<b>严格两段式</b>：先一串只有思考的片，再一串只有回答的片，
-     * 两段<b>完全互斥</b>（思考段正文恒为 null，回答段思考恒为 null）。
-     * 所以前端只要在收到第一个 {@code message} 时收起思考区即可。
-     *
-     * <p>⚠️ 它与 {@code message} 有一处<b>不对称</b>：思考内容<b>可能整体缺失</b>
-     * （它是模型提供方的独有字段，换掉 DeepSeek 就取不到），
-     * 而回答正文不会。前端不应假定一定会收到它。
+     * <p>⚠️ 与 {@code message} 不对称：思考内容<b>可能整体缺失</b>（换成非 DeepSeek 模型就没有），
+     * 前端不应假定一定会收到。
      */
     public static final String REASONING = "reasoning";
 
     /** 正常结束信号。 */
     public static final String DONE = "done";
 
-    /**
-     * 出错信号：{@code {"message":"…"}}。
-     *
-     * <p>数据是 JSON 对象而不是裸字符串 —— 与 {@link #MESSAGE} 同一个理由
-     * （异常消息里带换行并不罕见，裸字符串会把 SSE 帧切断）。
-     */
+    /** 出错信号：{@code {"message":"…"}}（同样是 JSON 对象，理由见 {@link #MESSAGE}）。 */
     public static final String ERROR = "error";
 
     /**
-     * 模型<b>请求调用工具</b>（阶段 9 新增）。
+     * 模型<b>请求调用工具</b>，数据：{@code {"id":"…","name":"retrieveKnowledge","arguments":"{…}"}}。
      *
-     * <p>数据是 JSON 字符串：{@code {"id":"…","name":"retrieveKnowledge","arguments":"{…}"}}。
-     *
-     * <p><b>为什么要单独一个事件名</b>：这是 agent 最直观的可视化点 ——
-     * 前端据此显示"正在查询知识库…"。它与 {@link #TOOL_RESULT} 之间有真实的执行耗时，
-     * 所以必须<b>先发这个</b>，否则用户在那段时间里看不到任何反馈。
+     * <p>单独一个事件名：这是 agent 最直观的可视化点，且它与 {@link #TOOL_RESULT} 之间有真实的
+     * 执行耗时，必须<b>先发这个</b>，否则用户在那段时间里看不到任何反馈。
      */
     public static final String TOOL_CALL = "tool_call";
 
-    /** 工具执行完成（阶段 9 新增）：{@code {"id":"…","name":"…","result":"…"}}。 */
+    /** 工具执行完成：{@code {"id":"…","name":"…","result":"…"}}。 */
     public static final String TOOL_RESULT = "tool_result";
 
     /**
-     * <b>第 N 步开始</b>（阶段 10 新增）—— 工具调用的"骨架"。
+     * <b>第 N 步开始</b> —— 工具调用的"骨架"，数据：{@code {"step":2}}。
      *
-     * <p>数据是 JSON 字符串：{@code {"step":2}}。
+     * <p>不能靠"看到 tool_call 就知道开始了"：模型在决定调工具前要<b>思考很久</b>（实测可达十几秒），
+     * 那段时间前端面板是空的、用户分不清"在想"和"卡住了"；且一步可能调多个工具，
+     * 没有骨架时"一步调两个"与"两步各调一个"看起来一模一样。
      *
-     * <p><b>为什么需要它，而不是"看到 tool_call 就知道开始了"</b>：
-     * <ol>
-     *   <li>模型在<b>决定调工具之前要思考很久</b>（实测可达十几秒）。
-     *       那段时间一个 {@code tool_call} 都还没有，前端面板是空的 ——
-     *       用户分不清"在想"和"卡住了"。有了本事件，可以立刻显示"第 2 步 · 思考中"；</li>
-     *   <li>一步里可能调多个工具。没有骨架，前端只能把调用摊成一串平铺的，
-     *       "一步调两个"与"两步各调一个"看起来一模一样。</li>
-     * </ol>
-     *
-     * <p>★ 它是<b>本回合内</b>的骨架，不跨回合：每次用户提交都从 {@code step:1} 重新开始。
+     * <p>它是<b>本回合内</b>的骨架：每次提交都从 {@code step:1} 重新开始。
      */
     public static final String STEP = "step";
 
     /**
-     * 知识库检索命中的片段（阶段 9 新增，由检索工具发出）。
+     * 知识库检索命中的片段 —— 数据是列表，前端据此显示"参考了哪几篇"。
      *
-     * <p>数据是片段列表 —— 前端据此显示"参考了哪几篇"。
-     * ★ 它是<b>结构化数据</b>（含来源、相关度），刻意不从工具返回的文本里解析
-     * （那段文本是给模型看的，见 {@code ToolEventSink} 的注释）。
+     * <p>它是<b>结构化数据</b>（含来源、相关度），刻意不从工具返回的文本里解析（那段文本是给模型看的）。
      */
     public static final String RETRIEVED = "retrieved";
 
     /**
-     * <b>工作流编排事件</b>（阶段 13 新增）—— 计划与步骤的骨架，<b>与模型输出无关</b>。
-     *
-     * <p>数据是一个 JSON 对象，{@code type} 字段区分三种：
+     * <b>工作流编排事件</b> —— 计划与步骤的骨架，<b>与模型输出无关</b>。数据是 JSON 对象，
+     * {@code type} 区分三种：
      * <pre>
-     *   {"type":"plan",       "goal":"…", "steps":[{"index":1,"goal":"…","doneWhen":"…"}]}
-     *   {"type":"plan_skipped","reason":"…"}      ← 规划失败，已退回普通循环
-     *   {"type":"step_finished","step":2,"ok":true,"summary":"…"}
+     *   {"type":"plan",          "goal":"…", "steps":[{"index":1,"goal":"…","doneWhen":"…"}]}
+     *   {"type":"plan_skipped",  "reason":"…"}      ← 规划失败，已退回普通循环
+     *   {"type":"step_finished", "step":2,"ok":true,"summary":"…"}
      * </pre>
      *
-     * <p><b>为什么三种共用一个事件名</b>：它们同属"这次运行的编排骨架"，
-     * 前端要么整块渲染（计划面板），要么整块忽略。拆成三个事件名会让"忽略"变成
-     * "忽略三个"，而没有额外好处。{@code type} 是本事件内的<b>次级判别</b>，
-     * 与 {@code STEP} 的 {@code {"step":2}} 不冲突。
+     * <p>三种共用一个事件名：它们同属"本次运行的编排骨架"，前端要么整块渲染、要么整块忽略；
+     * 拆成三个只让"忽略"变成"忽略三个"。{@code type} 是本事件内的<b>次级判别</b>。
      */
     public static final String WORKFLOW = "workflow";
 
     /**
-     * <b>本轮统计</b>（阶段 14 新增）—— 耗时 / 次数 / token / 结局，在 {@code done} 之前发一次。
-     *
-     * <p>数据是 JSON 对象：
+     * <b>本轮统计</b> —— 耗时 / 次数 / token / 结局，在 {@code done} 之前发一次。数据是 JSON 对象：
      * <pre>
      *   {"status":"SUCCESS","elapsedMs":7270,"firstTokenMs":1203,"modelCalls":2,
      *    "toolCalls":2,"totalTokens":3032}
      * </pre>
-     * {@code firstTokenMs} 与 {@code totalTokens} <b>可能缺失</b>（前者：模型一个字都没吐；
-     * 后者：没拿到 usage）—— 字段缺失表示"没有数据"，<b>不要当成 0</b>。
+     * {@code firstTokenMs} 与 {@code totalTokens} <b>可能缺失</b>（模型一个字都没吐 / 没拿到 usage）——
+     * 缺失表示"没有数据"，<b>不要当成 0</b>。
      *
-     * <p><b>为什么单独一个事件名，而不是塞进 {@code done} 的载荷</b>：
-     * {@code done} 现在的载荷是字面量 {@code [DONE]}（前端按"解析失败原样返回"处理），
-     * 改它会同时动到前端的 done 分支与 api.js 的注释；而"加了什么"和"改了已有契约"
-     * 是两种风险量级。新事件是<b>纯增量</b>：不认识它的消费者忽略即可
-     * （前端对未知事件名本来就走 default 分支）。
-     *
-     * <p>★ 刷新页面后这一行数字会消失 —— 历史回放不 join {@code chat_turn}。
-     * 这是刻意的取舍（避免为一行小字再改一次历史接口的契约），已写进 HANDOFF 的诚实清单。
+     * <p>单独一个事件名而不塞进 {@code done}：{@code done} 的载荷是字面量 {@code [DONE]}，
+     * 改它属于"改已有契约"；不认识新事件的消费者本来就走 default 分支 —— 纯增量、风险更低。
+     * 刷新页面后这行数字会消失（历史回放不 join {@code chat_turn}），是刻意的取舍。
      */
     public static final String STATS = "stats";
-
-    // ==========================================================================
-    // 扩展位（未来阶段启用，当前不定义，见类注释）：
-    //   QUESTION  —— 阶段 10 之后：中断续跑（模型停下来问用户）
-    //   TODO      —— 阶段 11：任务列表更新
-    // ★ STEP 已在阶段 10 启用；WORKFLOW 已在阶段 13 启用，见上方常量。
-    // ==========================================================================
 
     private StreamEventType() {
         // 工具类，禁止实例化

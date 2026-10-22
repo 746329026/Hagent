@@ -9,23 +9,19 @@ import java.util.List;
 /**
  * 工具调用审计的 MySQL 实现。
  *
- * <h2>★ 三条设计要点（每条都对应一个具体的失败模式）</h2>
+ * <p><b>三条设计要点（每条都对应一个具体的失败模式）</b>：
  *
  * <ol>
- *   <li><b>启动自检</b>：表不存在 / 缺索引 → <b>启动即失败</b>，并打印可直接执行的修法。
- *       理由与阶段 7 的记录层完全相同：等到第一次工具调用才发现，
- *       意味着"这之间的所有工具活动永久没有审计" —— 而审计是<b>只能从现在开始攒</b>的数据。</li>
+ *   <li><b>启动自检</b>：表不存在 / 缺索引 / 缺列 → <b>启动即失败</b>，并打印可直接执行的修法。
+ *       等到第一次工具调用才发现，意味着这之间的所有工具活动永久没有审计 ——
+ *       而审计是<b>只能从现在开始攒</b>的数据。</li>
  *   <li><b>写入失败只记 ERROR，不抛异常</b>：审计不在关键路径上（见接口注释）。</li>
- *   <li><b>按名字取数据源</b>：用 {@code @Qualifier("dataSource")} 取业务主库，
- *       不能按类型注入 —— 本项目的向量库也是一个 {@code DataSource}，
- *       而 {@code @Primary} 会让按类型注入静默拿到错的那个（阶段 7 踩过，见 HANDOFF 踩坑 29）。</li>
+ *   <li><b>按名字取数据源</b>：用 {@code @Qualifier("dataSource")} 取业务主库，不能按类型注入 ——
+ *       本项目的向量库也是一个 {@code DataSource}，按类型注入会静默拿到错的那个。</li>
  * </ol>
  *
- * <h2>★ 为什么不用事务把"工具调用 + 结果"写成一批</h2>
- *
- * <p>每次工具调用是<b>一次独立的事实</b>：调用发生了、结果拿到了。
- * 它们不像"问 + 答"那样必须同生共死（记忆记录层用事务是怕出现"有问无答"的半截对话，
- * 那会让历史读起来是错的）。审计少一条只是少一条记录，不会让别的记录变得不可信。
+ * <p><b>不用事务把"工具调用 + 结果"写成一批</b>：每次工具调用是<b>一次独立的事实</b>，
+ * 不像"问 + 答"那样必须同生共死；审计少一条只是少一条记录，不会让别的记录变得不可信。
  */
 @Slf4j
 public class MysqlToolInvocationStore implements ToolInvocationStore {
@@ -33,7 +29,7 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
     /** 读审计要走的索引名（启动自检会核对它们存在）。 */
     private static final String CONVERSATION_INDEX = "idx_tool_conv_step";
 
-    /** 阶段 14 新增：按“哪一轮”查工具活动（对账 / 复盘一次运行）。 */
+    /** 按"哪一轮"查工具活动（对账 / 复盘一次运行）。 */
     private static final String TURN_INDEX = "idx_tool_turn";
 
     private static final String DDL_HINT = """
@@ -47,7 +43,7 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
 
     private static final String TABLE = "chat_tool_invocation";
 
-    /** 阶段 14 新增的两列（启动自检会核对它们存在）。 */
+    /** 额外的两列（启动自检会核对它们存在）。 */
     private static final String[] REQUIRED_COLUMNS = {"turn_id", "user_id"};
 
     private static final String MIGRATION_HINT = """
@@ -119,18 +115,15 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
     }
 
     /**
-     * 启动自检：表必须存在、读审计要用的索引必须在。
+     * 启动自检：表必须存在，读审计要用的索引与列也必须在。
      *
-     * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 ——
-     * 与 {@code MysqlMessageStore#verifySchemaOrThrow}、
-     * {@code MemoryConfigValidator} 是同一立场（决策 8：不静默降级）。
+     * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 —— 与项目其余 schema 校验同一立场：
+     * <b>不静默降级</b>。只校验表与索引、不校验列的话，旧库会"自检通过"却在第一次写审计时抛
+     * {@code Unknown column}，而那时这轮对话已经花掉 token。
      *
-     * <p><b>为什么不校验字符集</b>：这张表存的是工具名、参数与结果文本，
-     * 其中结果可能含中文 —— 建表语句已写 {@code DEFAULT CHARSET=utf8mb4}。
-     * 记录层之所以要专门校验 {@code content} 列字符集，是因为那条链路上
-     * 曾经有过"用 3 字节 utf8 导致 emoji 被截断"的真实风险；
-     * 这里若也要校验，应校验的是"这张表的默认字符集"，
-     * 而那属于<b>同一类检查的第二个实例</b> —— 等它真出问题时再加（协议第 7 条）。
+     * <p><b>为什么不校验字符集</b>：这张表存的是工具名、参数与结果文本（可能含中文），
+     * 建表语句已写 {@code DEFAULT CHARSET=utf8mb4}；记录层之所以专门校验 {@code content} 列，
+     * 是因为那条链路上真实出现过"3 字节 utf8 导致 emoji 被截断"的风险，这里没有。
      */
     private void verifySchemaOrThrow() {
         try {
@@ -159,7 +152,7 @@ public class MysqlToolInvocationStore implements ToolInvocationStore {
             if (turnIndexCount == null || turnIndexCount == 0) {
                 throw new IllegalStateException(MIGRATION_HINT + "缺索引：" + TURN_INDEX);
             }
-            // ★ 阶段 14：两列也必须校验。只校验表与索引的话，旧库会"自检通过"
+            // ★ 两列也必须校验：只校验表与索引的话，旧库会"自检通过"
             //   却在第一次写审计时抛 Unknown column —— 而那时这轮对话已经花掉 token。
             for (String column : REQUIRED_COLUMNS) {
                 Integer columnCount = jdbc.queryForObject(

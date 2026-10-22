@@ -26,33 +26,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * <b>权限过滤的端到端验证</b> —— 本项目里"最重要的一条断言"。
  *
- * <h2>★ 为什么必须打真库，不能只做单元测试</h2>
+ * <p>必须打真库：{@code RetrievalFilterBuilderTest} 只能证明"生成的 SQL 长这样"，
+ * 证明不了三件事 —— ① 条件在真实 pgvector 上真的能执行（{@code metadata} 实测是
+ * {@code json} 而非 {@code jsonb}，框架生成的 jsonpath 不被接受就会抛异常）；
+ * ② 条件真的作用在检索上；③ 结果里确实没有越权内容，这是唯一的验收标准。
  *
- * <p>{@code RetrievalFilterBuilderTest} 只能证明"生成的 SQL 长这样"，
- * 它证明不了三件事：
- * <ol>
- *   <li><b>这个条件在真实 pgvector 上真的能执行</b> ——
- *       向量表的 {@code metadata} 列实测是 {@code json} 而不是 {@code jsonb}，
- *       若框架生成的 jsonpath 不被接受，查询会直接抛异常；</li>
- *   <li><b>条件真的作用在检索上</b>（而不是被某个开关忽略）；</li>
- *   <li><b>结果里确实没有越权内容</b> —— 这是唯一的、真正的验收标准。</li>
- * </ol>
+ * <p>必须警惕的陷阱：{@code KnowledgeSearch} 在检索失败时<b>降级返回空列表</b>，
+ * 于是一个<b>坏掉的过滤条件</b>与"知识库里确实没有相关内容"在结果上完全一样。
+ * 所以第一个用例特意断言"员工视角<b>必须</b>检索到 INTERNAL 内容" —— 过滤不可执行时
+ * 查询会抛异常并被降级成空列表，这条断言即失败：<b>一句同时验证"过滤生效"与"过滤可执行"。</b>
  *
- * <h2>★ 一个必须警惕的陷阱：失败会伪装成"没命中"</h2>
- *
- * <p>{@code KnowledgeSearch} 在检索失败时<b>降级返回空列表</b>
- * （设计如此：知识检索不在关键路径上）。于是一个<b>坏掉的过滤条件</b>
- * 与"知识库里确实没有相关内容"在结果上完全一样 —— 都是空列表。
- *
- * <p>所以本类的第一个用例特意断言"员工视角<b>必须</b>检索到 INTERNAL 内容"：
- * 若过滤条件在真实库上不可执行，那次查询会抛异常、被降级成空列表，
- * 这条断言就会失败。<b>它同时验证了"过滤生效"与"过滤可执行"两件事。</b>
- *
- * <h2>★ 数据前置</h2>
- *
- * <p>用 {@link KnowledgeCleanupListener} 在每个方法前清库（自给自足），
- * 再由本类自己把 4 份示例文档入库 —— 与
- * {@code DocumentIngestIntegrationTest} 的做法一致：
+ * <p>数据前置：{@link KnowledgeCleanupListener} 在每个方法前清库，本类自己把 4 份示例文档入库 ——
  * <b>能独立运行的测试才是可靠的回归防线</b>。
  */
 @SpringBootTest
@@ -261,9 +245,8 @@ class RetrievalPermissionIntegrationTest {
     void irrelevantQueryStillReturnsCandidates() {
         List<RetrievedChunk> chunks = retrievalService.retrieve("今天杭州天气怎么样", admin);
 
-        // 实测相似度 0.7402，距离 0.2598 —— 轻松通过 0.5 的粗筛。
-        // 这条断言不是为了证明"能返回"是好事，而是把"阈值挡不住无关问题"
-        // 这个已知局限钉在测试里：将来有人想靠调阈值解决它时，会先看到这条。
+        // 实测相似度 0.7402 —— 轻松通过 0.5 的粗筛。这条断言不是要证明"能返回"是好事，
+        // 而是把"阈值挡不住无关问题"这个已知局限钉在测试里：将来想靠调阈值解决它的人会先看到这条。
         assertThat(chunks)
                 .as("★ 已知局限：无关提问也会通过粗筛，真正的兜底在提示词约束里")
                 .isNotEmpty();

@@ -7,17 +7,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 回合账的测试替身（阶段 14）—— 与 {@link TestAudit} 同风格。
+ * 回合账的测试替身 —— 与 {@link TestAudit} 同风格。
  *
- * <h2>★ 为什么必须有一个"记录下来的"实现，而不是只给 {@code noop}</h2>
- *
- * <p>本阶段最重要的那条断言是：<b>一轮多步对话的 token 是各次调用之和，不是最后一次</b>
- * （这正是阶段 14 之前 {@code Final.usage} 的病：实测一轮 workflow 调 7 次、
- * 只记了最后一次的 3419）。要断言它，就必须能把收尾时写进来的那条记录拿出来看。
- *
- * <p>另一个用途：{@code status} 的三值（SUCCESS / FAILED / CANCELLED）。
- * 若没有"记录下来的"实现，就只能测"没抛异常" —— 而"取消被记成失败"
- * 这种错会<b>静默</b>把成功率压下去。
+ * <p>必须有"记录下来的"实现：核心断言是<b>一轮多步对话的 token 是各次调用之和，不是最后一次</b>
+ * （旧 {@code Final.usage} 的病），要断言它就得把收尾写入的那条记录取出来看；
+ * {@code status} 三值（SUCCESS / FAILED / CANCELLED）同理 —— 若只能测"没抛异常"，
+ * "取消被记成失败"会<b>静默</b>把成功率压下去。
  */
 final class TestTurn {
 

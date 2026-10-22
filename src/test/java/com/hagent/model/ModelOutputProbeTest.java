@@ -22,65 +22,28 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * <b>模型输出的形状实测探针</b> —— 阶段 8 把 advisor 链换成 pipeline 之前，
- * 必须先用<b>真实模型</b>回答四个问题。全部是"不实测就会猜错、且猜错不报错"的那一类。
+ * 模型输出的形状实测探针：用真实模型回答四个"不实测就会猜错、且猜错不报错"的问题。
  *
- * <h2>为什么必须在动手前实测</h2>
- *
- * <p>阶段 8 之后，`ChatModel` 由 pipeline <b>直接</b>调用，不再经 `ChatClient`。
- * 而 `ChatClient.stream().content()` 帮我们做了两件事（字节码已证）：
- * <pre>
- *   mapNotNull(chunk -&gt; chunk.getResult().getOutput().getText())
- *   filter(text -&gt; !text.isEmpty())        ← ★ 空片段被丢掉
- * </pre>
- * 换成直连 `ChatModel` 后<b>这两件事都要自己写</b>。问题在于：写错了不会报错 ——
- * 只会往 SSE 里多吐几个空事件，或把增量当累计、把回答拼重复。
- *
- * <h2>它要回答的四个问题</h2>
+ * <p>pipeline 之后 {@code ChatModel} 被直接调用，不再经 {@code ChatClient}：后者的
+ * {@code stream().content()} 帮我们丢掉了空片段、取出了 text，直连后这两件事都要自己写 ——
+ * 写错不报错，只是往 SSE 多吐几个空事件、或把增量当累计把回答拼重复。
  *
  * <ol>
- *   <li><b>流式每片 text 是"增量"还是"累计"？</b>
- *       决定 `Final` 事件里的完整文本是"取最后一片"还是"自己拼"。
- *       猜错的后果：回答要么重复 N 遍，要么只剩最后一个字。</li>
- *   <li><b>思考内容（reasoning）出现在哪些片？</b>
- *       决定前端"思考区"什么时候开始渲染、什么时候关闭。</li>
- *   <li><b>同一片里 text 与 reasoning 是否互斥？</b>
- *       若思考阶段 text 全为空、回答阶段 reasoning 全为空，前端就该按<b>两条独立流</b>渲染；
- *       否则按一条流。</li>
- *   <li><b>阻塞式 call 也拿得到思考吗？</b>
- *       `/chat` 那条路要不要显示思考，取决于此。</li>
+ *   <li><b>流式每片 text 是增量还是累计？</b>决定 Final 取最后一片还是自己拼（猜错则回答重复或只剩最后一个字）。</li>
+ *   <li><b>reasoning 出现在哪些片？</b>决定前端"思考区"何时开始渲染、何时关闭。</li>
+ *   <li><b>同一片里 text 与 reasoning 是否互斥？</b>决定前端按两条独立流还是一条流渲染。</li>
+ *   <li><b>阻塞式 call 也拿得到思考吗？</b>决定 /chat 那条路要不要显示思考。</li>
  * </ol>
  *
- * <h2>★ 取值路径的实测结论（本条已由字节码证实，探针用于复核）</h2>
+ * <p>取值路径：思考内容不在 {@code getText()} 里，是 {@link DeepSeekAssistantMessage} 的独有字段
+ * {@code reasoningContent}，Spring AI 2.0.1 没有为它提供通用 metadata key，只能 instanceof 取。
+ * 本探针刻意直接引用该类型 —— 它就是要暴露这处供应商耦合，换掉 DeepSeek 时编译失败正是提醒。
  *
- * <p>思考内容<b>不在</b> {@code getText()} 里，它是一个独立字段：
- * <pre>
- *   DeepSeekAssistantMessage extends AssistantMessage
- *       private String reasoningContent;
- *       public String getReasoningContent();
- * </pre>
- * 而且 {@code ChatGenerationMetadata} <b>没有</b>对应的 metadata key 常量 ——
- * 只能走 {@code instanceof DeepSeekAssistantMessage} 取值。
- * 所以本探针<b>刻意直接引用</b>该类型：它就是要暴露这处"供应商耦合"，
- * 将来若换掉 DeepSeek，这里的编译失败正是我们要的提醒。
+ * <p>必须另设 {@code HAGENT_LIVE_PROBE=1} 才真调模型：跑测试必须设 {@code DEEPSEEK_API_KEY}
+ * （启动期只做 {@code Assert.hasText}），拿它当判据会让每次全量测试都真花钱；本探针会真实计费。
  *
- * <h2>★★ 为什么用独立环境变量做开关，而不是 DEEPSEEK_API_KEY</h2>
- *
- * <p>跑测试时必须设 {@code DEEPSEEK_API_KEY}（哪怕是个假值，启动期只做
- * {@code Assert.hasText}）。若拿它当"是否真调模型"的判据，<b>每次跑全量测试都会真的花钱</b>。
- * 所以这里要求另设 {@code HAGENT_LIVE_PROBE=1} —— 双重条件才放行。
- *
- * <h2>跑法（会产生真实 token 费用，约几分钱）</h2>
- *
- * <pre>
- *   $env:DEEPSEEK_API_KEY = "&lt;真 key&gt;"
- *   $env:HAGENT_LIVE_PROBE = "1"
- *   .\mvnw.cmd -B -ntp test -Dtest=ModelOutputProbeTest
- * </pre>
- *
- * <p><b>本测试不断言"结果应该是什么"</b>（那样会变成猜标准答案），它只断言
- * <b>"确实拿到了非空输出"</b>作为正向对照，把形状全部打印出来供人工判读 ——
- * 对应协议第 3 条"结论必须有证据"，以及"失败与正常同形的地方必须有正向断言"。
+ * <p>不断言"结果应该是什么"（那会变成猜标准答案），只断言"确实拿到了非空输出"作正向对照，
+ * 形状全部打印出来供人工判读。
  */
 @SpringBootTest
 @TestPropertySource(properties = {
@@ -105,9 +68,7 @@ class ModelOutputProbeTest {
                         + "故默认跳过。要跑请显式设置该环境变量。");
     }
 
-    // ========================================================================
     // 问题 1 ~ 3：流式形状
-    // ========================================================================
 
     @Test
     @DisplayName("★ 流式：逐片实时打印 text / reasoning，判定增量还是累计")
@@ -126,8 +87,8 @@ class ModelOutputProbeTest {
         long startNanos = System.nanoTime();
 
         chatModel.stream(new Prompt(QUESTION))
-                // ★ doOnNext 而不是 collectList().block()：
-                //   后者要等整流结束才打印第一个字，屏幕长时间无输出，看起来就像卡死 —— 实测发生过
+                // 用 doOnNext 而不是 collectList().block()：后者要等整流结束才打印第一个字，
+                // 屏幕长时间无输出看起来就像卡死 —— 实测发生过
                 .doOnNext(chunk -> {
                     int i = index.getAndIncrement();
                     lastChunk.set(chunk);
@@ -139,7 +100,7 @@ class ModelOutputProbeTest {
 
                     System.out.printf("[片 %2d] 距开始 %5.2fs  finishReason=%-12s%n",
                             i, (System.nanoTime() - startNanos) / 1_000_000_000.0, finishReasonOf(chunk));
-                    // ★ 全量打印（本人要求：测试阶段全部输出，便于观测）
+                    // 全量打印，便于观测
                     System.out.println("        text      = " + quote(text));
                     System.out.println("        reasoning = " + quote(reasoning));
                     System.out.println("        text累计长度=" + accumulatedText.length()
@@ -186,9 +147,7 @@ class ModelOutputProbeTest {
                 .isPositive();
     }
 
-    // ========================================================================
     // 问题 4：阻塞式 call 的形状
-    // ========================================================================
 
     @Test
     @DisplayName("★ 阻塞式：call 是否也带 reasoning（决定 /chat 能否显示思考）")
@@ -227,9 +186,7 @@ class ModelOutputProbeTest {
         System.out.println();
     }
 
-    // ========================================================================
     // 取值辅助 —— 刻意把"供应商耦合"集中在这两个方法里
-    // ========================================================================
 
     /** 取文本；每片可能没有 result（例如只有 metadata 的收尾片）。 */
     private static String textOf(ChatResponse response) {
@@ -239,12 +196,9 @@ class ModelOutputProbeTest {
     }
 
     /**
-     * 取思考内容 —— ★ 只能靠 {@code instanceof}。
-     *
-     * <p>见类注释：Spring AI 2.0.1 没有为它提供任何通用 metadata key，
-     * {@code reasoningContent} 是 {@link DeepSeekAssistantMessage} 的独有字段。
-     * 拿不到时返回 null，<b>不抛异常</b> —— 换模型时"没有思考"是合法状态，
-     * 但调用方应当据此记 WARN（本探针靠打印暴露它）。
+     * 取思考内容 —— 只能靠 {@code instanceof}：{@code reasoningContent} 是
+     * {@link DeepSeekAssistantMessage} 的独有字段，没有通用 metadata key。
+     * 拿不到时返回 null 而不抛异常 —— 换模型后"没有思考"是合法状态，调用方据此记 WARN。
      */
     private static String reasoningOf(ChatResponse response) {
         return outputOf(response)

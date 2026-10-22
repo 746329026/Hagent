@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@link WorkflowPlan} / {@link PlanStep} 的校验规则。
  *
  * <p>这些规则的价值不在"能跑"，而在<b>拒绝</b>：一份不合规的计划若被接受，
- * 执行阶段会跑一条没人批准过的路线，且事后无法归因（"到底是哪一步错了"）。
+ * 执行阶段会跑一条没人批准过的路线，且事后无法归因。
  */
 class WorkflowPlanTest {
 

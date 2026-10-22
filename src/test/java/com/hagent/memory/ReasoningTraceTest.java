@@ -10,10 +10,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@link ReasoningTrace} 的格式测试 —— 写的一侧与读的一侧必须严格对称。
  *
- * <p><b>为什么这个类值得单独存在</b>：标记语法是<b>前后两半共用</b>的契约。
- * 写的一侧改了格式、读的一侧没跟上，症状是"历史里的思考忽然全变成第 1 步"
- * 或"整段思考消失"，而且<b>不会报错</b>。所以这里既测绝对格式（防漂移），
- * 也测往返（防两侧不对称）。
+ * <p>标记语法是前后两半共用的契约：写侧改了格式、读侧没跟上，症状是"历史里的思考忽然全变成第 1 步"
+ * 或"整段思考消失"，而且不会报错。所以这里既测绝对格式（防漂移），也测往返（防两侧不对称）。
  */
 class ReasoningTraceTest {
 
@@ -74,9 +72,8 @@ class ReasoningTraceTest {
     @Test
     @DisplayName("★★ 往返：render → parse 恒等")
     void renderThenParseRoundTrips() {
-        // ★ 第 1 段的 tools 刻意留空：格式契约规定"工具名挂在下一步的标记上"，
-        //   第 1 步没有标记可挂（见 ReasoningTrace.Section 的注释）。
-        //   管线产生的数据永远满足这条，所以这里按管线的真实形状构造。
+        // 第 1 段的 tools 刻意留空：格式契约规定"工具名挂在下一步的标记上"，第 1 步没有标记可挂。
+        // 管线产生的数据永远是这个形状，所以这里按真实形状构造。
         List<ReasoningTrace.Section> sections = List.of(
                 section(1, List.of(), "用户问年假，我先查知识库"),
                 section(2, List.of("retrieveKnowledge"), "查到的是满一年 5 天，再确认不满一年怎么算"),

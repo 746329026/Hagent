@@ -32,29 +32,17 @@ import static org.mockito.Mockito.when;
 /**
  * <b>"模式 → 预算"的唯一出处与它的两条保证</b>。
  *
- * <h2>★ 本测试是从 {@code MemoryBudgetsTest} 重建来的（阶段 8）</h2>
+ * <p>做法是把"实际传下去的预算"与期望值比较，而不是比较两条路径是否一致 ——
+ * 后者只能发现"两处不一致"，前者还能发现"两处一致地错"。
  *
- * <p>原测试的核心断言是"<b>主链路与框架边界两条路径拿到同一份预算</b>"，
- * 用于防止"模式→预算"这张表被抄成两份而各自演化。
- * 阶段 8 删掉了框架边界（{@code ChatMemoryAdapter} 与 {@code MemoryReadAdvisor}），
- * 那条断言的两个比较对象<b>同时消失</b> —— 继续比较就是拿一个没坏的东西跟坏掉的东西比，
- * 两边都坏时永远相等（这正是"测试跑过 ≠ 是有效防线"）。
- *
- * <p>所以重建后的做法是：<b>比较"实际传下去的预算"与"期望值"</b>。
- * 它比原断言更强 —— 原断言只能发现"两处不一致"，
- * 而本测试能发现"两处一致地错"（例如两个模式都读了同一项配置）。
- *
- * <h2>★ 它保护的两件事（都是"不报错但会错"的类型）</h2>
- *
- * <ol>
- *   <li><b>漏配一个模式</b>：{@code AgentPipeline#budgetOf} 用穷尽 {@code switch}
- *       且不写 {@code default}，所以新增 {@link MemoryMode} 会<b>编译失败</b>。
- *       本测试的第 1 条断言把这个性质钉住 —— 它遍历 {@code values()}，
- *       若有人改回 {@code Map.of(...)} 手写列举，这里立刻失败；</li>
- *   <li><b>读错配置项</b>（串号）：两个模式若都读 {@code chat-max-*}，
- *       表现是"工作流预算静默等于 chat 预算"，模型历史短了 10 倍而<b>没有任何报错</b>。
- *       第 2 条断言用<b>刻意不同</b>的数字抓住它。</li>
- * </ol>
+ * <p>两条保证都是"不报错但会错"的类型：
+ * <ul>
+ *   <li><b>漏配一个模式</b>：{@code AgentPipeline#budgetOf} 用穷尽 {@code switch} 且不写
+ *       {@code default}，新增 {@link MemoryMode} 会编译失败；第 1 条断言遍历 {@code values()}
+ *       把这个性质钉住，若有人改回 {@code Map.of(...)} 手写列举，这里立刻失败；</li>
+ *   <li><b>读错配置项</b>（串号）：两个模式若都读 {@code chat-max-*}，表现是"工作流预算静默
+ *       等于 chat 预算"，模型历史短了 10 倍而<b>没有任何报错</b>；第 2 条断言用刻意不同的数字抓住它。</li>
+ * </ul>
  */
 class ChatBudgetTest {
 
@@ -102,9 +90,8 @@ class ChatBudgetTest {
     /**
      * 模型"配置好的" options。
      *
-     * <p>★ 阶段 9 起管线构造器要求 {@code chatModel.getOptions()} 是
-     * {@code DeepSeekChatOptions}（它要"克隆配置 + 挂工具"，见 AgentPipeline 的启动自检），
-     * 所以测试必须真的 stub 出来，否则构造期就失败。
+     * <p>管线构造器要求 {@code chatModel.getOptions()} 是 {@code DeepSeekChatOptions}
+     * （它要"克隆配置 + 挂工具"，见 AgentPipeline 的启动自检），所以必须真的 stub 出来。
      */
     private static org.springframework.ai.deepseek.DeepSeekChatOptions deepSeekOptions() {
         return org.springframework.ai.deepseek.DeepSeekChatOptions.builder()

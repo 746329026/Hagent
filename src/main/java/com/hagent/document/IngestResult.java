@@ -5,9 +5,8 @@ package com.hagent.document;
  *
  * @param source      来源路径（文档身份）
  * @param outcome     处理结论 —— 新增 / 更新 / 跳过。见 {@link IngestOutcome}
- * @param chunkCount  写入（或跳过的已有）块数。<b>跳过时为 0</b>，
- *                    因为跳过时我们<b>根本没有切分</b> —— 报一个"已有 N 块"
- *                    会让调用方以为"读了 N 块"，而事实是"连读都没读"。
+ * @param chunkCount  写入（或跳过的已有）块数。<b>跳过时为 0</b> —— 跳过时没有切分，
+ *                    报"已有 N 块"会让调用方以为读了 N 块。
  * @param docHash     本文档的内容指纹，用于跨次运行的比对与排查
  */
 public record IngestResult(String source, IngestOutcome outcome, int chunkCount, String docHash) {
@@ -20,9 +19,8 @@ public record IngestResult(String source, IngestOutcome outcome, int chunkCount,
     /**
      * 是否<b>真的</b>写入了向量库 —— 判据是"写入了块"，不是"没被跳过"。
      *
-     * <p>★ 阶段 12 修正：原先转发 {@code outcome.written()}，于是
-     * "正文为空 → {@code ADDED}、{@code chunkCount = 0}" 的文档会被报成"已写入"。
-     * 数值统计没错，但契约是假的 —— 谁按它判断"这次有没有东西进库"就会错。
+     * <p>不能用 {@code outcome.notSkipped()} 代替："正文为空 → ADDED、0 块"的文档
+     * 会被报成"已写入"，谁按它判断"这次有没有东西进库"就会错。
      */
     public boolean written() {
         return chunkCount > 0;

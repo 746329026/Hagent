@@ -10,38 +10,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 /**
  * 长期记忆的配置，绑定 {@code hagent.memory.long-term.*}。
  *
- * <h2>★ 阶段 11 之前，这个配置键是"死的"</h2>
+ * <p>★ 为什么在启动期校验（{@link #afterPropertiesSet()}）：这个键曾经"配了没人读" ——
+ * 不报错、不影响行为，只是安静地骗人（改了它以为记忆换地方了，其实什么都没发生）。
  *
- * <p>{@code application.yml} 里从阶段 5 就写着
- * <pre>
- *   hagent:
- *     memory:
- *       long-term:
- *         dir: "${user.dir}/tmp/agent-memory"
- * </pre>
- * 但<b>没有任何 Java 字段绑定它</b>（全项目搜不到 {@code longTerm}）——
- * 一个"配了没人读"的键。它不报错、不影响任何行为，只是安静地骗人：
- * 改了它、以为记忆换地方了，其实什么都没发生。
+ * <p>★ 为什么三个上限放在配置里：它们决定的是<b>成本</b>（索引每轮都注入 prompt）与
+ * <b>安全性</b>（单条记忆多大），按项目一贯做法，能算成本/可调的数字一律外置。
  *
- * <p>这正是本项目记过的坑 #12（"写了不等于生效"）。阶段 11 把它绑定上，
- * 并在 {@link #afterPropertiesSet()} 里做启动校验。
- *
- * <h2>为什么三个上限放在配置里</h2>
- *
- * <p>它们决定的是<b>成本</b>（索引每轮都注入 prompt）与<b>安全性</b>（单条记忆多大），
- * 而不是"代码结构"。按项目一贯的做法，能算成本/可调的数字一律外置。
- *
- * <h2>★ 为什么它在 {@code com.hagent.config}</h2>
- *
- * <p>协议第 13 条：项目里 8 个 {@code @ConfigurationProperties} 类有 7 个在
- * {@code com.hagent.config}，配置类的既定归属就是那里。本类最初放进了
- * {@code com.hagent.memory.longterm}（"它讲记忆，就跟记忆走"）——
- * 那正是踩坑 #25 的同一种错：**判据看的是"它是什么种类"，不是"它讲什么业务"**。
- * 现已挪回，并由 {@code PackagePlacementTest} 守着。
- *
- * <p>★ 阶段 12：{@code memory.longterm} 不能依赖 {@code config}，所以实现需要的四个值
- * 由领域自己声明成端口 {@link LongTermMemorySettings}，本类去实现它 ——
- * 方法全由 {@code @Getter} 生成，这里不新增任何方法。
+ * <p>★ 为什么实现的是 {@link LongTermMemorySettings}：{@code memory} 包不能反向依赖
+ * {@code config}（否则是包级环），所以"实现需要哪些参数"由领域声明成端口、本类去实现。
+ * 方法全由 {@code @Getter} 生成，这里不新增方法。
  */
 @Getter
 @Setter
@@ -54,21 +31,19 @@ public class LongTermMemoryProperties implements InitializingBean, LongTermMemor
     /**
      * 注入 prompt 的<b>索引块</b>最大字符数（默认 1000）。
      *
-     * <p><b>为什么必须有上限</b>：索引是<b>每一轮</b>都注入 system 的，
-     * 它直接吃掉会话历史的预算（{@code chat-max-tokens=5000}）。
-     * 1000 字 ≈ 15%–20%，再大就会把"最近几轮对话"挤掉 ——
-     * 而那不是省钱问题，是<b>模型忘掉上下文</b>。
+     * <p><b>为什么必须有上限</b>：索引是<b>每一轮</b>都注入 system 的，直接吃掉会话历史的
+     * 预算（{@code chat-max-tokens=5000}）。1000 字 ≈ 15%–20%，再大会把"最近几轮对话"挤掉 ——
+     * 那不是省钱问题，是<b>模型忘掉上下文</b>。
      *
-     * <p>超限时的行为是<b>拒绝写新记忆</b>（而不是静默淘汰最旧的）：
-     * 悄悄丢用户数据比"让模型自己整理一下"糟得多。
+     * <p>超限时<b>拒绝写新记忆</b>（而不是静默淘汰最旧的）：悄悄丢用户数据更糟。
      */
     private int indexMaxChars = 1000;
 
     /**
      * 单条记忆正文的最大字符数（默认 2000）。
      *
-     * <p>它<b>不占</b> prompt 预算（正文只在模型调 {@code readMemory} 时才进上下文），
-     * 所以这个值的意义是"防止一条记忆大到荒谬"，而不是控制成本。
+     * <p>正文只在模型调 {@code readMemory} 时才进上下文，<b>不占</b> prompt 预算，
+     * 所以这个值的意义是"防止一条记忆大到荒谬"，不是控制成本。
      */
     private int contentMaxChars = 2000;
 

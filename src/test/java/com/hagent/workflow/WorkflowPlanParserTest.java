@@ -9,9 +9,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * {@link WorkflowPlanParser} 的"宽进严出"。
  *
- * <p>宽进的三件事必须实测，不能靠"应该没问题"：
- * ① 带 Markdown 围栏与前后寒暄；② 多出未知字段；③ 漏填可选字段。
- * 严出的三件事同理：不是 JSON、没有 steps、步数超限。
+ * <p>宽进三件事必须实测、不能靠"应该没问题"：① Markdown 围栏与前后寒暄；② 多出未知字段；
+ * ③ 漏填可选字段。严出三件事同理：不是 JSON、没有 steps、步数超限。
  */
 class WorkflowPlanParserTest {
 

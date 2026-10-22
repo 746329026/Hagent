@@ -1,19 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  ★★★ 时间 MCP Server 的日志配置 —— 只有一条目的：**别弄脏 stdout**
+  时间 MCP Server 的日志配置 —— 唯一目的：别弄脏 stdout。
 
-  MCP 的 stdio 形态用 stdin/stdout 传 JSON-RPC。Spring Boot 默认把日志写到
-  System.out（stdout），那样客户端收到的每一行都会混进 "2026-10-21 ... INFO ..."，
-  于是 JSON 解析失败 —— 而症状极具误导性：
-    · server 进程活着、日志正常、"看起来跑起来了"；
-    · 客户端却一个工具都拿不到（握手帧解析不了）。
-  这正是本项目最警惕的那类"静默失败"：**两侧都觉得自己没问题**。
+  MCP 的 stdio 形态用 stdin/stdout 传 JSON-RPC，而 Spring Boot 默认把日志写到 stdout。
+  日志混进协议帧后，症状极具误导性：server 活着、日志正常，客户端却一个工具都拿不到
+  （握手帧解析失败）—— 两侧都觉得自己没问题。
 
-  ⇒ 所以这里把控制台 appender 的 target 改成 System.err。
-     stdout 只留给协议。
-
-  将来若有人"顺手"把 target 改回 System.out、或加一个 stdout appender，
-  症状会立刻回来而且很难联想到日志。
+  ⇒ 把控制台 appender 的 target 改成 System.err；stdout 只留给协议。
 -->
 <configuration>
 

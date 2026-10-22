@@ -25,19 +25,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * 阶段 14：<b>回合账 → SSE 帧</b>这一段契约（{@code TurnFinished} → {@code stats}）。
+ * <b>回合账 → SSE 帧</b>这一段契约（{@code TurnFinished} → {@code stats}）。
  *
- * <h2>★ 为什么这条边必须单独测（HANDOFF §十 第 5 条）</h2>
+ * <p>为什么这条边要单独测："A 类负责抛、B 类负责接"时，两边各自的用例都能通过，
+ * 而 <b>A→B 那条边没人测</b> —— 本项目就因此漏过"非法 token 报 500"（177 用例全绿）。
  *
- * <p>"A 类负责抛、B 类负责接"时，测 A 的用例（{@code TurnMetricsTest} 断言</b>账算得对</b>）
- * 与测 B 的用例（前端渲染）都能通过，而 <b>A→B 那条边没人测</b> ——
- * 本项目就因此漏过"非法 token 报 500"（177 用例全绿）。
- *
- * <h2>★ 为什么断言的是<b>序列化之后的 JSON</b>，而不是 record 的访问器</h2>
- *
- * <p>浏览器拿到的是 JSON。字段名一旦写错（或有人把 {@code TurnRecord} 整个塞进来），
- * record 的访问器断言照样全绿，而前端拿到的是另一套键。所以这里用与生产同一个
- * Jackson（{@code tools.jackson}，不是 2.x）把它序列化出来看真实键名。
+ * <p>为什么断言<b>序列化之后的 JSON</b>而不是 record 的访问器：浏览器拿到的是 JSON，
+ * 字段名一旦写错，访问器断言照样全绿。所以这里用与生产同一个 Jackson
+ * （{@code tools.jackson}，不是 2.x）序列化出来看真实键名。
  */
 class StatsFrameTest {
 
@@ -87,10 +82,9 @@ class StatsFrameTest {
     /**
      * 捕获型 {@code SseEmitter}：把每个事件拆成"字符串片段 + 载荷对象"收集起来。
      *
-     * <p>为什么能这样做：{@code send(SseEventBuilder)} 不是 final，且
-     * {@code builder.build()} 会把 id/event/data 全部物化成
-     * {@code DataWithMediaType} 列表 —— 于是"服务端到底发了什么"可以被逐项断言，
-     * 而不是只看"没抛异常"。
+     * <p>{@code send(SseEventBuilder)} 不是 final，且 {@code builder.build()} 会把
+     * id/event/data 全部物化成 {@code DataWithMediaType} 列表 —— 于是"服务端到底发了什么"
+     * 可以被逐项断言，而不是只看"没抛异常"。
      */
     private static final class CapturingEmitter extends SseEmitter {
 

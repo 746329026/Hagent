@@ -31,18 +31,11 @@ import static org.mockito.Mockito.when;
 /**
  * {@link KnowledgeRetrievalTool} 的行为契约。
  *
- * <h2>★ 为什么这个测试很重要（它守着一个容易被忽略的越权风险）</h2>
- *
- * <p>检索从"管线第③步"搬到"工具内部"之后，<b>权限过滤的位置变了</b>：
- * 以前是管线把 {@code UserContext} 交给 Service；现在必须由
- * {@code ToolContext} 传进工具、再交给 Service。
- *
- * <p>★ <b>这条链路一旦断掉，表现不是报错，而是"检索结果变少"或"看到了不该看的"</b>：
- * <ul>
- *   <li>身份没传 → 落匿名 → 员工查不到 INTERNAL（表现为"知识库好像没内容"）；</li>
- *   <li>更糟的是若有人"修"成"取不到就放行" → 匿名能看到 CONFIDENTIAL（越权且不留痕迹）。</li>
- * </ul>
- * 所以本测试既断言"身份被正确传下去"，也断言"缺失时落到匿名而<b>不是</b>落成放行"。
+ * <p>守着一个容易被忽略的越权风险：检索搬到工具内部后，{@code UserContext} 必须经
+ * {@code ToolContext} 传进工具、再交给 Service。这条链路断了不会报错 ——
+ * 身份没传则落匿名（表现为"知识库好像没内容"），若有人"修"成"取不到就放行"，
+ * 匿名就能看到 CONFIDENTIAL（越权且不留痕迹）。所以本类既断言身份被正确传下去，
+ * 也断言缺失时落匿名而不是落成放行。
  */
 class KnowledgeRetrievalToolTest {
 
@@ -61,9 +54,7 @@ class KnowledgeRetrievalToolTest {
         return new ToolContext(Map.of(ToolContextSupport.USER, user));
     }
 
-    // ========================================================================
-    // 一、★ 权限：身份必须传到 Service（这条是越权防线）
-    // ========================================================================
+    // 一、权限：身份必须传到 Service（这条是越权防线）
 
     @Test
     @DisplayName("★★ 身份必须从 ToolContext 传进检索 Service —— 越权防线不能因为搬家而断掉")
@@ -107,9 +98,7 @@ class KnowledgeRetrievalToolTest {
         verify(service).retrieve(any(), eq(UserContext.ANONYMOUS));
     }
 
-    // ========================================================================
     // 二、返回值是"给模型看的文本"（模型只能看到字符串）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 命中时返回值必须带【来源】与【相关度】—— 否则模型无法『说明出处』")
@@ -199,9 +188,7 @@ class KnowledgeRetrievalToolTest {
                 .isEmpty();
     }
 
-    // ========================================================================
     // 三、工具注册（@Tool 内省是否真的产出了可用的 ToolCallback）
-    // ========================================================================
 
     @Test
     @DisplayName("★★ @Tool 内省产出的定义必须带名字、描述与输入 schema")
@@ -242,10 +229,9 @@ class KnowledgeRetrievalToolTest {
                 .build()
                 .getToolCallbacks();
 
-        // ★ 必须走双参重载：本工具声明了 ToolContext 参数，框架会强制要求它
-        //   （实测：只传 JSON 会抛 "ToolContext is required by the method as an argument"）。
-        //   这条约束本身是好事 —— 它让"忘了传身份"在框架层就被拒绝，
-        //   而不是静默降级成匿名（那会表现为"检索结果莫名其妙地少"）。
+        // 必须走双参重载：本工具声明了 ToolContext 参数，框架会强制要求它
+        // （只传 JSON 会抛 "ToolContext is required by the method as an argument"）。
+        // 这条约束是好事 —— "忘了传身份"在框架层就被拒绝，而不是静默降级成匿名。
         String result = callbacks[0].call("{\"query\":\"年假几天\"}",
                 new ToolContext(Map.of(ToolContextSupport.USER,
                         new UserContext("zhangsan", Role.EMPLOYEE))));
@@ -258,9 +244,7 @@ class KnowledgeRetrievalToolTest {
         verify(service).retrieve(eq("年假几天"), eq(new UserContext("zhangsan", Role.EMPLOYEE)));
     }
 
-    // ========================================================================
     // 四、可插拔：检索开关关掉时不注册任何工具
-    // ========================================================================
 
     @Test
     @DisplayName("★ retrieval.enabled=false → 没有 retrieveKnowledge，但长期记忆工具照常在")

@@ -17,28 +17,20 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 全局异常处理器的测试。
+ * 全局异常处理器的测试 —— 它决定"同一个故障对外表现成什么"。
  *
- * <p><b>为什么值得测</b>：本类决定"同一个故障对外表现成什么"。
- * 这里每个用例都对应一次<b>实测发现的错误映射</b>，不是为凑覆盖率：
- * <ul>
- *   <li>路由不存在曾返回 500（应为 404）—— 调用方会误以为服务崩了；</li>
- *   <li>上游 401 曾返回 500（应为 502）—— 调用方会误重试永远不会成功的请求。</li>
- * </ul>
+ * <p>每个用例都对应一次实测发现的错误映射，不是凑覆盖率：路由不存在曾返回 500（应为 404，
+ * 调用方会误以为服务崩了）、上游 401 曾返回 500（应为 502，调用方会误重试永远不会成功的请求）。
  *
- * <p><b>为什么直接 new 处理器、用真实异常对象，而不是用 MockMvc / @WebMvcTest</b>：
- * <ul>
- *   <li>本类的职责是"异常 → 响应"的<b>纯映射</b>，不依赖 Spring 上下文。
- *       用 MockMvc 要先起容器（几秒），而这里毫秒级就能跑完；</li>
- *   <li>更关键的是 —— <b>这些缺陷之所以漏到运行时，正是因为"看起来都对"</b>。
- *       直接断言映射结果，比断言"HTTP 经过框架处理后是多少"更贴近我们要保护的东西。</li>
- * </ul>
+ * <p>直接 new 处理器 + 真实异常对象，不用 MockMvc / {@code @WebMvcTest}：本类职责是"异常 → 响应"的
+ * 纯映射，不依赖 Spring 上下文；而这些问题之所以漏到运行时，正是因为"看起来都对"，
+ * 断言映射结果比断言框架处理后的 HTTP 更贴近要保护的东西。
  */
 class GlobalExceptionHandlerTest {
 
     private final GlobalExceptionHandler handler = new GlobalExceptionHandler();
 
-    // ==================== 路由不存在 → 404（曾有缺陷：返回 500）====================
+    // 路由不存在 → 404（曾有缺陷：返回 500）
 
     @Test
     @DisplayName("★ 不存在的路径 → 404 + 40004，而不是 500（实测发现的既有缺陷）")
@@ -81,7 +73,7 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getBody().message()).doesNotContain("secret");
     }
 
-    // ==================== 方法不支持 → 405（实测发现的第二个同类缺口）====================
+    // 方法不支持 → 405
 
     @Test
     @DisplayName("★ 用 GET 访问 POST 接口 → 405 + 40005，而不是 500（浏览器地址栏访问就会触发）")
@@ -121,7 +113,7 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getBody().code()).isEqualTo(40005);
     }
 
-    // ==================== 请求格式不支持 → 415 ====================
+    // 请求格式不支持 → 415
 
     @Test
     @DisplayName("★ Content-Type 不对 → 415 + 40006，而不是 500")
@@ -138,7 +130,7 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getHeaders().getAccept()).contains(MediaType.APPLICATION_JSON);
     }
 
-    // ==================== 协议级错误的统一契约 ====================
+    // 协议级错误的统一契约
 
     @Test
     @DisplayName("★ 三个协议级错误码都归 4xxxx 分段（调用方看到 4xxxx 就知道不用看服务端日志）")

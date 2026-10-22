@@ -7,49 +7,11 @@ import java.util.Map;
 /**
  * 知识库块的<b>元数据 schema</b> —— 字段名与语义的唯一出处。
  *
- * <h2>★ 这个类存在的理由：防"双字典"陷阱</h2>
- *
- * <p>元数据是"<b>入库时写、检索时读</b>"的领域 —— 写和读发生在
- * 两段完全不相干的代码里：
- * <pre>
- *   入库：DocumentMetadata.of(...) → toMap() → 写进 pgvector 的 metadata 列
- *   检索：FilterExpressionBuilder.eq("source", ...) → 变成 SQL 的 WHERE
- * </pre>
- *
- * <p>如果字段名是散落的字符串字面量，那么：
- * <ul>
- *   <li>入库写 {@code source}、检索查 {@code sourcePath} → 过滤条件永远不命中，
- *       <b>而 SQL 不会报错</b>（jsonb 里没有这个键，条件就是 false）；</li>
- *   <li>改字段名时全靠全局搜索，漏一处就静默失效。</li>
- * </ul>
- *
- * <p>所以本类把字段名提成 {@code FIELD_*} 常量，并把"记录 → 存储格式"的转换
- * 收口在 {@link #toMap()}。入库与检索都引用这里的常量，<b>字段名只有一个出处</b>。
- * 这与 {@code MessageCodec}（消息序列化的唯一出处）、
- * {@code MemoryTrimmer}（裁剪规则的唯一出处）是同一个思路。
- *
- * <h2>★ 字段分组（每个字段都对应一个具体的代码行为）</h2>
- *
- * <table border="1">
- *   <caption>字段与用途</caption>
- *   <tr><th>分组</th><th>字段</th><th>谁用</th></tr>
- *   <tr><td rowspan="2"><b>标识</b></td>
- *       <td>{@code source}</td>
- *       <td>幂等定位 + 按文档删除 + 出处展示</td></tr>
- *   <tr><td>{@code title}</td><td>出处展示（<b>不允许为空</b>）</td></tr>
- *   <tr><td rowspan="4"><b>出处</b></td>
- *       <td>{@code section}</td><td>出处精确到章节；<b>允许为空</b></td></tr>
- *   <tr><td>{@code chunkIndex}</td><td>顺序排列 + 出处兜底定位</td></tr>
- *   <tr><td>{@code contentHash}</td><td>块级指纹</td></tr>
- *   <tr><td>{@code docHash}</td><td>文档级指纹（文档没变就整篇跳过）</td></tr>
- *   <tr><td rowspan="2"><b>策略</b></td>
- *       <td>{@code kind}</td><td>追溯"这篇是怎么被处理的"</td></tr>
- *   <tr><td>{@code level}</td><td>检索过滤（<b>下一轮</b>实现）</td></tr>
- *   <tr><td rowspan="3"><b>预留</b></td>
- *       <td>{@code dept}</td><td>部门维度（<b>只存不用</b>）</td></tr>
- *   <tr><td>{@code validFrom}</td><td>生效日期（<b>只存不用</b>）</td></tr>
- *   <tr><td>{@code validTo}</td><td>失效日期（<b>只存不用</b>）</td></tr>
- * </table>
+ * <p>元数据是"入库时写、检索时读"，两段代码完全不相干。若字段名是散落的字符串字面量：
+ * 入库写 {@code source}、检索查 {@code sourcePath}，过滤条件永远不命中，
+ * <b>而 SQL 不会报错</b>（jsonb 里没有这个键，条件就是 false）；改字段名时漏一处即静默失效。
+ * 所以字段名提成 {@code FIELD_*} 常量，"记录 → 存储格式"的转换收口在 {@link #toMap()}，
+ * 入库与检索都只引用这里 —— <b>字段名只有一个出处</b>。
  *
  * <h2>★ 空值语义（这比"按文档定制结构"重要得多）</h2>
  *
@@ -80,9 +42,7 @@ public record DocumentMetadata(
         LocalDate validFrom,
         LocalDate validTo) {
 
-    // ========================================================================
     // ★ 字段名常量 —— 入库写、检索读，都引用这里（唯一出处）
-    // ========================================================================
 
     /** 来源路径（相对知识库根目录）。如同"文档的身份"。 */
     public static final String FIELD_SOURCE = "source";
@@ -92,42 +52,31 @@ public record DocumentMetadata(
     public static final String FIELD_SECTION = "section";
     /** 块在文档内的序号，从 0 开始。 */
     public static final String FIELD_CHUNK_INDEX = "chunkIndex";
-    /** 该文档一共被切成几块。 */
     /**
-     * 块总数。
-     *
-     * <p>★ 审计报告把它列为"只写不读"，<b>复核后不成立</b> —— 它有两个真实消费者：
-     * <ol>
-     *   <li>本类构造器里的<b>自洽断言</b>（chunkIndex 必须小于 chunkTotal）——
-     *       拦住"序号越界"这类会让出处定位错乱的数据；</li>
-     *   <li>两个入库集成测试用 <b>SQL 直查</b> metadata 里的 chunkTotal，
-     *       断言"每篇文档的块序号从 0 连续、且最大值 = 总数 - 1"。</li>
-     * </ol>
-     * 所以<b>保留</b>：它是能被外部（SQL / 排查）消费的数据，不是死字段。
+     * 块总数。构造器用它做自洽断言（{@code index < total}），
+     * 入库集成测试也直查它校验块序号连续 —— 不是"只写不读"的字段。
      */
     public static final String FIELD_CHUNK_TOTAL = "chunkTotal";
     /** 块级内容哈希（SHA-256，十六进制）。 */
     public static final String FIELD_CONTENT_HASH = "contentHash";
-    /** 文档级内容哈希（全文 + 关键 frontmatter 的 SHA-256）。 */
+    /** 文档级内容哈希（全文 + 关键 frontmatter 的 SHA-256）；文档没变就整篇跳过。 */
     public static final String FIELD_DOC_HASH = "docHash";
-    /** 文档种类。 */
+    /** 文档种类，用于追溯"这篇是怎么被处理的"。 */
     public static final String FIELD_KIND = "kind";
-    /** 密级。 */
+    /** 密级，检索前过滤按它生成 WHERE 条件。 */
     public static final String FIELD_LEVEL = "level";
-    /** 归属部门；空字符串表示全公司。 */
+    /** 归属部门；空字符串表示全公司。目前只存不用。 */
     public static final String FIELD_DEPT = "dept";
-    /** 生效日期；null 表示未设置。 */
+    /** 生效日期；未设置时为空字符串。目前只存不用。 */
     public static final String FIELD_VALID_FROM = "validFrom";
-    /** 失效日期；null 表示未设置。 */
+    /** 失效日期；未设置时为空字符串。目前只存不用。 */
     public static final String FIELD_VALID_TO = "validTo";
 
     /**
      * 紧凑构造器 —— 把"必填字段"的约束变成<b>对象创建时就会失败</b>。
      *
-     * <p>为什么不靠调用方自觉：{@code source} 缺失会让"按文档删除"失效，
-     * {@code title} 缺失会让出处无法展示。这两者的共同点是
-     * <b>不会在写入时报错，只会在将来某个检索结果里表现异常</b> ——
-     * 所以必须在最早的时刻拦住。
+     * <p>不靠调用方自觉：{@code source} 缺失会让"按文档删除"失效，{@code title} 缺失会让出处
+     * 无法展示。这类问题<b>写入时不报错，只在将来某个检索结果里表现异常</b>，必须在最早时刻拦住。
      */
     public DocumentMetadata {
         if (source == null || source.isBlank()) {
@@ -159,23 +108,19 @@ public record DocumentMetadata(
     /**
      * 转成 pgvector 的 {@code metadata} 列（jsonb）所需的结构。
      *
-     * <p><b>为什么值类型混用 String 与 int / null</b>：
-     * {@code FilterExpressionBuilder} 支持 {@code eq} / {@code in} / {@code gte} 等比较，
-     * 而 jsonb 里的数字与字符串是不同的类型，比较时不会自动转换。
-     * 所以：
+     * <p>值类型混用 String / int / 空字符串，是因为 jsonb 里数字与字符串不自动转换，
+     * 而过滤走 {@code FilterExpressionBuilder} 的 {@code eq} / {@code in} / {@code gte}：
      * <ul>
      *   <li>枚举以 {@link Enum#name() name()} 存<b>字符串</b>（可读、可手工 SQL 查询）；</li>
      *   <li>{@code chunkIndex} / {@code chunkTotal} 存<b>数字</b>（将来可能按序号范围查询）；</li>
-     *   <li>日期存 ISO-8601 <b>字符串</b>（{@code LocalDate.toString()}）——
-     *       字符串形式的 {@code "2024-01-01"} 在字典序上等于时间序，
+     *   <li>日期存 ISO-8601 <b>字符串</b>：字典序等于时间序，
  *       可以直接用 {@code gte} / {@code lte} 比较，且不受时区影响；</li>
      *   <li>可选字段的空值统一为<b>空字符串</b>（不是 null）——
      *       jsonb 里 {@code "dept": ""} 可以被 {@code ne("")} 稳定匹配，
      *       而 {@code null} 在 SQL 三值逻辑下会带来意外的匹配结果。</li>
      * </ul>
      *
-     * <p>用 {@link LinkedHashMap} 保持字段顺序：它让 pgvector 里的 jsonb
-     * 在人工查询时<b>按 schema 顺序显示</b>，比哈希顺序易读。
+     * <p>用 {@link LinkedHashMap} 保持 schema 顺序：人工查询时按字段顺序显示，比哈希顺序易读。
      */
     public Map<String, Object> toMap() {
         Map<String, Object> map = new LinkedHashMap<>();

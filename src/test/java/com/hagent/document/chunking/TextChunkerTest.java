@@ -9,36 +9,16 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 切分逻辑的测试。
+ * 切分逻辑的测试 —— 断言的是契约，不是实现细节。四条契约各对应一个真实的故障模式：
  *
- * <h2>★ 这里断言的是"契约"，不是"实现细节"</h2>
+ * <ul>
+ *   <li>块按原文顺序、index 从 0 连续 → 否则"第 N 块"这个出处定位符会指错位置；</li>
+ *   <li>不适用时返回空列表（而非占位块）→ 否则降级链失效，调度器拿到一个假块；</li>
+ *   <li><b>每块不超过 maxSize</b> → 否则 embedding 静默截断，块尾部永远检索不到且无任何报错；</li>
+ *   <li><b>不丢正文</b> → 否则被丢掉的部分永远无法被检索到，而排查时看不出任何异常。</li>
+ * </ul>
  *
- * <p>{@link TextChunker} 的四条契约，每一条都对应一个<b>真实的故障模式</b>：
- *
- * <table border="1">
- *   <caption>契约与它防的问题</caption>
- *   <tr><th>契约</th><th>违反后的后果</th></tr>
- *   <tr>
- *     <td>返回块按原文顺序、index 从 0 连续</td>
- *     <td>"第 N 块"这个出处定位符会指错位置</td>
- *   </tr>
- *   <tr>
- *     <td>不适用时返回空列表（而非占位块）</td>
- *     <td>降级链失效，调度器拿到一个假块</td>
- *   </tr>
- *   <tr>
- *     <td><b>每块不超过 maxSize</b></td>
- *     <td>embedding <b>静默截断</b> —— 块的尾部永远检索不到，且无任何报错</td>
- *   </tr>
- *   <tr>
- *     <td><b>不丢正文</b></td>
- *     <td>被丢掉的那部分内容<b>永远无法被检索到</b>，用户问相关问题时系统答不出，
- *         而排查时看不出任何异常</td>
- *   </tr>
- * </table>
- *
- * <p>最后一条（不丢正文）是最重要的 —— 它是"分块"这件事的核心正确性：
- * 分块的目的是"把文档切小以便检索"，而不是"丢掉一部分内容"。
+ * <p>最后一条是"分块"的核心正确性：目的是把文档切小以便检索，而不是丢掉一部分内容。
  */
 class TextChunkerTest {
 
@@ -49,9 +29,7 @@ class TextChunkerTest {
     private final HeadingChunker heading = new HeadingChunker();
     private final ParagraphChunker paragraph = new ParagraphChunker();
 
-    // ========================================================================
     // 契约 3：不超限（防 embedding 静默截断）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 契约：无论哪种策略，每块都不超过 maxSize（这是防静默截断的唯一防线）")
@@ -61,8 +39,8 @@ class TextChunkerTest {
         String withHeadings = "# 标题一\n\n正文内容。\n\n## 标题二\n\n" + "更长的正文。".repeat(60);
         String oneHugeSection = "# 唯一标题\n\n" + "这一节非常长。".repeat(60);
 
-        // 注意：这里【不】断言 wholeDocumentChunker —— 它遇到超长文本会返回空列表
-        // （表示"本策略不适用，请降级"），那是契约 2 的行为，由专门的用例覆盖。
+        // 这里【不】断言 wholeDocumentChunker：它遇到超长文本返回空列表（"本策略不适用，请降级"），
+        // 那是契约 2 的行为，由专门的用例覆盖。
         assertAllWithinLimit(paragraph.chunk(longParagraph, MAX, OVERLAP));
         assertAllWithinLimit(paragraph.chunk(manyParagraphs, MAX, OVERLAP));
         assertAllWithinLimit(heading.chunk(withHeadings, MAX, OVERLAP));
@@ -80,9 +58,7 @@ class TextChunkerTest {
         }
     }
 
-    // ========================================================================
     // 契约 4：不丢正文（最重要的正确性）
-    // ========================================================================
 
     @Test
     @DisplayName("★★ 契约：不丢正文 —— 原文的每个字符都必须出现在某个块里（允许重叠重复）")
@@ -104,8 +80,7 @@ class TextChunkerTest {
         List<Chunk> chunks = heading.chunk(text, 60, 10);
         String joined = String.join("", chunks.stream().map(Chunk::text).toList());
 
-        // 逐个断言原文的关键片段都在（用片段而非整串比较 —— 因为块与块之间有重叠，
-        // 拼起来会比原文长，直接比较整串会误判）
+        // 断言原文的关键片段都在（用片段而非整串比较：块间有重叠，拼起来会比原文长）
         assertThat(joined).contains("这是第一张的正文内容");
         assertThat(joined).contains("子章节的正文");
         assertThat(joined).contains("第二张的正文同样重要");
@@ -125,9 +100,7 @@ class TextChunkerTest {
         assertThat(joined).contains("第三段的内容");
     }
 
-    // ========================================================================
     // 契约 1：序号连续（出处的定位基础）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 契约：index 从 0 连续递增，total 等于块数（否则「第 N 块」这个出处定位符会指错）")
@@ -143,9 +116,7 @@ class TextChunkerTest {
         }
     }
 
-    // ========================================================================
     // 契约 2：不适用时返回空列表（降级链的基础）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 契约：无标题时 HeadingChunker 返回空列表（表示「请降级」），而不是自己乱切")
@@ -175,9 +146,7 @@ class TextChunkerTest {
         assertThat(chunks.get(0).hasSection()).isFalse();
     }
 
-    // ========================================================================
     // 章节名（出处的来源）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 章节名被正确带上 —— 它是出处的来源，模型据此说「根据《X》第几章」")
@@ -229,9 +198,7 @@ class TextChunkerTest {
                 .doesNotContain("空标题");
     }
 
-    // ========================================================================
     // Markdown 标题识别的边界
-    // ========================================================================
 
     @Test
     @DisplayName("★ # 后面没有空格的不算标题（如 #话题 是普通文本，误判会凭空造出章节名）")
@@ -252,9 +219,7 @@ class TextChunkerTest {
         assertThat(heading.chunk(text, MAX, OVERLAP)).isEmpty();
     }
 
-    // ========================================================================
     // 段落切分与重叠
-    // ========================================================================
 
     @Test
     @DisplayName("按段落聚合：多段能合并到接近上限，而不是每段一块")
@@ -267,8 +232,7 @@ class TextChunkerTest {
 
         List<Chunk> chunks = paragraph.chunk(text, MAX, 0);
 
-        // 40 段必须被聚合成远少于 40 的若干块 —— 这正是"聚合"的意义：
-        // 不聚合的话每段一块，会有 40 个向量，且每块信息量太少、区分度低
+        // 40 段必须被聚合成远少于 40 的若干块 —— 不聚合的话每段一块：40 个向量，且每块信息量太少、区分度低
         assertThat(chunks).hasSizeGreaterThan(1);
         assertThat(chunks).hasSizeLessThan(30);
     }
@@ -304,9 +268,7 @@ class TextChunkerTest {
         assertThat(blocks.get(0)).contains("第一段").contains("短尾");
     }
 
-    // ========================================================================
     // 空输入
-    // ========================================================================
 
     @Test
     @DisplayName("三种策略对空输入都安全返回空列表，不抛异常")

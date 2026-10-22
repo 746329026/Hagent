@@ -41,22 +41,21 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * 阶段 14：<b>回合账</b>的口径与三出口（{@code TurnStats} + {@code AgentPipeline} 的接线）。
+ * <b>回合账</b>的口径与三出口（{@code TurnStats} + {@code AgentPipeline} 的接线）。
  *
- * <h2>★ 它钉住的是"不报错但会错"的四个地方</h2>
- *
+ * <p>钉住四个"不报错但会错"的地方：
  * <ol>
- *   <li>★ <b>token 是整轮累加，不是最后一次</b>。阶段 14 之前 {@code Final.usage} 取
- *       最后一片，实测一轮 workflow 调 7 次模型、只记了最后一次的 3419 ——
- *       成本被低估 3~7 倍且不报错。这条用例用一个"两次调用各有用量"的假模型把它钉死；</li>
- *   <li><b>失败与取消也必须留一条账</b>。它们的记录在 MySQL 里本来<b>零痕迹</b>
- *       （失败不写回记忆），若不记，成功率永远是 100%；</li>
- *   <li><b>取消 ≠ 失败</b>。用户关页面是正常操作，混进 FAILED 会让成功率无缘无故变差；</li>
+ *   <li><b>token 是整轮累加，不是最后一次</b>：{@code Final.usage} 取最后一片时，
+ *       实测一轮 workflow 调 7 次模型、只记了最后一次的 3419 —— 成本被低估 3~7 倍且不报错。
+ *       下面用一个"两次调用各有用量"的假模型把它钉死；</li>
+ *   <li><b>失败与取消也必须留一条账</b>：失败不写回记忆，在 MySQL 里本来<b>零痕迹</b>，
+ *       不记则成功率永远是 100%；</li>
+ *   <li><b>取消 ≠ 失败</b>：用户关页面是正常操作，混进 FAILED 会让成功率无缘无故变差；</li>
  *   <li><b>工具次数必须与审计行数一致</b>，且两边共用同一个 {@code turnId}
  *       —— 否则"这一轮到底调了几次工具"有两个可能的答案。</li>
  * </ol>
  *
- * <p>全部用假模型 → 不花钱、可重复（与阶段 9/13 的管线测试同一套做法）。
+ * <p>全部用假模型 → 不花钱、可重复。
  */
 class TurnMetricsTest {
 
@@ -74,7 +73,7 @@ class TurnMetricsTest {
         when(chatModel.getOptions()).thenReturn(deepSeekOptions());
         // 第 1 次：请求工具，用量 100 + 20 = 120
         // 第 2 次：给答案，  用量 200 + 40 = 240
-        // 整轮应当是 360；若实现取"最后一片"，这里会是 240（这正是阶段 14 之前的 bug）
+        // 整轮应当是 360；若实现取"最后一片"，这里会是 240
         when(chatModel.stream(any(Prompt.class))).thenAnswer(invocation ->
                 calls.getAndIncrement() == 0
                         ? Flux.just(chunk(toolCallMessage("getWeather", "{}"), usage(100, 20)))

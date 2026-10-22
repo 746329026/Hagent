@@ -16,33 +16,21 @@ import javax.sql.DataSource;
 /**
  * 向量库装配 —— 本项目"存储分层"的关键一环。
  *
- * <p><b>要解决的问题（实测得出，不是猜的）</b>：
- * 解压 spring-ai-autoconfigure-vector-store-pgvector-2.0.1.jar 读它的
- * spring-configuration-metadata.json 可以证实：spring.ai.vectorstore.pgvector.*
- * 下【只有】表名 / 维度 / 索引类型 / 距离度量 / 初始化开关等，
- * <b>没有任何数据源参数</b> —— 它复用 Spring 全局 DataSource。
- *
- * <p>而本项目的全局 DataSource 是业务主库 MySQL。于是自动装配的 PgVectorStore
- * 会拿到 MySQL 连接：轻则启动报方言错误，重则连到别的库读到别人的数据
- * （首次启动确实观察到它读到了另一个库里的同名表 vector_store）。
+ * <p><b>要解决的问题</b>：{@code spring.ai.vectorstore.pgvector.*} 下<b>没有任何数据源参数</b>
+ * （只有表名 / 维度 / 索引类型 / 距离度量 / 初始化开关），它复用 Spring 全局 DataSource ——
+ * 而本项目的全局 DataSource 是业务主库 MySQL。于是自动装配的 PgVectorStore 会拿到 MySQL 连接：
+ * 轻则启动报方言错误，重则连到别的库读到别人的数据。
  *
  * <p><b>三个刻意的设计决定</b>：
  * <ol>
- *   <li><b>自己声明 PgVectorStore Bean，不用自动装配</b>：自动装配在两个
- *       DataSource 之间"选哪个"的逻辑不透明；显式构造则"用哪个 DataSource、
- *       用哪个 EmbeddingModel"一目了然，配置错误在启动阶段就暴露。</li>
- *   <li><b>pgVectorDataSource 不标 @Primary</b>：业务主库（MySQL）才是主数据源，
- *       避免事务管理器等误连到 PostgreSQL。
- *       ★ <b>但这条注释曾经建立在一个错误认知上，阶段 7 实测纠正了它</b>：
- *       原文写的是"业务主库由 {@code spring.datasource} 自动装配"——<b>它并不存在</b>。
- *       本类声明的 {@code pgVectorDataSource} 让
- *       {@code DataSourceAutoConfiguration}（带 {@code @ConditionalOnMissingBean(DataSource.class)}）
- *       <b>退避</b>了，于是 {@code spring.datasource.*} 整段配置被静默忽略，
- *       而"全局 DataSource 是 MySQL"这句话是 false —— 直到阶段 7 才第一次有人用它。
- *       现在业务主库由 {@link BusinessDataSourceConfig} <b>显式</b>声明并标 {@code @Primary}。</li>
- *   <li><b>两个数据源的失败策略相反</b>：MySQL 保持默认 fail-fast（业务数据
- *       不可缺失，连不上就该启动失败）；pgvector 关掉 fail-fast
- *       （向量库不可用时检索降级即可，不该阻断整个应用启动）。</li>
+ *   <li><b>自己声明 PgVectorStore Bean，不用自动装配</b>：自动装配在两个 DataSource 之间"选哪个"
+ *       的逻辑不透明；显式构造则"用哪个 DataSource、用哪个 EmbeddingModel"一目了然。</li>
+ *   <li><b>pgVectorDataSource 不标 {@code @Primary}</b>：业务主库（MySQL）才是主数据源，
+ *       避免事务管理器等误连到 PostgreSQL。★ 这个声明还有个副作用：它让
+ *       {@code DataSourceAutoConfiguration} 退避，所以业务主库必须<b>显式</b>声明
+ *       （见 {@link BusinessDataSourceConfig}）。</li>
+ *   <li><b>两个数据源的失败策略相反</b>：MySQL fail-fast（业务数据不可缺失，连不上就该启动失败）；
+ *       pgvector 关掉 fail-fast（向量库不可用时检索降级即可，不该阻断应用启动）。</li>
  * </ol>
  */
 @Slf4j
@@ -57,26 +45,14 @@ public class VectorStoreConfig {
      * pgvector 专用 {@link JdbcTemplate} 的 Bean 名。
      *
      * <p>★★ <b>引用它时必须带 {@code @Qualifier}，不能按类型注入。</b>
-     * 本项目有<b>两个</b>数据源，而业务主库（{@link BusinessDataSourceConfig}）标了
-     * {@code @Primary}。
+     * 必须记住的规则：<b>{@code @Primary} 压过"按参数名匹配"</b> —— 参数名只在没有 primary 时
+     * 用来打破平局。实测后果：参数名叫 {@code pgVectorDataSource} 的"pgvector 专用"
+     * JdbcTemplate 实际连着 MySQL，PgVectorStore 对着 MySQL 执行
+     * {@code CREATE EXTENSION IF NOT EXISTS vector} 报语法错误 ——
+     * 而报错读起来像"PostgreSQL 版本太老不支持 CREATE EXTENSION"，真实原因是
+     * "这条 SQL 发给了另一个数据库"。
      *
-     * <p><b>★ 一条必须记住的注入规则：{@code @Primary} 压过"按参数名匹配"。</b>
-     * 参数名只在"没有 primary 时"用来打破平局。这条规则是阶段 7 实测撞出来的：
-     * <pre>
-     *   VectorStoreConfig.pgVectorJdbcTemplate(DataSource pgVectorDataSource)
-     *        ↑ 参数名叫 pgVectorDataSource，看起来万无一失
-     *   但按类型解析时有两个候选，且业务主库是 @Primary
-     *        → 实际拿到的是【MySQL 数据源】
-     *        → 于是这个"pgvector 专用"的 JdbcTemplate 其实连着 MySQL
-     *        → PgVectorStore 对着 MySQL 执行 CREATE EXTENSION IF NOT EXISTS vector
-     *        → 报错：You have an error in your SQL syntax ... near 'EXTENSION IF NOT EXISTS vector'
-     * </pre>
-     *
-     * <p><b>这个症状极具误导性</b>：它读起来像"PostgreSQL 版本太老不支持 CREATE EXTENSION"，
-     * 而真实原因是"这条 SQL 发给了另一个数据库"。
-     *
-     * <p>所以本项目对有歧义的 Bean 一律<b>按名取</b>：
-     * {@code @Qualifier} 的优先级高于 {@code @Primary}，
+     * <p>所以对有歧义的 Bean 一律<b>按名取</b>（{@code @Qualifier} 的优先级高于 {@code @Primary}），
      * 让"用哪个库"在代码上看得见，而不是靠参数名这个隐式约定。
      */
     public static final String PG_VECTOR_JDBC_TEMPLATE_BEAN = "pgVectorJdbcTemplate";
@@ -84,8 +60,8 @@ public class VectorStoreConfig {
     /**
      * pgvector 专用数据源（PostgreSQL）。
      *
-     * <p>不标 {@code @Primary}：让 spring.datasource 装配出的 MySQL 数据源
-     * 继续作为主数据源。
+     * <p>不标 {@code @Primary}：业务主库（由 {@link BusinessDataSourceConfig} 显式声明）
+     * 才是主数据源。
      */
     @Bean(name = PG_VECTOR_DATASOURCE_BEAN, destroyMethod = "close")
     public DataSource pgVectorDataSource(VectorStoreDataSourceProperties props) {
@@ -108,20 +84,12 @@ public class VectorStoreConfig {
     /**
      * 显式装配 PgVectorStore：把它与本项目的 PostgreSQL 数据源、Ollama embedding 模型绑定。
      *
-     * <p><b>★ 这里踩过一个隐蔽的坑，值得记下来</b>：
-     * {@code PgVectorStore.builder(...)} 是一个"裸"构建器，它<b>不会</b>去读
-     * {@code spring.ai.vectorstore.pgvector.*} 那些配置项 —— 那些属性是给
-     * 自动装配用的（PgVectorStoreProperties）。既然我们自己造 Bean，就必须自己绑定，
-     * 否则所有配置项都会被静默忽略，表现为：
-     *
-     * <pre>
-     *   配置文件写了 table-name: hagent_knowledge
-     *   启动日志却是：Using the vector table name: vector_store
-     * </pre>
-     *
-     * 而由于 initializeSchema 默认为 true，它会<b>自动建一张叫 vector_store 的表</b>，
-     * 于是"配置没生效"完全不报错 —— 数据写进了另一张表，排查时极易误判。
-     * 这类"配置写了却不用"的静默失效，正是本项目要系统性避免的问题。
+     * <p>★ 坑：{@code PgVectorStore.builder(...)} 是"裸"构建器，它<b>不会</b>去读
+     * {@code spring.ai.vectorstore.pgvector.*}（那些属性是给自动装配用的 PgVectorStoreProperties）。
+     * 既然自己造 Bean，就必须自己绑定，否则所有配置项被静默忽略 —— 配了
+     * {@code table-name: hagent_knowledge}，启动日志却是 {@code Using the vector table name: vector_store}；
+     * 又因 {@code initializeSchema} 默认为 true，它会自动建一张叫 vector_store 的表，
+     * 于是"配置没生效"完全不报错，数据写进了另一张表。
      */
     @Bean
     public PgVectorStore vectorStore(
@@ -147,18 +115,15 @@ public class VectorStoreConfig {
     /**
      * 向量库专用的 {@link JdbcTemplate} —— <b>与 PgVectorStore 共用同一个实例</b>。
      *
-     * <p><b>为什么要把它抽成 Bean，而不是在需要时各自 {@code new}</b>：
-     * 入库服务需要用原生 SQL 直查向量表的 metadata（框架的 {@code VectorStore}
-     * 接口没有"按元数据条件查询"的方法）。如果它在自己方法里 new 一个，
-     * 就会出现"同一个数据源上两个 JdbcTemplate 实例"—— 功能上不会出错，
-     * 但连接池使用、异常转换配置、将来加拦截器时都要改两处。
-     * <b>共用同一个 Bean，让"访问向量库"只有一个入口。</b>
+     * <p><b>为什么抽成 Bean，而不是在需要时各自 {@code new}</b>：入库服务需要用原生 SQL 直查
+     * 向量表的 metadata（框架的 {@code VectorStore} 接口没有"按元数据条件查询"）。
+     * 各自 new 会出现"同一数据源上两个 JdbcTemplate 实例"，功能上不会出错，但连接池使用、
+     * 异常转换配置、将来加拦截器都要改两处。共用同一个 Bean，让"访问向量库"只有一个入口。
      *
-     * <p>注意 {@code vectorStore(...)} 是通过<b>方法参数</b>拿到它的，
-     * 而不是在方法体内调用 {@code pgVectorJdbcTemplate(...)} ——
-     * 后者依赖 {@code @Configuration} 的 CGLIB 代理才会返回容器中的单例，
-     * 一旦有人改成 {@code proxyBeanMethods = false}，那个写法就会
-     * 悄悄变成"每次都 new 一个新的"。参数注入不依赖这个隐式规则。
+     * <p>注意 {@code vectorStore(...)} 是通过<b>方法参数</b>拿到它的，而不是在方法体内调用
+     * {@code pgVectorJdbcTemplate(...)} —— 后者依赖 {@code @Configuration} 的 CGLIB 代理
+     * 才会返回容器中的单例，一旦有人改成 {@code proxyBeanMethods = false}，
+     * 那个写法就会悄悄变成"每次都 new 一个新的"。
      */
     @Bean
     public JdbcTemplate pgVectorJdbcTemplate(
@@ -169,18 +134,15 @@ public class VectorStoreConfig {
     /**
      * 启动自检：核对向量表<b>是否真的存在</b>，并把关键列类型打出来。
      *
-     * <p>为什么需要这一步：上面那个坑说明"我配置了什么"与"实际用了什么"可能不一致，
-     * 而系统不会报错。这里直查 PostgreSQL 的系统表，用事实而不是配置来确认。
+     * <p><b>为什么需要这一步</b>："我配置了什么"与"实际用了什么"可能不一致，而系统不会报错 ——
+     * 这里直查 PostgreSQL 的系统表，用事实而不是配置来确认。
      *
-     * <p><b>★ 阶段 6 起，这条自检从"仅告警"升级为"缺失即启动失败"</b>：
-     * 阶段 0 时没有写入路径，表不存在只是"尚未用到"；而阶段 6 引入入库后，
-     * 表不存在意味着<b>每一次入库都会失败</b>。若继续只打 WARN，
-     * 应用会正常启动、健康检查全绿，直到真的去入库才发现问题 ——
-     * 这正是本项目全篇在防的"看起来一切正常"。
+     * <p>★ <b>表缺失即启动失败</b>（不是仅告警）：一旦有入库路径，表不存在意味着
+     * <b>每一次入库都会失败</b>；只打 WARN 的话应用会正常启动、健康检查全绿，
+     * 直到真的去入库才发现问题。
      *
-     * <p>所以规则改为：<b>表必须存在，否则启动失败并说明原因与修法</b>。
-     * 同时打印列结构 —— 下一轮做检索过滤时要按 metadata 字段写条件，
-     * 事先知道它是 {@code json} 还是 {@code jsonb} 是有用的（两者对索引与操作符支持不同）。
+     * <p>同时打印列结构 —— 检索过滤要按 metadata 字段写条件，事先知道它是 {@code json}
+     * 还是 {@code jsonb} 是有用的（两者对索引与操作符支持不同）。
      */
     @Bean
     public org.springframework.boot.ApplicationRunner vectorTableSelfCheck(

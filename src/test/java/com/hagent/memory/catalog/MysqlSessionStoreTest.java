@@ -13,17 +13,17 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 会话目录 MySQL 实现的测试 —— 盯住<b>三条错了也不会报错</b>的性质。
+ * 会话目录 MySQL 实现的测试 —— 盯住三条错了也不会报错的性质：
  *
  * <ol>
- *   <li><b>已存在的会话不覆盖标题与模式</b>：用户改过的名字不能被下一句话刷回去；
- *       模式一旦确定就不能被请求改掉（否则预算能来回跳 10 倍且事后查不到）；</li>
- *   <li><b>改名成同一个标题仍然算成功</b>：MySQL 的 {@code UPDATE} 影响行数在
- *       "新旧值相同"时是 0，把它当成"会话不存在"会让前端收到 404；</li>
- *   <li><b>按活跃时间倒序</b>：侧栏的顺序全靠它。</li>
+ *   <li>已存在的会话不覆盖标题与模式：用户改过的名字不能被下一句话刷回去；模式一旦确定就不能被请求改掉
+ *       （否则预算能来回跳 10 倍且事后查不到）；</li>
+ *   <li>改名成同一个标题仍然算成功：MySQL 的 {@code UPDATE} 影响行数在"新旧值相同"时是 0，
+ *       当成"会话不存在"会让前端收到 404；</li>
+ *   <li>按活跃时间倒序：侧栏的顺序全靠它。</li>
  * </ol>
  *
- * <p>★ 每个用例用独立会话 ID，结束即清理：本类连的是<b>真实</b>库。
+ * <p>每个用例用独立会话 ID、结束即清理：本类连的是真实库。
  */
 @SpringBootTest(properties = "hagent.memory.chat.circuit-break-seconds=0")
 class MysqlSessionStoreTest {

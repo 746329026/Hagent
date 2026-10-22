@@ -11,61 +11,19 @@ import java.util.Set;
 /**
  * 记忆配置的**早期校验** —— 在环境准备完成后、任何 Bean 创建之前执行。
  *
- * <h2>★ 为什么必须是 EnvironmentPostProcessor（一段真实的踩坑）</h2>
+ * <p>★ 为什么必须是 {@link EnvironmentPostProcessor}：这个校验被实现过三次，前两次都没生效，
+ * 原因是同一条 —— <b>"用依赖关系保证执行顺序"只在那个依赖真能被解析到时才成立</b>。
+ * 而这里要校验的恰恰是"记忆 Bean 到底造不造得出来"：把校验挂在记忆 Bean 的消费者身上，
+ * 顺序保证就建立在一个可能根本不存在的前提上（校验还没轮到，容器已因缺 Bean 失败）。
+ * EnvironmentPostProcessor 是 Spring Boot 真正意义上"最早的机会"，且<b>不依赖任何 Bean</b>。
  *
- * <p>这个校验被实现过三次，前两次都<b>没能生效</b>，值得完整记录：
+ * <p>★ 校验<b>两个</b>键：{@code record-store} 与 {@code context-cache} 是两个角色，
+ * 不是一份数据的三种存法 —— 只校验其中一个，配错就会重新变成静默问题。
+ * 已废弃的旧键 {@code type} 配了要<b>明确报错</b>，而不是被静默忽略。
  *
- * <p><b>第一次</b>：写在 {@code MemoryProperties.afterPropertiesSet()} 里。
- * 结果没执行 —— 因为配置不合法时，所有实现的 {@code @ConditionalOnProperty} 都不匹配，
- * 容器里没有 {@code ConversationMemory}，而 {@code AgentPipeline} 的构造器依赖它，
- * 在更早的阶段就创建失败了。
- *
- * <p><b>第二次</b>：把它做成一个 Bean，并让 {@code AgentPipeline} 依赖它，
- * 想用"依赖关系"保证它先执行。结果<b>仍然没执行</b> ——
- * 因为 {@code AgentPipeline} 的构造器参数里<b>同时</b>需要
- * {@code ConversationMemory}，Spring 解析参数时一旦走到那一个，
- * 发现"这个 Bean 不存在"就<b>直接抛错返回，不会再去创建别的参数</b>。
- *
- * <p>两次的教训是同一条，值得单独记住：<b>"用依赖关系保证执行顺序"只在那个依赖
- * 真能被解析到时才成立</b>。而这里要校验的恰恰是"记忆 Bean 到底造不造得出来" ——
- * 把校验挂在记忆 Bean 的消费者身上，顺序保证就建立在一个可能根本不存在的前提上：
- * 校验还没轮到执行，容器已经先因为缺 Bean 失败了。
- *
- * <p><b>第三次（本类）</b>：改用 {@link EnvironmentPostProcessor} ——
- * 它在 {@code Environment} 准备完成后、**任何 Bean 创建之前**运行。
- * 这是 Spring Boot 提供的、真正意义上"最早的机会"，
- * 也正因为如此，它<b>不依赖任何 Bean</b>：{@code AgentPipeline} /
- * {@code ConversationMemory} 能不能创建出来，与本类无关。
- *
- * <h2>★ 阶段 12：它从 {@code com.hagent.memory} 搬到了这里</h2>
- *
- * <p>它是"启动期配置校验"，一个<b>装配</b>期的东西，而且它<b>一个 memory 类型都不依赖</b>
- * （只读 {@code Environment} 与 {@link MemoryProperties} 的两个常量）。
- * 住在 {@code memory} 包时，它凭空构成了一条 {@code memory → config} 依赖 ——
- * 也就是一个包级环的一半。判据仍是"它是什么种类"，而不是"它讲什么业务"。
- *
- * <h2>★ 第四次修正：接口在 Spring Boot 4.0 换了包</h2>
- *
- * <p>上面写的是"第三次"，这次是<b>包名</b>的修正，与运行时机无关：
- * <pre>
- *   Spring Boot 3.x / 4.0 之前 : org.springframework.boot.env.EnvironmentPostProcessor
- *   Spring Boot 4.0 起（本类） : org.springframework.boot.EnvironmentPostProcessor
- * </pre>
- * 旧包名自 {@code 4.0.0} 起被标注 <b>{@code @Deprecated(forRemoval = true)}</b>。
- * 它现在<b>不会导致编译失败，只会产生弃用警告</b> —— 正因如此容易被忽略。
- *
- * <p>⚠️ <b>配套要改两处</b>，漏一处会静默失效：
- * <ol>
- *   <li>本类的 {@code import}；</li>
- *   <li>{@code META-INF/spring.factories} 里的 <b>key</b>（同样要用新包全名）。</li>
- * </ol>
- *
- * <h2>★ 阶段 7：从校验一个开关变成校验两个</h2>
- *
- * <p>{@code hagent.memory.chat.type}（三选一）已被
- * {@code record-store} 与 {@code context-cache} 取代 —— 因为那是<b>两个角色</b>，
- * 不是一份数据的三种存法。这里必须同步改：
- * <b>只校验旧的 {@code type} 键、或者只校验新的一个键，都会让"配置写错"重新变成静默问题。</b>
+ * <p>★ 包名用的是 Spring Boot 4 的 {@code org.springframework.boot.EnvironmentPostProcessor}
+ * （旧包自 4.0 起 {@code @Deprecated(forRemoval = true)}，只产生警告、不编译失败）。
+ * 改包名时 {@code META-INF/spring.factories} 的 key 必须同步改，漏一处会静默失效。
  */
 @Slf4j
 public class MemoryConfigValidator implements EnvironmentPostProcessor, Ordered {
@@ -118,16 +76,12 @@ public class MemoryConfigValidator implements EnvironmentPostProcessor, Ordered 
     /**
      * ★ 顺序取"最后"（LOWEST_PRECEDENCE），而不是"最先"。
      *
-     * <p><b>这是踩坑之后的修正</b>：最初取 {@code HIGHEST_PRECEDENCE}（最先执行），
-     * 结果本类<b>读不到配置值</b>，误报"不能为空"。
+     * <p>取 {@code HIGHEST_PRECEDENCE} 时本类<b>读不到配置值</b>、误报"不能为空"：
+     * Spring Boot 加载 {@code application.yml} 这件事<b>本身</b>也是由一个
+     * EnvironmentPostProcessor（{@code ConfigDataEnvironmentPostProcessor}）完成的。
      *
-     * <p>原因：Spring Boot 加载 {@code application.yml} 这件事，
-     * <b>本身就是由一个 EnvironmentPostProcessor 完成的</b>
-     * （{@code ConfigDataEnvironmentPostProcessor}）。
-     * 如果我们在它之前运行，Environment 里自然还没有 YAML 里的属性。
-     *
-     * <p>所以正确顺序是"**等配置加载完、但仍在 Bean 创建之前**" ——
-     * 取最大值即可保证在所有内置 post-processor 之后执行。
+     * <p>正确时机是"**等配置加载完、但仍在 Bean 创建之前**" —— 取最大值即可保证在所有
+     * 内置 post-processor 之后执行。
      */
     @Override
     public int getOrder() {

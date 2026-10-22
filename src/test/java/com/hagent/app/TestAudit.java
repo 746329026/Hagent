@@ -9,20 +9,13 @@ import java.util.List;
 /**
  * 测试用的审计存储 + 它的 {@code ObjectProvider}。
  *
- * <h2>★ 为什么需要它（两种测试需求）</h2>
+ * <p>{@link #disabled()} 模拟审计关闭（{@code getIfAvailable()} 返回 null）：管线在
+ * {@code auditStore == null} 时只记 WARN 不写库，而这是真实的生产状态
+ * （{@code hagent.tool.audit.enabled=false}），必须能测。
+ * {@link #recording()} 记录每次 {@code record(...)}，让"写了、写得对不对"可断言。
  *
- * <ul>
- *   <li>{@link #disabled()} —— 模拟"审计被关掉"：{@code getIfAvailable()} 返回 null。
- *       ★ 这条路径<b>必须能测</b>：管线里 {@code auditStore == null} 时只记 WARN 不写库，
- *       而那是一个真实的生产状态（{@code hagent.tool.audit.enabled=false}）；</li>
- *   <li>{@link #recording()} —— 记录每次 {@code record(...)} 调用，
- *       让"审计真的写了、写的内容对不对"可以被断言。</li>
- * </ul>
- *
- * <p><b>为什么用一个手写的 {@code ObjectProvider} 而不是 Mockito</b>：
- * {@code ObjectProvider} 是个接口，这里只需要实现一个方法；
- * 手写实现比 mock 更清楚，也不会在"默认返回值"上产生意外
- * （Mockito 对未 stub 的方法返回 null，恰好等于"审计关闭" —— 那种巧合会让测试意图变模糊）。
+ * <p>手写而非 Mockito：这里只需实现一个方法；且 Mockito 对未 stub 的方法返回 null，
+ * 恰好等于"审计关闭"，那种巧合会让测试意图变模糊。
  */
 final class TestAudit {
 

@@ -31,24 +31,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 记录层 MySQL 实现的专项测试 —— 只测"这个实现独有、且错了不会报错"的性质。
  *
- * <p>对外语义（读写往返、预算截断、会话隔离…）不在这里重复，那些由
- * {@code ConversationMemoryContractTest} 的三个组合覆盖。
+ * <p>对外语义（读写往返、预算截断、会话隔离…）不在这里重复，由
+ * {@code ConversationMemoryContractTest} 的三个组合覆盖。本类盯住四件事：
  *
- * <p>本类盯住四件事：
  * <ol>
- *   <li><b>启动自检的内容</b> —— 表、字符集、索引三者都要被核对；
- *   <li><b>并发追加一条不丢、顺序由 id 保证</b> —— 这是取代"序号 + 唯一键 + 重试"
- *       那套方案的直接证据；</li>
- *   <li><b>{@code extra} 列保持 NULL</b> —— 它是阶段 8 的预留位；</li>
- *   <li><b>读最近 N 条走的是倒序取尾 + 正序返回</b>。</li>
+ *   <li>启动自检的内容 —— 表、字符集、索引三者都要被核对；</li>
+ *   <li>并发追加一条不丢、顺序由自增 id 保证 —— 取代"序号 + 唯一键 + 重试"那套方案的直接证据；</li>
+ *   <li>{@code extra} 列保持 NULL（预留位，当前不该被写入）；</li>
+ *   <li>读最近 N 条走的是倒序取尾 + 正序返回。</li>
  * </ol>
  *
- * <p>★ 每个用例用独立会话 ID，结束即清理：本类连的是<b>真实</b>库。
+ * <p>每个用例用独立会话 ID、结束即清理：本类连的是真实库。
  */
 @SpringBootTest(properties = "hagent.memory.chat.circuit-break-seconds=0")
 class MysqlMessageStoreTest {
 
-    /** ★ 业务主库，必须按名取 —— 见 BusinessDataSourceConfig 的类注释。 */
+    /** 业务主库，必须按名取 —— 见 BusinessDataSourceConfig 的类注释。 */
     @Autowired
     @Qualifier("dataSource")
     private DataSource businessDataSource;
@@ -87,10 +85,9 @@ class MysqlMessageStoreTest {
     @Test
     @DisplayName("★★ 四个线程并发追加同一会话：一条不丢（不靠序号、不靠锁、不靠重试）")
     void concurrentAppendsLoseNothing() throws Exception {
-        // ★ 这条用例的前身抓到了真实缺陷：当时用"读 MAX(seq) + 唯一键 + 撞车重试"，
-        //   2 线程各 3 次就把重试耗尽；换成锁定读又撞上间隙锁死锁。
-        //   最终方案是删掉 seq、改用自增 id 排序 —— 于是并发天然安全。
-        //   现在用 4 × 5 加压：如果"无锁"这个前提不成立，这里会丢数据或报错。
+        // 这条用例的前身抓到过真实缺陷：用"读 MAX(seq) + 唯一键 + 撞车重试"时 2 线程各 3 次就耗尽重试，
+        // 换成锁定读又撞上间隙锁死锁；最终删掉 seq、改用自增 id 排序，并发天然安全。
+        // 现在 4 × 5 加压：如果"无锁"这个前提不成立，这里会丢数据或报错。
         int threads = 4;
         int perThread = 5;
         int expected = threads * perThread;

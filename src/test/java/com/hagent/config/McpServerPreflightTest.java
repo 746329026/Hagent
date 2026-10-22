@@ -14,7 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 阶段 16：<b>MCP 前置检查</b>（{@link McpServerPreflight}）。
+ * <b>MCP 前置检查</b>（{@link McpServerPreflight}）。
  *
  * <p>它防的是一个实测到的具体失败：
  * <pre>

@@ -1,17 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  时间 MCP Server —— 阶段 16 的【样板】。
+  时间 MCP Server：独立 Spring Boot 应用（非 web），通过 stdio 对外提供 getCurrentTime 工具。
+  Hagent 主应用作为 MCP 客户端，配置拉起它并把工具交给模型。
 
-  【它是什么】
-    一个独立的 Spring Boot 应用（非 web），通过 stdio 对外提供 MCP 工具 getCurrentTime。
-    本项目（Hagent 主应用）作为 MCP 客户端，被配置拉起它、并把它的工具交给模型。
-
-  【为什么它是独立项目，而不是主应用里的一个类】
-    ① 主应用只做客户端：把 server 依赖放进主应用，会让主应用自己也变成 server；
+  为什么是独立项目而不是主应用里的一个类：
+    ① 主应用只做客户端：引入 server starter 会让主应用自己也变成 server；
     ② 边界清晰：server 看不到主应用的知识库 / 记忆 / 数据库；
-    ③ 可替换：换语言、换实现只改 application-mcp.yml 里的一行命令。
+    ③ 可替换：换语言/换实现只改 application-mcp.yml 里的一行命令。
 
-  【版本】与主应用对齐：Spring Boot 4.1.1 / Spring AI 2.0.1（都是 GA，不用里程碑版）
+  版本与主应用对齐：Spring Boot 4.1.1 / Spring AI 2.0.1（GA）。
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -37,11 +34,7 @@
     </properties>
 
     <dependencies>
-        <!--
-          stdio 版 MCP server starter（不是 -webmvc）。
-          它带三样东西：server 自动配置、MCP Java SDK、以及 @McpTool 注解扫描。
-          装上它之后，只要有一个对象带 @McpTool 方法，就会被登记成 MCP 工具。
-        -->
+        <!-- stdio 版 MCP server starter：server 自动配置 + MCP Java SDK + @McpTool 注解扫描 -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-mcp-server</artifactId>

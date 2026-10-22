@@ -17,42 +17,25 @@ import java.util.regex.Pattern;
 /**
  * 记录层的 MySQL 实现 —— 本项目的<b>权威</b>会话存储。
  *
- * <h2>★★ 一个真实的装配陷阱：不要按类型注入 {@code JdbcTemplate}</h2>
+ * <h2>一个真实的装配陷阱：不要按类型注入 {@code JdbcTemplate}</h2>
  *
- * <p>本类<b>刻意</b>接收 {@link DataSource} 而不是 {@code JdbcTemplate}。原因是项目里
- * 存在两个数据源（业务主库 MySQL、以及 pgvector 的 PostgreSQL），而：
- * <pre>
- *   Spring Boot 的 JdbcTemplateAutoConfiguration 带 @ConditionalOnMissingBean(JdbcOperations.class)
- *   而 VectorStoreConfig 的 pgVectorJdbcTemplate 是【用户配置】、先于【自动配置】注册
- *   → 条件不满足 → 自动配置【退避】→ 容器里没有指向 MySQL 的 JdbcTemplate
- *   → 此时按类型注入 JdbcTemplate，拿到的是 pgVectorJdbcTemplate（指向 PostgreSQL）
- * </pre>
- * 后果是"<b>你以为在写 MySQL，其实写进了向量库</b>"—— 而症状只是
- * "表 chat_message 不存在"，很容易被误判成"忘了建表"。
+ * <p>本类<b>刻意</b>接收 {@link DataSource} 而不是 {@code JdbcTemplate}。项目里存在两个数据源
+ * （业务主库 MySQL、pgvector 的 PostgreSQL），而 {@code JdbcTemplateAutoConfiguration} 带
+ * {@code @ConditionalOnMissingBean(JdbcOperations.class)}，{@code VectorStoreConfig} 的
+ * pgVectorJdbcTemplate 又先于自动配置注册 → 自动配置退避 → 容器里没有指向 MySQL 的 JdbcTemplate。
+ * 此时按类型注入拿到的是<b>指向 PostgreSQL</b> 的那个，症状只是"表 chat_message 不存在"，
+ * 很容易被误判成"忘了建表"（真实后果是"以为在写 MySQL，其实写进了向量库"）。
+ * 所以由调用方用 {@code @Qualifier("dataSource")} <b>按名字</b>取业务主库。
  *
- * <p>所以这里由调用方（{@code MemoryConfig}）用
- * {@code @Qualifier("dataSource")} <b>按名字</b>取业务主库。
+ * <h2>为什么本类没有"序号生成"与"撞车重试"</h2>
  *
- * <h2>★★ 为什么本类没有"序号生成"与"撞车重试"</h2>
+ * <p>它<b>曾经有</b>一列会话内序号 {@code seq} + 唯一键：先读 {@code MAX(seq)} 再插入，撞车就重试。
+ * 这条路被实测推翻了 —— 普通读在 REPEATABLE READ 下是一致性读、不加锁，并发事务必然读到同一个
+ * MAX；改成锁定读 {@code FOR UPDATE} 则在空区间上取间隙锁、与 INSERT 的插入意向锁死锁。
+ * 而 {@code seq} 提供的属性（"无洞序号"）<b>没有任何消费者</b>，真正需要的只是<b>顺序</b>，
+ * 自增主键 {@code id} 天然提供顺序、无竞态、无锁。
  *
- * <p>它<b>曾经有</b>：表上有一列 {@code seq}（会话内序号）+ 唯一键，
- * 追加时先读 {@code MAX(seq)} 再插入，撞车就重读重试。那段代码被实测推翻了：
- * <ul>
- *   <li><b>普通读 + 重试</b>：REPEATABLE READ 下普通读是<i>一致性读、不加锁</i>，
- *       并发事务必然读到同一个 MAX。实测 2 线程各 3 次追加就把 3 次重试全部耗尽，
- *       报"本轮未落库"；</li>
- *   <li><b>锁定读 FOR UPDATE</b>：空区间上取<i>间隙锁</i>，而 INSERT 又要申请插入意向锁
- *       → 经典死锁。实测直接抛 {@code CannotAcquireLockException}。</li>
- * </ul>
- *
- * <p>而 {@code seq} 提供的属性（"会话内第 N 条"、"无洞"）<b>没有任何消费者</b>——
- * 真正需要的只是<b>顺序</b>，而自增主键 {@code id} 天然提供顺序、无竞态、无锁。
- * 于是 {@code seq} 与它的唯一键一起删掉，本类也就没有了那两条失败路径。
- * 完整论证见 {@code src/main/resources/db/chat_message.sql} 的注释
- * （那是一段"为一个没人要的属性付了锁与死锁代价"的记录）。
- *
- * <p><b>可迁移的判据</b>：引入一个"更规整"的属性（无洞序号、有序编号…）之前，
- * 先问<b>谁消费它</b>；如果答案是"排序能用上"，那已经有更好的东西在提供它了。
+ * <p>可迁移的判据：引入一个"更规整"的属性（无洞序号、有序编号…）之前，先问<b>谁消费它</b>。
  */
 @Slf4j
 public class MysqlMessageStore implements MessageStore {
@@ -63,13 +46,13 @@ public class MysqlMessageStore implements MessageStore {
     /** 读"某会话最近 N 条"要走的索引名（启动自检会核对它存在）。 */
     private static final String CONVERSATION_INDEX = "idx_conv_id";
 
-    /** 阶段 14 后补：历史回放按轮次批量取账要走它。 */
+    /** 历史回放按轮次批量取账要走的索引（启动自检会核对它存在）。 */
     private static final String TURN_INDEX = "idx_msg_turn";
 
-    /** 阶段 10 新增的思考列名（启动自检会核对它存在）。 */
+    /** 思考内容列名（启动自检会核对它存在）。 */
     private static final String REASONING_COLUMN = "reasoning";
 
-    /** 阶段 14 后补的轮次列（启动自检会核对它存在）。 */
+    /** 轮次列（启动自检会核对它存在）。 */
     private static final String TURN_ID_COLUMN = "turn_id";
 
     private static final String DDL_HINT = """
@@ -104,9 +87,8 @@ public class MysqlMessageStore implements MessageStore {
         this.jdbc = new JdbcTemplate(dataSource);
         this.tx = new TransactionTemplate(transactionManager);
 
-        // ★ 启动自检：表不存在 / 字符集不对 / 索引缺失 → 启动就失败，
-        //   而不是等第一次写入（或第一次慢查询）才发现。
-        //   阶段 6 的坑：两个开关都为假时框架既不建表也不校验，一路绿灯，直到第一次写入才炸。
+        // 启动自检：表不存在 / 字符集不对 / 索引或列缺失 → 启动就失败，
+        // 而不是等第一次写入（或第一次慢查询）才发现。
         verifySchemaOrThrow();
     }
 
@@ -127,7 +109,7 @@ public class MysqlMessageStore implements MessageStore {
         }
         // 走 idx_conv_id 的反向扫描（二级索引自动附加主键，实际按 (conversation_id, id) 有序），
         // 只读 N 行 —— 不随会话长度增长。
-        // ★ 排序用 id 而不是"会话内序号"：id 是自增主键，写入顺序即会话顺序，且无需任何锁。
+        // 排序用 id 而不是"会话内序号"：id 是自增主键，写入顺序即会话顺序，且无需任何锁。
         List<MessageCodec.StoredMessage> rows = jdbc.query(
                 "SELECT role, content, reasoning, turn_id FROM " + table
                         + " WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
@@ -139,22 +121,19 @@ public class MysqlMessageStore implements MessageStore {
         // SQL 按 id 倒序取"最近 N 条"，但要按时间正序交回调用方
         List<MessageCodec.StoredMessage> chronological = new ArrayList<>(rows);
         Collections.reverse(chronological);
-        // ★ 本层不做 token 预算裁剪（那是门面的事）；未知类型由 fromStoredList 记录并跳过
+        // 本层不做 token 预算裁剪（那是门面的事）；未知类型由 fromStoredList 记录并跳过
         return MessageCodec.fromStoredList(chronological);
     }
 
     /**
      * 读出该会话的<b>全部</b>消息（时间正序）。
      *
-     * <p><b>唯一消费者是给前端的"历史回放"</b>（{@code GET /chat/sessions/{id}/messages}），
-     * 与 {@link #readLatest} 的分工是：
-     * <pre>
-     *   readLatest(n)  → 给【模型】的上下文，按预算截断，越大越慢
-     *   readAll()      → 给【用户】的完整记录，不截断，因为它就是"记录"本身
-     * </pre>
-     * 所以这里<b>刻意不做分页</b>：分页要游标、要"下一页"的交互，而当前没有消费者需要它。
-     * 会话再长也只是几万行文本（一次 HTTP 响应能装下），
-     * 真需要分页时再加一个带 {@code afterId} 的重载即可 —— 表结构不用动（id 天然是游标）。
+     * <p>唯一消费者是给前端的"历史回放"，与 {@link #readLatest} 的分工：
+     * {@code readLatest(n)} 给模型（按预算截断），{@code readAll()} 给用户（不截断，
+     * 它本身就是记录）。
+     *
+     * <p>所以这里<b>刻意不做分页</b>：分页要游标、要"下一页"的交互，而当前没有消费者需要它。
+     * 真需要时加一个带 {@code afterId} 的重载即可 —— 表结构不用动（id 天然是游标）。
      */
     @Override
     public List<Message> readAll(String conversationId) {
@@ -230,9 +209,8 @@ public class MysqlMessageStore implements MessageStore {
         List<Object[]> batchArgs = new ArrayList<>(messages.size());
         for (Message message : messages) {
             MessageCodec.StoredMessage stored = MessageCodec.toStored(message);
-            // ★ 阶段 10：reasoning 与 content 同一行 —— 一个回合就是一行，
-            //   思考是该回合的附属事实，拆表只会让"读一个回合"变成两次查询。
-            // ★ 阶段 14：turn_id 同理（它让历史回放能找回那一轮的账）。
+            // reasoning 与 content 同一行 —— 一个回合就是一行，思考（以及 turn_id）
+            // 都是该回合的附属事实，拆表只会让"读一个回合"变成两次查询。
             batchArgs.add(new Object[]{conversationId, stored.type(), stored.text(),
                     stored.reasoning(), stored.turnId()});
         }
@@ -273,11 +251,10 @@ public class MysqlMessageStore implements MessageStore {
 
     /**
      * 启动自检：表必须存在、{@code content} 必须是 utf8mb4、
-     * 读历史要用的索引与阶段 10 的 {@code reasoning} 列必须在。
+     * 读历史要用的索引与 {@code reasoning} / {@code turn_id} 列必须在。
      *
-     * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 ——
-     * 与 {@code VectorStoreConfig.vectorTableSelfCheck}、
-     * {@code MemoryConfigValidator} 是同一立场（决策 8：不静默降级）。
+     * <p>不符就<b>让应用起不来</b>并打印可直接执行的修法 —— 与 {@code MemoryConfigValidator}
+     * 等是同一立场：<b>不静默降级</b>（表缺失的表现是"历史永远是空的"，而它不会报错）。
      */
     private void verifySchemaOrThrow() {
         try {

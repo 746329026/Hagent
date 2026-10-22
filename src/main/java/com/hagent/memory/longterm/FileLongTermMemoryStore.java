@@ -34,34 +34,27 @@ import java.util.stream.Stream;
  *   mem-3f2a9c1b.md               一条记忆（frontmatter + 正文）
  * </pre>
  *
- * <h2>★ 文件名为什么是标题的哈希，而不是标题本身</h2>
+ * <h2>文件名为什么是标题的哈希，而不是标题本身</h2>
  *
- * <p>标题来自<b>模型</b>。若直接用它做文件名：
- * <ul>
- *   <li>{@code ../../application.yml} 这类标题就是一次<b>目录穿越</b>写入；</li>
- *   <li>中文/空格/引号在 Windows 上还有一批不可见字符要处理。</li>
- * </ul>
+ * <p>标题来自<b>模型</b>。直接拿它做文件名的话，{@code ../../application.yml} 这类标题就是一次
+ * <b>目录穿越</b>写入，中文/空格/引号在 Windows 上还有一批不可见字符要处理。
  * 用 {@code sha256Hex(title)} 的前 8 位十六进制当文件名，这两类问题<b>不是被校验挡住，
  * 而是根本构造不出来</b>（结果只可能是 {@code [0-9a-f]}）。
  *
- * <p>★ 顺带的好处：同名 → 同哈希 → <b>同一个文件</b> ⇒ upsert 天然成立，
- * 不需要"先查有没有、再决定新增还是改"。
+ * <p>顺带的好处：同名 → 同哈希 → <b>同一个文件</b> ⇒ upsert 天然成立，不需要"先查有没有"。
  *
- * <p>⚠️ 代价要写清楚：8 位十六进制的碰撞概率不是零（约 2^-32），
- * 那时两条**不同标题**会落到同一个文件、互相覆盖。在"一个用户几十条记忆"的量级下
- * 这个概率可以忽略，但它不是零 —— 所以这里如实记下来，而不是假装不存在。
+ * <p>⚠️ 代价：8 位十六进制的碰撞概率不是零（约 2^-32），那时两条<b>不同标题</b>会落到同一个文件
+ * 互相覆盖。在"一个用户几十条记忆"的量级下可忽略，但不是零 —— 如实记下来，而不是假装不存在。
  *
- * <h2>★ 为什么 {@code MEMORY.md} 是"物化产物"而不是真相来源</h2>
+ * <h2>为什么 {@code MEMORY.md} 是"物化产物"而不是真相来源</h2>
  *
- * <p>真相是那些 {@code mem-*.md}（每条正文都在里面）。索引每次写操作后<b>重新生成</b>，
- * 于是它**不可能与条目漂移**。若把索引当权威（只增删索引、正文另存），
- * 两边迟早对不上，而症状是"索引里有、点进去没有"。
+ * <p>真相是那些 {@code mem-*.md}。索引每次写操作后<b>重新生成</b>，于是它不可能与条目漂移。
+ * 若把索引当权威（只增删索引、正文另存），两边迟早对不上，而症状是"索引里有、点进去没有"。
  *
- * <h2>★ 并发</h2>
+ * <h2>并发</h2>
  *
  * <p>单 JVM 内用一把锁串行化<b>写</b>（读不加锁：文件是原子替换的，读到的要么旧要么新）。
- * 与 {@code FileMessageStore} 同一立场 —— 本实现是"零基础设施可用"的兜底，
- * 不是分布式存储。
+ * 与 {@code FileMessageStore} 同一立场 —— 本实现是"零基础设施可用"的兜底，不是分布式存储。
  */
 @Slf4j
 public class FileLongTermMemoryStore implements LongTermMemoryStore {
@@ -76,10 +69,10 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
     /**
      * 允许直接当目录名的 userId 形态。
      *
-     * <p>★ 为什么必须校验：{@code userId} 来自请求头里的 token，是<b>客户端可控</b>的。
-     * 不校验就等于允许调用方把记忆写进任意目录（{@code ..} / 绝对路径 / 盘符）。
-     * 不合法时退化成哈希值，而不是拒绝请求 —— 拒绝会让"奇怪但合法的 userId"用不了，
-     * 而哈希后每个 userId 仍然有<b>独立且确定</b>的目录。
+     * <p>必须校验：{@code userId} 来自请求头里的 token，是<b>客户端可控</b>的，不校验就等于允许
+     * 调用方把记忆写进任意目录（{@code ..} / 绝对路径 / 盘符）。不合法时退化成哈希值，
+     * 而不是拒绝请求 —— 拒绝会让"奇怪但合法的 userId"用不了，而哈希后每个 userId
+     * 仍然有<b>独立且确定</b>的目录。
      */
     private static final Pattern SAFE_SEGMENT = Pattern.compile("[A-Za-z0-9._-]{1,64}");
 
@@ -101,9 +94,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
                 rootDir, settings.getIndexMaxChars(), settings.getContentMaxChars());
     }
 
-    // ========================================================================
-    // 读
-    // ========================================================================
+    // ==================== 读 ====================
 
     @Override
     public List<MemoryEntry> list(UserContext user) {
@@ -132,9 +123,9 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         if (digest.length() <= settings.getIndexMaxChars()) {
             return digest;
         }
-        // ★ 走到这里说明"上限被调小过"，而历史条目还按老上限存的。
-        //   注入超长索引的代价是吃掉对话历史预算 —— 所以这里截断，但**必须留日志**，
-        //   否则就成了"静默丢弃用户记忆"。
+        // 走到这里说明"上限被调小过"，而历史条目还按老上限存的。
+        // 注入超长索引的代价是吃掉对话历史预算 —— 所以这里截断，但【必须留日志】，
+        // 否则就成了"静默丢弃用户记忆"。
         List<MemoryEntry> kept = new ArrayList<>();
         for (MemoryEntry entry : visible) {
             List<MemoryEntry> candidate = new ArrayList<>(kept);
@@ -151,9 +142,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         return renderForPrompt(kept);
     }
 
-    // ========================================================================
-    // 写
-    // ========================================================================
+    // ==================== 写 ====================
 
     @Override
     public SaveResult save(String title, String content, UserContext user) {
@@ -252,9 +241,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         }
     }
 
-    // ========================================================================
-    // 渲染
-    // ========================================================================
+    // ==================== 渲染 ====================
 
     /**
      * 注入 prompt 的索引块。
@@ -303,9 +290,7 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
                 .thenComparing(MemoryEntry::title);
     }
 
-    // ========================================================================
-    // 文件层
-    // ========================================================================
+    // ==================== 文件层 ====================
 
     /**
      * 用户目录。
@@ -332,12 +317,12 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
         return FILE_PREFIX + sha256Hex(title).substring(0, 8) + FILE_SUFFIX;
     }
 
-    /** 标题指纹 —— 复用 {@code common.Fingerprints}（协议第 13 条：不另写一份 MessageDigest）。 */
+    /** 标题指纹 —— 复用 {@code common.Fingerprints}，不另写一份 MessageDigest。 */
     private static String sha256Hex(String input) {
         return com.hagent.common.Fingerprints.identifier(input);
     }
 
-    /** 标题的规范化：压成一行 + 截断。**唯一**的标题清洗点（读写都用它）。 */
+    /** 标题的规范化：压成一行 + 截断。<b>唯一</b>的标题清洗点（读写都用它）。 */
     private String cleanTitle(String title) {
         return Texts.truncateByCodePoints(
                 Texts.singleLine(title), settings.getTitleMaxChars(), "…");
@@ -454,17 +439,14 @@ public class FileLongTermMemoryStore implements LongTermMemoryStore {
     }
 
     /**
-     * 原子写入：临时文件 → {@code ATOMIC_MOVE}。
+     * 原子写入：临时文件 → {@code ATOMIC_MOVE}（收口在 {@code common.AtomicWrites}）。
      *
-     * <p>与 {@code FileMessageStore} / {@code FileSessionStore} 同一做法：
-     * 直接往目标文件写，写到一半进程被杀就留下<b>半截文件</b>，
-     * 而半截的 frontmatter 会让这条记忆永久读不出来。
+     * <p>直接往目标文件写，写到一半进程被杀就留下<b>半截文件</b>，而半截的 frontmatter
+     * 会让这条记忆永久读不出来。
      *
-     * <p>★ 显式 {@code UTF_8}：Windows 默认字符集是 GBK（协议 §9.4 第 3 条）——
-     * 换台机器读同一份记忆就是乱码，且不可逆。
+     * <p>显式 {@code UTF_8}：Windows 默认字符集是 GBK —— 换台机器读同一份记忆就是乱码，且不可逆。
      */
     private void writeAtomically(Path target, String content) {
-        // ★ 阶段 12：三份原子写收口到 common.AtomicWrites（唯一实现）。
         if (!com.hagent.common.AtomicWrites.writeString(target, content)) {
             log.warn("[长期记忆] ATOMIC_MOVE 不被支持，已降级为普通替换（原子性无保障）：{}", target);
         }

@@ -17,53 +17,22 @@ import java.util.List;
 /**
  * 知识库检索服务 —— 把"一个问题和一个人"变成"若干条可引用的片段"。
  *
- * <h2>★ 它产出什么、谁消费（协议第 7 条要求的答案）</h2>
+ * <p>只做"检索"这一步：产出 {@code List<RetrievedChunk>}，由 {@code AgentPipeline} 的第③步
+ * 取用并交给 {@code PromptBuilder} 拼进 prompt —— 本类不接触 prompt、不参与编排。
+ * 管道是直线（一次请求只调用一次），故本类<b>不做</b>"重复调用跳过"的幂等：
+ * 做在服务里只会掩盖"调用位置错了"。
  *
- * <p>产出 {@code List<RetrievedChunk>}；消费者是 {@code AgentPipeline} 的第③步，
- * 它把结果交给 {@code PromptBuilder} 拼进 prompt。
- * <b>注意这三者的分工</b>：{@code AgentPipeline} 本身<b>不接触 prompt</b>
- * （它只按固定顺序调度，"重建消息列表"这件事全在 {@code PromptBuilder} 里；
- * 片段是作为方法参数传过去的，不再经过任何 {@code context}）——
- * 而<b>本类不接触 prompt、不参与编排</b>，
- * 它是纯函数式的一步："检索"。
- *
- * <h2>★ 阶段 10 修：检索失败<b>抛出</b>，不再降级成空列表</h2>
- *
- * <p><b>旧做法</b>：失败 → 记 ERROR → {@code return List.of()}。
- * 理由是"检索不在关键路径上，抛了会让整个对话 500"。
- * 那条理由本身没错，但它<b>换错了地方降级</b>：空列表到了上层，
- * 与"真的没命中"完全同形，于是工具回"没找到"、模型答"知识库中未找到相关内容" ——
- * <b>把系统故障说成了"资料不存在"</b>。实测时用户问的年假就在库里，却被答"未找到"。
- *
- * <p><b>现在</b>：失败 → 记 ERROR → 抛 {@link RetrievalUnavailableException}。
- * "对话不 500"这条性质<b>一点没丢</b>，因为降级的位置从本类上移到了
- * {@code KnowledgeRetrievalTool}：它接住异常，回一句
- * "检索不可用（系统故障，不是没有相关资料）"给模型，对话照常继续。
- *
- * <p>⇒ 可迁移的判据：<b>降级要发生在"能说出降级原因"的那一层。</b>
- * 在只看得到 {@code List} 的层里降级，原因就永久丢失了。
- *
- * <h2>★ "检索失败"与"检索没命中"的两条通道</h2>
+ * <h2>★ "检索失败"与"检索没命中"必须可区分</h2>
  *
  * <ul>
  *   <li><b>没命中</b> → 返回<b>空列表</b>（这是结果，DEBUG 一行）；</li>
- *   <li><b>失败</b> → <b>抛异常</b>（这是故障，ERROR 带堆栈；异常自己也带着查询串）。</li>
+ *   <li><b>故障</b> → <b>抛 {@link RetrievalUnavailableException}</b>（ERROR 带堆栈与查询串）。</li>
  * </ul>
- * 早先的版本说"两者在日志里能区分"，但<b>调用方看不到日志</b> ——
- * 能区分的不算区分，<b>能被上层据以改变行为的才算</b>。
  *
- * <h2>★ 单次调用，不含幂等</h2>
- *
- * <p>阶段 8 之后管道是一条<b>直线</b>（顺序就是 {@code AgentPipeline#run} 的代码行序），
- * 检索是其中的第③步：一次请求只执行一次，物理上不可能重复。
- * 所以本类<b>不做</b>"重复调用时跳过"的处理 ——
- * 把幂等做在服务里会掩盖"调用位置错了"这件事。
- *
- * <p>原先 advisor 里那道"context 中已有片段就跳过"的检查，
- * 已随 {@code ChatClientRequest.context()} 这套机制一起删除：
- * 它防的前提是"切面会被框架的工具循环跑 N 次"，而直连 {@code ChatModel} 之后
- * 这个前提<b>失去了对象</b>（工具循环将来由管道自己驱动，
- * 那时的重复调用会是我们显式写出来的，不再需要一个防御性检查去兜）。
+ * <p>失败不能降级成空列表：空列表到了上层与"真的没命中"完全同形，工具会回"没找到"、
+ * 模型会答"知识库中未找到相关内容" —— <b>把系统故障说成了"资料不存在"</b>。
+ * 降级改放在 {@code KnowledgeRetrievalTool}：它接住异常，回"检索不可用（系统故障，不是没有
+ * 相关资料）"，对话照常继续、不会 500。可迁移的判据：<b>降级要发生在"能说出降级原因"的那一层。</b>
  */
 @Slf4j
 @Component
@@ -79,7 +48,7 @@ public class KnowledgeSearch {
      *
      * @param query 检索用的问题文本（通常是本次用户消息）
      * @param user  调用方身份 —— 决定 {@code level IN (...)} 的取值
-     * @return 命中片段（可能为空，<b>不会为 null</b>）；失败时同样返回空列表
+     * @return 命中片段（可能为空，<b>不会为 null</b>）；检索故障时抛异常
      */
     public List<RetrievedChunk> retrieve(String query, UserContext user) {
         if (!settings.enabled()) {

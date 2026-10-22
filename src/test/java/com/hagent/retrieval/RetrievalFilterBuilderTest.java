@@ -18,25 +18,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * <b>权限过滤条件的正确性</b> —— 本项目里"错了最严重"的一处逻辑。
+ * 权限过滤条件的正确性 —— 本项目里"错了最严重"的一处逻辑。
  *
- * <h2>★ 为什么必须双向验证（只验一半等于没验）</h2>
- *
- * <p>过滤条件有两个可能的方向，而且<b>都"能跑通"</b>：
- * <pre>
- *   方向正确：匿名只能搜到 PUBLIC          → 功能正常
- *   方向错误：匿名能搜到全部（含 CONFIDENTIAL）→ 检索照样返回结果、日志照样正常，
- *                                            只是越权内容进了 prompt 并被模型复述
- * </pre>
- * 后者不会抛异常、不会有 WARN，唯一的发现方式是"用低权限身份去检索一条已知的机密内容"。
- *
- * <p>所以本类同时验证：
- * <ol>
- *   <li><b>允许的密级清单</b>（哪些在过滤条件里）；</li>
- *   <li><b>生成的 SQL 形态</b>（走 jsonpath 而不是 {@code @>}/{@code ?} ——
- *       向量表的 metadata 列实测是 {@code json} 而不是 {@code jsonb}，
- *       用 jsonb 专属操作符会直接报错）。</li>
- * </ol>
+ * <p>过滤条件有两个方向，而且都"能跑通"：方向错了（匿名能搜到 CONFIDENTIAL）不抛异常、没有 WARN，
+ * 越权内容照样进 prompt 并被模型复述，唯一发现方式是用低权限身份去检索一条已知机密内容。
+ * 所以本类同时验证：① 允许的密级清单；② 生成的 SQL 形态走 jsonpath 而不是 {@code @>}/{@code ?}
+ * （向量表 metadata 列是 {@code json}，jsonb 专属操作符会直接报错）。
  */
 class RetrievalFilterBuilderTest {
 
@@ -49,9 +36,7 @@ class RetrievalFilterBuilderTest {
         return converter.convertExpression(builder.build(clearance));
     }
 
-    // ========================================================================
     // 一、允许的密级清单（规则本身）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 匿名（PUBLIC 许可）→ 只能看到 PUBLIC，看不到 INTERNAL/CONFIDENTIAL")
@@ -82,9 +67,7 @@ class RetrievalFilterBuilderTest {
         assertThat(sql).contains("PUBLIC").contains("INTERNAL").contains("CONFIDENTIAL");
     }
 
-    // ========================================================================
     // 二、角色映射到许可等级（"双字典"陷阱的防线）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 三个角色各自的可见范围（角色→许可的映射在枚举里，不存在第二本字典）")
@@ -103,9 +86,7 @@ class RetrievalFilterBuilderTest {
                 .containsExactly(AccessLevel.PUBLIC, AccessLevel.INTERNAL, AccessLevel.CONFIDENTIAL);
     }
 
-    // ========================================================================
     // 三、生成的 SQL 形态（json 列的兼容性）
-    // ========================================================================
 
     @Test
     @DisplayName("★ 生成的 SQL 不含 jsonb 专属操作符（@> 与 ? 在 json 列上会直接报错）")
@@ -123,15 +104,9 @@ class RetrievalFilterBuilderTest {
     @Test
     @DisplayName("★★ in 必须渲染成 OR 链，绝不能渲染成数组比较（后者恒为假、检索永远返回空）")
     void inRendersAsOrChainNotArrayComparison() {
-        // ★★★ 这条断言是本次开发中真实踩到的坑固化下来的：
-        //   FilterExpressionBuilder.in(String, List) 与 in(String, Object...) 生成的 SQL 不同，
-        //   而错的那个【不报错】—— 查询正常执行，只是一条都不命中。
-        //
-        //     正确： ($."level" == "PUBLIC" || $."level" == "INTERNAL")
-        //     错误： ($."level" == ["PUBLIC","INTERNAL"])      ← 字符串比数组字面量 → 恒 false
-        //
-        //   原有的 RetrievalFilterSqlTest 只断言了"不含 @> 与 ?"，没有核对渲染结果，
-        //   所以完全没拦住它。这里补上。
+        // in(String, List) 与 in(String, Object...) 渲染不同，而错的那个【不报错】—— 查询正常执行，一条都不命中：
+        //   正确： ($."level" == "PUBLIC" || $."level" == "INTERNAL")
+        //   错误： ($."level" == ["PUBLIC","INTERNAL"])   ← 字符串比数组字面量，恒 false
         String sql = sqlFor(AccessLevel.INTERNAL);
 
         assertThat(sql)
@@ -177,9 +152,7 @@ class RetrievalFilterBuilderTest {
         assertThat(report.toString()).contains(DocumentMetadata.FIELD_LEVEL);
     }
 
-    // ========================================================================
     // 四、空清单：明确拒绝，不产出"无害的空条件"
-    // ========================================================================
 
     @Test
     @DisplayName("★ 许可等级为 null → 抛异常，而不是生成「不过滤」（那等于全量可见）")

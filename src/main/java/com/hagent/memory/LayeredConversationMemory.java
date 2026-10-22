@@ -11,39 +11,36 @@ import java.util.function.Consumer;
 /**
  * 会话记忆的<b>门面</b> —— {@link ConversationMemory} 的唯一实现，把"记录层"与"上下文层"组合起来。
  *
- * <h2>★ 为什么要有这一层</h2>
+ * <h2>为什么要有这一层</h2>
  *
- * <p>{@code AgentPipeline} 依赖 {@link ConversationMemory} 这一个抽象，而它背后是<b>两个角色</b>：
+ * <p>{@code AgentPipeline} 只依赖 {@link ConversationMemory} 一个抽象，而它背后是<b>两个角色</b>：
  * <ul>
- *   <li>{@link MessageStore} —— <b>对话记录</b>：权威、完整、永久（用户刷新页面要看）；</li>
- *   <li>{@link ConversationContextCache} —— <b>模型上下文</b>：有损、易失、可重建（模型这次要用的）。</li>
+ *   <li>{@link MessageStore} —— 对话记录：权威、完整、永久（用户刷新页面要看）；</li>
+ *   <li>{@link ConversationContextCache} —— 模型上下文：有损、易失、可重建（模型这次要用的）。</li>
  * </ul>
+ * 两者需求正好相反，所以不能做成"靠配置二选一的两种实现"。本类把"谁先谁后、失败怎么办"
+ * 收在<b>一处</b>，于是管线零改动。
  *
- * <p>两者的需求正好相反，所以<b>不能</b>做成"靠配置二选一的两种实现"——
- * 那是阶段 5 的抽象，装不下这两层。本类把"谁先谁后、失败怎么办"收在<b>一处</b>，
- * 于是管线零改动。
- *
- * <h2>★ 三条本类负责守住的性质</h2>
+ * <h2>三条本类负责守住的性质</h2>
  *
  * <ol>
  *   <li><b>先记录层、后上下文层</b> ⟹ 不变量「<b>上下文永不比记录新</b>」。
  *       破坏它的后果是"模型知道、用户刷新却看不到"—— 最难排查的一类不一致；</li>
  *   <li><b>读先上下文、miss 才回源记录层</b>。反过来的话上下文层就白做了；</li>
- *   <li><b>写失败分级</b>：记录层失败 = ERROR（但<b>不影响本次响应</b> ——
- *       模型回复已经产生、token 已经花了，为写库失败丢掉它是双重损失）；
- *       上下文层失败 = WARN（可从记录层重建）。</li>
+ *   <li><b>写失败分级</b>：记录层失败 = ERROR（但<b>不影响本次响应</b> —— 模型回复已产生、
+ *       token 已花，为写库失败丢掉它是双重损失）；上下文层失败 = WARN（可从记录层重建）。</li>
  * </ol>
  *
- * <h2>★ 熔断：每层各一个</h2>
+ * <h2>熔断：每层各一个</h2>
  *
- * <p>某层挂掉时，若不熔断，<b>每个请求都会白等一次连接超时</b>
- * （Redis 3s / MySQL 5s）—— 一次对话从 1 秒变成 4–8 秒，<b>故障期体验反而更差</b>。
- * 所以每层各带一个 {@link FailureCircuit}：失败后静默 N 秒，期间直接走降级路径。
+ * <p>某层挂掉时若不熔断，<b>每个请求都会白等一次连接超时</b>（Redis 3s / MySQL 5s）——
+ * 一次对话从 1 秒变成 4–8 秒，<b>故障期体验反而更差</b>。所以每层各带一个
+ * {@link FailureCircuit}：失败后静默 N 秒，期间直接走降级路径。
  *
  * <p>注意 <b>clear / delete 不受熔断影响</b>：那是用户明确要求"把数据删掉"，
  * 不该因为"这一层刚才失败过"就跳过 —— 跳过会让用户继续看到已被要求删除的内容。
  *
- * @see MessageStore 记录层的定位说明（含"两层为什么不是两种存法"）
+ * @see MessageStore 记录层的定位说明
  */
 @Slf4j
 public class LayeredConversationMemory implements ConversationMemory {
@@ -76,7 +73,7 @@ public class LayeredConversationMemory implements ConversationMemory {
                 List<Message> cached = contextCache.get(conversationId, limit);
                 contextCircuit.recordSuccess();
                 if (cached != null) {
-                    // ★ 本层存"原始消息"，裁剪在这里统一做（裁剪规则只有 MemoryTrimmer 一处）
+                    // 本层存"原始消息"，裁剪在这里统一做（裁剪规则只有 MemoryTrimmer 一处）
                     return MemoryTrimmer.trim(cached, budget);
                 }
             } catch (Exception e) {
@@ -138,8 +135,8 @@ public class LayeredConversationMemory implements ConversationMemory {
             recordCircuit.recordFailure();
             log.error("[记忆] ★ 记录层写入失败，本轮【未落库】—— 用户将永久看不到这一轮：会话={}",
                     conversationId, e);
-            // ★ 刻意【不写】上下文层：否则会出现"模型知道、用户刷新却看不到"的分歧。
-            //   宁可一致地少，也不要"用户与模型看到的不一样"。
+            // 刻意【不写】上下文层：否则会出现"模型知道、用户刷新却看不到"的分歧。
+            // 宁可一致地少，也不要"用户与模型看到的不一样"。
             return;
         }
 
@@ -171,7 +168,7 @@ public class LayeredConversationMemory implements ConversationMemory {
     /**
      * clear / delete 的公共实现。
      *
-     * <p>★ <b>刻意不受熔断影响</b>：这是用户明确要求"把数据删掉"。
+     * <p><b>刻意不受熔断影响</b>：这是用户明确要求"把数据删掉"。
      * "这一层刚才失败过"不构成跳过的理由 —— 跳过会让用户继续看到已被要求删除的内容。
      */
     private void removeFromBoth(String conversationId, String action, Consumer<String> recordAction) {

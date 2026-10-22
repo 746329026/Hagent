@@ -7,42 +7,19 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 /**
  * <b>业务主库</b>（MySQL）数据源的配置项，绑定 {@code spring.datasource.*}。
  *
- * <h2>★★ 为什么需要这个类（一段真实的踩坑，值得完整读）</h2>
+ * <p>★★ 为什么需要这个类：{@link VectorStoreConfig} 为了"别让 PgVectorStore 抢到 MySQL 连接"
+ * 声明了 {@code pgVectorDataSource}，而这恰好把自动配置的 MySQL 数据源<b>顶掉</b>了
+ * （用户配置先于自动配置注册，{@code @ConditionalOnMissingBean} 于是不满足）。
+ * 后果是 {@code spring.datasource.*} 整段（url / 账号 / Hikari 池参数）<b>一直被静默忽略</b>，
+ * 而"全局 DataSource 是 MySQL"这句话是 {@code false} —— 只要还没有代码真正使用业务库，
+ * 就不会有任何症状。
  *
- * <p>本项目原本<b>没有</b>这个类，因为大家都以为"业务主库由 Spring Boot 的
- * {@code spring.datasource.*} 自动装配" —— 包括 {@link VectorStoreConfig} 的类注释
- * 与 {@link VectorStoreDataSourceProperties} 的类注释都这么写。
+ * <p>同一个原因还有一条约束：{@code JdbcTemplateAutoConfiguration} 的
+ * {@code @ConditionalOnMissingBean(JdbcOperations.class)} 也会因 {@code pgVectorJdbcTemplate}
+ * 而退避，因此 MySQL 访问<b>不要</b>按类型注入 {@code JdbcTemplate}，要按 bean 名取
+ * {@code dataSource}（见 {@code MemoryConfig.mysqlMessageStore}）。
  *
- * <p><b>但那个数据源从来就不存在。</b>阶段 7 接 MySQL 时实测（条件评估报告原文）：
- * <pre>
- *   DataSourceAutoConfiguration.PooledDataSourceConfiguration:
- *     Did not match:
- *     - @ConditionalOnMissingBean (types: javax.sql.DataSource, javax.sql.XADataSource)
- *       found beans of type 'javax.sql.DataSource' pgVectorDataSource
- * </pre>
- *
- * <p>也就是说：{@link VectorStoreConfig} 为了"别让 PgVectorStore 抢到 MySQL 连接"
- * 而声明了 {@code pgVectorDataSource} —— <b>而这个声明恰好把自动配置的 MySQL 数据源
- * 顶掉了</b>（用户配置先于自动配置注册，{@code @ConditionalOnMissingBean} 于是不满足）。
- *
- * <p>后果是 {@code application-local.yml} 里那整段 {@code spring.datasource.*}
- * （url / 账号 / 周期 / Hikari 池参数）<b>一直被静默忽略</b>，
- * 而"全局 DataSource 是 MySQL"这句话变成了 {@code false}。
- *
- * <p><b>为什么长期没暴露</b>：在阶段 7 之前，<b>没有任何代码使用业务主库</b> ——
- * 没有消费方，就没有症状。这正是本项目第 7 条一直在防的那类问题：
- * <b>不是写错了代码，而是没意识到这段配置根本没有被使用。</b>
- *
- * <p>顺带说明：{@code JdbcTemplateAutoConfiguration} 的
- * {@code @ConditionalOnMissingBean(JdbcOperations.class)} 也会因为
- * {@code pgVectorJdbcTemplate} 而退避，所以本项目的 MySQL 访问<b>不要</b>按类型注入
- * {@code JdbcTemplate}，而应按 bean 名取 {@code dataSource}（见
- * {@code MemoryConfig.mysqlMessageStore}）。
- *
- * <h2>关于默认值</h2>
- *
- * <p>与 {@link VectorStoreDataSourceProperties} 同一立场：字段默认值只是"属性缺省时仍可启动"
- * 的兜底，<b>真实取值一律以配置文件为准</b>。
+ * <p>字段默认值只是"属性缺省时仍可启动"的兜底，<b>真实取值一律以配置文件为准</b>。
  */
 @Getter
 @Setter
@@ -59,8 +36,7 @@ public class BusinessDataSourceProperties {
     /**
      * {@code spring.datasource.hikari.*} 那一段。
      *
-     * <p>做成嵌套对象而不是平铺字段，是为了让配置文件里的键名保持原样
-     * （那段配置是在自动装配还被使用时写的，键名是 Boot 的惯例）。
+     * <p>做成嵌套对象而不是平铺字段，是为了配置文件里的键名保持 Boot 的惯例不变。
      */
     private final Hikari hikari = new Hikari();
 

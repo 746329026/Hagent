@@ -13,33 +13,22 @@ import javax.sql.DataSource;
 /**
  * <b>业务主库</b>（MySQL）数据源的显式装配。
  *
- * <h2>★ 为什么必须显式声明，而不是指望自动装配</h2>
+ * <p>★ 为什么不能指望自动装配：{@code DataSourceAutoConfiguration} 带
+ * {@code @ConditionalOnMissingBean(DataSource.class)}，而 {@link VectorStoreConfig}
+ * 已声明 {@code pgVectorDataSource}（用户配置先于自动配置注册）→ 自动配置<b>退避</b>。
+ * 于是<b>"默认的那个"数据源消失了，而且不报错</b>，直到第一次真正访问业务库才暴露，
+ * 而症状（"表不存在"）会把排查引向完全错误的方向。
  *
- * <p>Spring Boot 的 {@code DataSourceAutoConfiguration} 带
- * {@code @ConditionalOnMissingBean(DataSource.class)}；而 {@link VectorStoreConfig}
- * 声明了 {@code pgVectorDataSource}，用户配置<b>先于</b>自动配置注册 ——
- * 于是自动配置<b>退避</b>，业务主库的数据源从来就不存在。
- * 完整证据与影响见 {@link BusinessDataSourceProperties} 的类注释。
- *
- * <p>换句话说：<b>当应用里出现第二个数据源时，"默认的那个"就消失了，而且不报错。</b>
- * 这是一个非常安静的失败模式 —— 直到有人第一次真正访问业务库才会暴露，
- * 而那时的症状（"表不存在"）会把人引向完全错误的方向。
- *
- * <h2>两个刻意的决定</h2>
- *
+ * <p>两个刻意的决定：
  * <ol>
- *   <li><b>{@code @Primary}</b>：业务主库是<b>主</b>数据源。
- *       这既符合语义，也让 Spring Boot 那些要求
- *       {@code @ConditionalOnSingleCandidate(DataSource.class)} 的自动配置
- *       （事务管理器等）能正常工作，而不用改它们的代码。</li>
- *   <li><b>保持 fail-fast</b>：业务数据不可缺失，连不上就<b>该启动失败</b>。
- *       这与向量库的策略相反（向量库不可用时检索降级即可，不该阻断启动）——
- *       两个数据源的失败策略不同是<b>有意</b>的，见 {@link VectorStoreConfig}。</li>
+ *   <li><b>{@code @Primary}</b>：业务主库是主数据源，也让要求
+ *       {@code @ConditionalOnSingleCandidate(DataSource.class)} 的自动配置（事务管理器等）能工作；</li>
+ *   <li><b>fail-fast</b>：业务数据不可缺失，连不上就该启动失败 —— 与向量库刻意相反
+ *       （向量库不可用时检索降级即可），见 {@link VectorStoreConfig}。</li>
  * </ol>
  *
- * <p>Bean 名字固定为 {@code dataSource}：其它组件（如记忆的记录层）按名字取它，
- * 以避开"按类型注入可能拿到 pgVectorDataSource"的歧义。
- * 名字由常量 {@link #BUSINESS_DATASOURCE_BEAN} 提供，避免各处硬编码字符串。
+ * <p>Bean 名固定为 {@code dataSource}：其它组件按名字取它，避开"按类型注入可能拿到
+ * pgVectorDataSource"的歧义。名字由常量 {@link #BUSINESS_DATASOURCE_BEAN} 提供。
  */
 @Slf4j
 @Configuration
@@ -52,8 +41,8 @@ public class BusinessDataSourceConfig {
     /**
      * 业务主库数据源（MySQL）。
      *
-     * <p>注意它<b>不</b>复用 {@code VectorStoreConfig} 的任何东西：
-     * 两者是不同的库、不同的失败策略、不同的池名，共用一个配置前缀只会带来混乱。
+     * <p>不复用 {@link VectorStoreConfig} 的任何东西：不同的库、不同的失败策略、不同的池名，
+     * 共用一个配置前缀只会带来混乱。
      */
     @Bean(name = BUSINESS_DATASOURCE_BEAN, destroyMethod = "close")
     @Primary
@@ -79,12 +68,9 @@ public class BusinessDataSourceConfig {
         try {
             return new HikariDataSource(config);
         } catch (Exception e) {
-            // ★ 把"连接失败"翻译成"你该做什么"。
-            //
-            //   这一段是**机制化**的产物：本项目已经两次遇到"容器没在跑 → 一片测试莫名全红"，
-            //   而 Hikari 的原始报错是 "Failed to initialize pool: Communications link failure" ——
-            //   它说了现象，没说原因，更没说修法。
-            //   （工作协议第 6 条：同一个操作性错误重复 ≥2 次，就必须机制化，不能靠"记得"。）
+            // ★ 把"连接失败"翻译成"你该做什么"：Hikari 的原始报错
+            //   （Failed to initialize pool: Communications link failure）只说了现象，
+            //   没说原因、更没说修法，而"容器没在跑"是最常见的那个原因。
             throw new IllegalStateException(String.format(
                     "业务主库（MySQL）连接失败：%s%n"
                             + "  url = %s%n"

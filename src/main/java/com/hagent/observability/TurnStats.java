@@ -9,30 +9,19 @@ import java.util.UUID;
 /**
  * 一轮对话的<b>账本</b> —— 边跑边记，收尾时产出一个不可变的 {@link TurnRecord}。
  *
- * <h2>★ 为什么需要这个可变对象（而不是直接攒局部变量）</h2>
+ * <p>为什么必须是可变对象而不是攒局部变量：账要在<b>三处</b>被记（每次模型调用的次数 / usage /
+ * 首 token、每次工具执行的耗时与次数、工作流规划），这三处跨了十几个方法、并且循环是<b>递归</b>的，
+ * 而 Java 的 lambda 只能捕获 effectively-final 变量 —— 累积器必须"活"在递归之外。
  *
- * <p>一轮的账要在<b>三处</b>被记：{@code loop} 每次模型调用（次数 + usage + 首 token）、
- * {@code handleToolCalls} 每次工具执行（耗时 + 次数）、工作流规划（也是一次模型调用）。
- * 这三处跨了十几个方法、并且循环是<b>递归</b>的（每步都走一遍）。
- * Java 的 lambda 只能捕获 effectively-final 变量 —— 累积器必须"活"在递归之外。
+ * <p>与 {@code AgentPipeline.LoopState} 的分工：LoopState 是"这次对话的内容"（消息、文本、思考、步号），
+ * 本类是"这一轮的账"（耗时、次数、token）—— 放一起会让工作流每步新建 LoopState 时把账本一起重置。
  *
- * <p>与 {@code AgentPipeline.LoopState} 的分工：
- * <b>LoopState 是"这次对话的内容"</b>（消息、文本、思考、步号），
- * <b>本类是"这一轮的账"</b>（耗时、次数、token）。放一起会让工作流的
- * {@code newStepState} 每步都新建一个 LoopState 时，把账本也一起重置掉。
+ * <p>计数器不需要加锁：Reactor 同一条链上的 onNext/onComplete 是<b>串行</b>的（切换线程不代表并发），
+ * 普通字段够用。唯一可能被两个线程同时碰的是 {@link #finish}（正常收尾一次、取消时
+ * {@code doFinally} 一次），所以它 {@code synchronized} 且<b>幂等</b>：第一次算出来的就是最终结果。
  *
- * <h2>★ 计数器为什么不需要加锁</h2>
- *
- * <p>Reactor 的 onNext/onComplete 在同一条链上是<b>串行</b>的（切换线程不代表并发），
- * 所以普通字段够用。唯一可能被两个线程同时碰的是 {@link #finish}：
- * 正常收尾时由 {@code concatWith} 里的那段调用，取消时由 {@code doFinally} 调用，
- * 因此那个方法加 {@code synchronized} 且<b>幂等</b>（第一次算出来的就是最终结果）。
- *
- * <h2>★ 为什么只收 {@code Usage}，不收 {@code ChatResponse}</h2>
- *
- * <p>{@code AgentPipeline} 的类注释声称"供应商耦合集中在那两个取值方法里"
- * （{@code textOf} / {@code reasoningOf}）。本类不去碰 {@code ChatResponse}，
- * 就守住了那条性质：换模型时这里一个字都不用改。
+ * <p>只收 {@code Usage}、不碰 {@code ChatResponse}：这样"供应商耦合集中在
+ * {@code textOf} / {@code reasoningOf} 两个取值方法"这条性质才守得住 —— 换模型时这里一个字都不用改。
  */
 public final class TurnStats {
 
@@ -79,9 +68,8 @@ public final class TurnStats {
     }
 
     /**
-     * 轮次标识 —— <b>在轮次开始时就有值</b>，所以工具审计能在中途带上它。
-     *
-     * <p>这是"收尾时一次性 INSERT"能成立的前提（见 {@code db/chat_turn.sql}）。
+     * 轮次标识 —— <b>在轮次开始时就有值</b>，所以工具审计能在中途带上它；
+     * 这也是"收尾时一次性 INSERT"能成立的前提。
      */
     public String turnId() {
         return turnId;
@@ -90,28 +78,20 @@ public final class TurnStats {
     /**
      * 记一次模型调用的<b>开始</b>（chat 的每一步、工作流的规划与每一步都算）。
      *
-     * <p>★ 为什么在"开始"就计数，而不是等流完成：调用可能<b>失败</b>
-     * （连接断了、上游 5xx、客户端中途断开）—— 而失败的那次同样花了钱、
-     * 同样让用户等了。只在成功路径计数，会让"一次失败的调用"从成本表里凭空消失。
-     *
-     * <p>于是"没拿到 usage 的调用次数"是<b>派生</b>出来的：
-     * {@code modelCalls - 拿到 usage 的调用数}（见 {@link #finish}）——
-     * 失败的调用天然落在"没拿到"里，不需要第三个计数器，也就不会漂移
-     * （协议第 13 条：同一个语义不要两处定义）。
+     * <p>在"开始"就计数而不是等流完成：调用可能失败（连接断了、上游 5xx、客户端中途断开），
+     * 而失败的那次同样花了钱。于是"没拿到 usage 的次数"是派生的（{@code modelCalls - usageCalls}）——
+     * 失败的调用天然落在"没拿到"里，不需要第三个计数器，也就不会漂移。
      */
     public void noteModelCallStart() {
         modelCalls++;
     }
 
     /**
-     * 记一次模型调用的<b>用量</b>（在这一次调用完成时传最后一片的 usage）。
+     * 记一次模型调用的<b>用量</b>（在这一调用完成时传最后一片的 usage）。
      *
-     * <p>★ 流式路径上 usage <b>只出现在收尾片</b>。每片都调本方法会把同一个数
-     * 重复累加 N 次（一次 184 片的回答会让成本虚高两个数量级）。
-     *
-     * <p>★ {@code EmptyUsage} 与 {@code null} 一律视为"没拿到"：
-     * {@code EmptyUsage.getPromptTokens()} 返回 0（javap 实证），
-     * 若按数值累加，"没数据"就会被记成"这轮花了 0 token"。
+     * <p>流式路径上 usage <b>只出现在收尾片</b>：每片都调会把同一个数累加 N 次（184 片会让成本虚高两个量级）。
+     * {@code EmptyUsage} 与 {@code null} 一律视为"没拿到"：前者 {@code getPromptTokens()} 返回 0，
+     * 按数值累加会把"没数据"记成"这轮花了 0 token"。
      */
     public void noteModelUsage(Usage usage) {
         if (usage == null || usage instanceof EmptyUsage) {
@@ -210,19 +190,17 @@ public final class TurnStats {
     /**
      * 到目前为止本轮花了多少毫秒 —— 给"← 响应"那行日志用。
      *
-     * <p>★ 与 {@link #finish} 里算的是<b>同一个式子</b>（同一个起点、同一个单位）。
-     * 让日志与落库各自算一遍时间，就会出现"日志说 7270ms、库里是 7305ms"
-     * 这种两个来源漂移的经典问题（协议第 13 条）。
+     * <p>与 {@link #finish} 是<b>同一个式子</b>：各算一遍就会出现"日志 7270ms、库里 7305ms"的漂移。
      */
     public long elapsedMs() {
         return Math.max(0, (System.nanoTime() - startNanos) / 1_000_000);
     }
 
     /**
-     * 整轮的用量合计 —— 给 {@code Final.usage} 用（阶段 14 起它不再是"最后一次调用"）。
+     * 整轮的用量合计 —— 给 {@code Final.usage} 用（它不再是"最后一次调用"的量）。
      *
-     * <p>一次都没拿到时返回 {@link EmptyUsage}（而不是 {@code null}）：
-     * 与框架"没有数据用 EmptyUsage 表示"的约定保持一致，日志里一眼能看出是"没数据"。
+     * <p>一次都没拿到时返回 {@link EmptyUsage} 而不是 {@code null}：与框架"没数据用 EmptyUsage 表示"
+     * 的约定一致，日志里一眼能看出是"没数据"。
      */
     public Usage totalUsage() {
         if (totalTokens == null && promptTokens == null && completionTokens == null) {
@@ -231,7 +209,7 @@ public final class TurnStats {
         return new DefaultUsage(promptTokens, completionTokens, totalTokens);
     }
 
-    // ==================== 内部 ====================
+    // 内部
 
     /** 判定矩阵 —— 见 {@link TurnStatus} 的类注释（全项目只有这一处实现）。 */
     private TurnStatus decide(TurnStatus observed) {
